@@ -1,0 +1,52 @@
+# treebox doctor --repo __ROOT__/repo --isolation docker --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "isolation": "docker",
+  "checks": [
+    {
+      "name": "git",
+      "ok": true,
+      "detail": "__GITVER__"
+    },
+    {
+      "name": "repo",
+      "ok": true,
+      "detail": "__ROOT__/repo"
+    },
+    {
+      "name": "uid/gid",
+      "ok": true,
+      "detail": "__UID__:__GID__"
+    },
+    {
+      "name": "login: claude",
+      "ok": true,
+      "detail": "__ROOT__/home/.claude"
+    },
+    {
+      "name": "login: codex",
+      "ok": true,
+      "detail": "__ROOT__/home/.codex"
+    },
+    {
+      "name": ".env",
+      "ok": true,
+      "detail": "__ROOT__/repo/.env"
+    },
+    {
+      "name": "git auth",
+      "ok": true,
+      "detail": "authenticated \u00b7 fresh fetch will succeed"
+    },
+    {
+      "name": "isolation: docker",
+      "ok": true,
+      "detail": "docker daemon ok"
+    }
+  ],
+  "advisories": []
+}
+# --- stderr ---

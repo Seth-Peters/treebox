@@ -1,0 +1,69 @@
+name: Autofix
+
+# Applies ruff's auto-fixes (`ruff check --fix` + `ruff format`) to pull requests
+# and commits the result back to the PR branch. This is the CI counterpart to the
+# pre-commit hooks: if a change lands unformatted (hooks skipped), the branch is
+# fixed in place instead of just failing the CI gate. Skips fork PRs, where the
+# workflow token cannot push, and its own commits, to avoid loops.
+#
+# Gotcha: pushes made with the default GITHUB_TOKEN (from actions/checkout) do
+# NOT trigger new workflow runs. So the auto-fixed commit this job pushes will
+# not re-run ci.yml. Two implications:
+#   - If branch protection REQUIRES the CI status checks, the auto-fixed SHA will
+#     have no reported checks and the PR will stall. The remedy is to check out
+#     and push using a PAT or GitHub App token stored as a repo secret (e.g.
+#     AUTOFIX_TOKEN) instead of GITHUB_TOKEN, so the push re-triggers CI.
+#   - To close the "merged with a commit CI never validated" hole regardless,
+#     this job re-runs the ruff + mypy checks on the fixed tree below and fails
+#     rather than pushing if they don't pass, so the exact pushed commit is
+#     validated within this run.
+
+on:
+  pull_request:
+
+concurrency:
+  group: autofix-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  autofix:
+    name: ruff --fix
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: ruff check --fix
+        run: uv run --extra dev ruff check --fix src tests
+
+      - name: ruff format
+        run: uv run --extra dev ruff format src tests
+
+      - name: Validate fixed tree
+        run: |
+          uv run --extra dev ruff check src tests
+          uv run --extra dev ruff format --check src tests
+          uv run --extra dev mypy
+
+      - name: Commit fixes
+        run: |
+          if git diff --quiet; then
+            echo "No formatting or lint fixes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "style: apply ruff --fix and format"
+          git push

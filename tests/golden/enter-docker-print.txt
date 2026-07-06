@@ -1,0 +1,14 @@
+# treebox enter golden-docker --repo __ROOT__/repo --root __ROOT__/wts --print
+# exit: 0
+# --- stdout ---
+docker exec -i -u agent -w __ROOT__/wts/golden-docker treebox-golden-docker-__HASH__ claude --dangerously-skip-permissions
+# --- stderr ---
+
+  ● enter   golden-docker
+
+    isolation       docker  →  claude
+
+  runner: docker (daemon reachable)
+  ✓ secrets         copied
+  ✓ credentials     scoped copies refreshed
+  · deps            unchanged · skipping setup

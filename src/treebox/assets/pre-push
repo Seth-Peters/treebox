@@ -1,0 +1,27 @@
+#!/bin/sh
+# treebox pre-push guard: placeholder branches are un-pushable by design.
+#
+# Installed per-worktree by `treebox create` (a private core.hooksPath — never
+# the shared repo hooks). The treebox/ prefix marks an auto-generated name; a
+# PR must never carry one. Renaming clears the guard — use a conventional
+# branch name (feature/<name>, fix/<name>, chore/<name>, …):
+#   git branch -m <type>/<short-name>
+# `git push --no-verify` remains the deliberate human escape hatch.
+status=0
+while read -r local_ref _local_oid _remote_ref _remote_oid; do
+    case "$local_ref" in
+    refs/heads/treebox/*)
+        branch="${local_ref#refs/heads/}"
+        {
+            printf '%s\n' "✗ treebox: refusing to push placeholder branch '$branch'."
+            printf '%s\n' "  ↳ name this work first, then push again:  git branch -m <type>/<short-name>"
+            printf '%s\n' "  ↳ we use conventional-commits style branch names — pick the type that fits"
+            printf '%s\n' "    the change: feature/user-auth, fix/login-race, chore/bump-deps,"
+            printf '%s\n' "    docs/api-guide, refactor/db-layer, test/flaky-suite, …"
+            printf '%s\n' "  ↳ the treebox/ prefix marks auto-generated names; PRs should never carry them."
+        } >&2
+        status=1
+        ;;
+    esac
+done
+exit $status

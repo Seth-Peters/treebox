@@ -1,0 +1,24 @@
+# treebox enter golden-docker --repo __ROOT__/repo --root __ROOT__/wts --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "name": "golden-docker",
+  "worktree_path": "__ROOT__/wts/golden-docker",
+  "branch": "golden-docker",
+  "base": "main",
+  "entry_command": [
+    "docker",
+    "exec",
+    "-i",
+    "-u",
+    "agent",
+    "-w",
+    "__ROOT__/wts/golden-docker",
+    "treebox-golden-docker-__HASH__",
+    "claude",
+    "--dangerously-skip-permissions"
+  ],
+  "created": false
+}
+# --- stderr ---

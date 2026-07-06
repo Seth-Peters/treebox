@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Lint
+        run: uv run -p ${{ matrix.python-version }} --extra dev ruff check src tests
+
+      - name: Format
+        run: uv run -p ${{ matrix.python-version }} --extra dev ruff format --check src tests
+
+      - name: Type check
+        run: uv run -p ${{ matrix.python-version }} --extra dev mypy
+
+      - name: Test
+        # Report-only coverage: surfaces untested branches without gating merges.
+        run: uv run -p ${{ matrix.python-version }} --extra dev python -m pytest --cov=treebox --cov-report=term-missing
+
+  smoke:
+    name: live host-runner smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      # Full reproducible validation: lint, type checks, shell asset checks,
+      # tests, golden CLI snapshots, and a live `treebox create` against a
+      # throwaway local git remote.
+      - name: validate.sh
+        run: ./scripts/validate.sh

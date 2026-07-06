@@ -1,0 +1,27 @@
+{
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "TZ": "UTC",
+      "CODEX_CLI_VERSION": "latest",
+      "CLAUDE_CODE_VERSION": "latest"
+    }
+  },
+  "user": "agent",
+  "mounts": [
+    "type=volume,source=treebox-shellhistory-${workspaceName},target=/commandhistory"
+  ],
+  "env": {
+    "CODEX_HOME": "/home/agent/.codex",
+    "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": "",
+    "ALL_PROXY": "",
+    "NO_PROXY": "",
+    "http_proxy": "",
+    "https_proxy": "",
+    "all_proxy": "",
+    "no_proxy": ""
+  },
+  "postCreate": "bash /usr/local/bin/post-create.sh"
+}

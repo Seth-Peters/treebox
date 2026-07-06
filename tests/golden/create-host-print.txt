@@ -1,0 +1,17 @@
+# treebox create golden-host --repo __ROOT__/repo --root __ROOT__/wts --print
+# exit: 0
+# --- stdout ---
+sh -c 'cd __ROOT__/wts/golden-host && exec claude --dangerously-skip-permissions'
+# --- stderr ---
+
+  ● create   golden-host
+
+    branch          golden-host
+    base            main
+    isolation       host  →  claude
+
+  ✓ fetch           origin up to date
+  ✓ worktree        golden-host from origin/main
+  ✓ push guard      treebox/* refs are un-pushable
+  ✓ secrets         copied
+  ✓ setup · hook 1  done

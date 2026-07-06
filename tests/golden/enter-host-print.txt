@@ -1,0 +1,12 @@
+# treebox enter golden-host --repo __ROOT__/repo --root __ROOT__/wts --print
+# exit: 0
+# --- stdout ---
+sh -c 'cd __ROOT__/wts/golden-host && exec claude --dangerously-skip-permissions'
+# --- stderr ---
+
+  ● enter   golden-host
+
+    isolation       host  →  claude
+
+  ✓ secrets         copied
+  · deps            unchanged · skipping setup

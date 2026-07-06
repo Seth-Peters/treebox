@@ -1,0 +1,17 @@
+# treebox create golden/slash --repo __ROOT__/repo --root __ROOT__/wts --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "name": "golden--slash",
+  "worktree_path": "__ROOT__/wts/golden--slash",
+  "branch": "golden/slash",
+  "base": "main",
+  "entry_command": [
+    "sh",
+    "-c",
+    "cd __ROOT__/wts/golden--slash && exec claude --dangerously-skip-permissions"
+  ],
+  "created": true
+}
+# --- stderr ---

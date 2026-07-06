@@ -1,0 +1,399 @@
+/* treebox docs — minimal, paper-and-moss look to match the logo.
+   Self-contained: system font stacks only, no external requests. */
+
+:root {
+  --md-text-font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --md-code-font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo,
+    Consolas, "Liberation Mono", monospace;
+  --tx-radius: 10px;
+}
+
+/* ---- palette -------------------------------------------------------- */
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: #3e6b4f;
+  --md-primary-fg-color--light: #4e8763;
+  --md-primary-fg-color--dark: #2f5540;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: #2f7a4d;
+  --md-accent-fg-color--transparent: #2f7a4d1a;
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: #ffffffb3;
+}
+
+/* Warm paper background in light mode */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #faf9f5;
+  --md-default-fg-color: #232a25;
+  --md-default-fg-color--light: #4b544d;
+  --md-default-fg-color--lighter: #8a9189;
+  --md-default-fg-color--lightest: #e8e6de;
+  --md-typeset-color: #2a312b;
+  --md-typeset-a-color: #35674a;
+  --md-code-bg-color: #f0efe8;
+  --md-code-fg-color: #35402f;
+  --md-footer-bg-color: #22302a;
+  --md-footer-bg-color--dark: #1b2621;
+}
+
+/* Mossy dark mode */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #151a17;
+  --md-default-fg-color--lightest: #232a25;
+  --md-typeset-a-color: #7fb894;
+  --md-code-bg-color: #1d2420;
+  --md-footer-bg-color: #10140f;
+  --md-footer-bg-color--dark: #0c0f0b;
+  --md-primary-fg-color: #7fb894;
+  --md-accent-fg-color: #93cba7;
+  --md-accent-fg-color--transparent: #93cba71a;
+}
+
+/* ---- header: quiet, translucent, borderline ------------------------- */
+
+.md-header {
+  background: color-mix(in srgb, var(--md-default-bg-color) 88%, transparent);
+  color: var(--md-default-fg-color);
+  box-shadow: none;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  backdrop-filter: saturate(1.2) blur(8px);
+  -webkit-backdrop-filter: saturate(1.2) blur(8px);
+}
+
+.md-header__title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.md-header__button.md-logo img {
+  height: 1.6rem;
+  width: 1.6rem;
+}
+
+[data-md-color-scheme="default"] .md-search__form {
+  background: #eeede6;
+}
+
+[data-md-color-scheme="default"] .md-search__input::placeholder,
+[data-md-color-scheme="default"] .md-search__icon {
+  color: var(--md-default-fg-color--light);
+}
+
+[data-md-color-scheme="slate"] .md-search__form {
+  background: #232a25;
+}
+
+/* ---- typography ------------------------------------------------------ */
+
+.md-typeset {
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset h2 {
+  margin-top: 2.2em;
+}
+
+/* ---- code blocks ----------------------------------------------------- */
+
+.md-typeset pre > code {
+  border-radius: var(--tx-radius);
+  padding: 0.9em 1.1em;
+}
+
+.md-typeset code {
+  border-radius: 4px;
+}
+
+.md-clipboard,
+.md-code__button {
+  color: var(--md-default-fg-color--lighter);
+}
+
+/* ---- tables ---------------------------------------------------------- */
+
+.md-typeset table:not([class]) {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: var(--tx-radius);
+  box-shadow: none;
+  font-size: 0.74rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--md-code-bg-color);
+  color: var(--md-default-fg-color);
+  font-weight: 600;
+}
+
+/* Don't wrap code spans mid-word inside table cells; the table scrolls */
+.md-typeset table:not([class]) code {
+  white-space: nowrap;
+}
+
+/* ---- buttons --------------------------------------------------------- */
+
+.md-typeset .md-button {
+  border-radius: 999px;
+  padding: 0.55em 1.5em;
+  font-weight: 600;
+  border-width: 1px;
+}
+
+.md-typeset .md-button--primary {
+  background-color: var(--md-primary-fg-color);
+  border-color: var(--md-primary-fg-color);
+  color: #fff;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  color: #10140f;
+}
+
+/* ---- grid cards ------------------------------------------------------ */
+
+.md-typeset .grid.cards > ul > li {
+  border-radius: var(--tx-radius);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  background: color-mix(in srgb, var(--md-default-bg-color) 60%, var(--md-code-bg-color));
+  transition: border-color 0.2s;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-primary-fg-color--light, var(--md-primary-fg-color));
+  box-shadow: none;
+}
+
+/* ---- hero (landing page) --------------------------------------------- */
+
+.tx-hero {
+  display: flex;
+  align-items: center;
+  gap: 2.5rem;
+  margin: 2.5rem 0 3rem;
+}
+
+.tx-hero__content {
+  flex: 1 1 60%;
+}
+
+.tx-hero__content h1 {
+  font-size: 2.1rem;
+  line-height: 1.15;
+  margin-bottom: 0.6rem;
+}
+
+.tx-hero__content p {
+  font-size: 0.9rem;
+  color: var(--md-default-fg-color--light);
+  max-width: 34rem;
+}
+
+.tx-hero__image {
+  flex: 0 0 auto;
+}
+
+.tx-hero__image img {
+  width: 13rem;
+  height: auto;
+  display: block;
+}
+
+.tx-hero__buttons {
+  margin-top: 1.4rem;
+}
+
+.tx-hero__buttons .md-button {
+  margin-right: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+@media screen and (max-width: 44em) {
+  .tx-hero {
+    flex-direction: column-reverse;
+    text-align: center;
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+  .tx-hero__content p {
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .tx-hero__image img {
+    width: 9rem;
+  }
+}
+
+/* ---- terminal mockup -------------------------------------------------- */
+
+/* Terminal output palette, scheme-aware */
+[data-md-color-scheme="default"] {
+  --tx-ok: #2f8a4f;
+  --tx-err: #b3574d;
+  --tx-acc: #3e6b4f;
+  --tx-dim: #8a9189;
+}
+
+[data-md-color-scheme="slate"] {
+  --tx-ok: #7fd49a;
+  --tx-err: #d98a80;
+  --tx-acc: #7fb894;
+  --tx-dim: #7d857e;
+}
+
+.c-ok { color: var(--tx-ok); }
+.c-err { color: var(--tx-err); }
+.c-acc { color: var(--tx-acc); }
+.c-dim { color: var(--tx-dim); }
+
+/* Hero demo GIF — the full lifecycle, rendered with Remotion */
+.tx-demo {
+  margin: 1.5rem auto;
+  max-width: 704px;
+}
+
+.tx-demo img {
+  display: block;
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* "Copy page" button — an agent-ready Markdown copy of the whole page.
+   Injected at the top-right of every article by javascripts/treebox.js,
+   above the H1. Degrades to nothing without JS. */
+.tx-copy-page-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 0.35rem;
+}
+
+.tx-copy-page {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.28rem 0.62rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--md-default-fg-color--light);
+  background: var(--md-code-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.tx-copy-page:hover {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+/* After a copy: the whole pill goes green and the copy icon swaps to a
+   check — currentColor makes the checkmark green to match. */
+.tx-copy-page.is-copied {
+  color: var(--tx-ok);
+  border-color: currentColor;
+}
+
+/* Icon swap. Each selector carries the same class+element specificity so the
+   toggle is decided by state, not by rule ordering: copy icon shows by
+   default, check icon shows only when copied. */
+.tx-copy-page svg { display: block; }
+.tx-copy-page svg.tx-copy-page__check { display: none; }
+.tx-copy-page.is-copied svg:not(.tx-copy-page__check) { display: none; }
+.tx-copy-page.is-copied svg.tx-copy-page__check { display: block; }
+
+/* Label with zero layout shift: both words share one grid cell, so the pill is
+   always as wide as "Copy page"; copying only toggles which word is visible. */
+.tx-copy-page__label { display: inline-grid; }
+.tx-copy-page__word {
+  grid-area: 1 / 1;
+  text-align: left;
+  white-space: nowrap;
+}
+.tx-copy-page__word--done { visibility: hidden; }
+.tx-copy-page.is-copied .tx-copy-page__word--copy { visibility: hidden; }
+.tx-copy-page.is-copied .tx-copy-page__word--done { visibility: visible; }
+
+
+/* Console code blocks: green unselectable prompt, so manual selection and
+   the copy button (see javascripts/treebox.js) both grab commands only. */
+.md-typeset .highlight .gp {
+  color: var(--tx-ok);
+  user-select: none;
+}
+
+/* Balance the four feature cards into 2×2 on wide screens */
+@media screen and (min-width: 60em) {
+  .md-typeset .grid.cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ---- does / doesn't lists --------------------------------------------- */
+
+.md-typeset .tx-checklist ul {
+  list-style: none;
+  padding-left: 0.1em;
+}
+
+.md-typeset .tx-checklist ul > li {
+  margin-left: 0;
+}
+
+.md-typeset .tx-yes {
+  color: #3e8e5a;
+}
+
+.md-typeset .tx-no {
+  color: #b3574d;
+}
+
+.md-typeset .twemoji.tx-yes svg,
+.md-typeset .twemoji.tx-no svg {
+  vertical-align: -0.15em;
+}
+
+/* ---- misc polish ------------------------------------------------------ */
+
+.md-nav__title {
+  color: var(--md-default-fg-color--light);
+}
+
+.md-footer-meta {
+  font-size: 0.64rem;
+}
+
+.md-typeset :is(.admonition, details) {
+  border-radius: var(--tx-radius);
+  font-size: 0.74rem;
+}
+
+/* Tint "note" admonitions moss-green to match the palette */
+.md-typeset .admonition.note,
+.md-typeset details.note {
+  border-color: #4e8763;
+}
+
+.md-typeset .note > .admonition-title,
+.md-typeset .note > summary {
+  background-color: #4e876314;
+}
+
+.md-typeset .note > .admonition-title::before,
+.md-typeset .note > summary::before {
+  background-color: #4e8763;
+}

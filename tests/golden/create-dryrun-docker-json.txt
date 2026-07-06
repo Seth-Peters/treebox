@@ -1,0 +1,22 @@
+# treebox create golden-docker --repo __ROOT__/repo --root __ROOT__/wts --isolation docker --dry-run --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "dry_run": true,
+  "name": "golden-docker",
+  "worktree_path": "__ROOT__/wts/golden-docker",
+  "branch": "golden-docker",
+  "commands": [
+    "git -C __ROOT__/repo fetch origin --quiet",
+    "git -C __ROOT__/repo worktree add -b golden-docker __ROOT__/wts/golden-docker origin/main",
+    "# install pre-push guard: per-worktree core.hooksPath -> <private git dir>/treebox-hooks (treebox/* refs are un-pushable)",
+    "cp .env __ROOT__/wts/golden-docker/.env",
+    "# render default template into __ROOT__/wts/.containers/golden-docker (operator-owned, outside the worktree)",
+    "# stage scoped login-file copies into __ROOT__/wts/.containers/golden-docker/credentials (the live ~/.claude / ~/.codex are never mounted)",
+    "docker build -t treebox-golden-docker-__HASH__ -f __ROOT__/wts/.containers/golden-docker/Dockerfile --build-arg TZ=UTC --build-arg CODEX_CLI_VERSION=latest --build-arg CLAUDE_CODE_VERSION=latest --build-arg USER_UID=__UID__ --build-arg USER_GID=__GID__ __ROOT__/wts/.containers/golden-docker",
+    "docker run -d --init --name treebox-golden-docker-__HASH__ --label treebox.workspace=__ROOT__/wts/golden-docker -e CODEX_HOME=/home/agent/.codex -e CLAUDE_CONFIG_DIR=/home/agent/.claude -e HTTP_PROXY= -e HTTPS_PROXY= -e ALL_PROXY= -e NO_PROXY= -e http_proxy= -e https_proxy= -e all_proxy= -e no_proxy= -e UV_CACHE_DIR=/caches/uv -e npm_config_store_dir=/caches/pnpm -e npm_config_cache=/caches/npm -e GOMODCACHE=/caches/go -e CARGO_HOME=/caches/cargo --mount type=volume,source=treebox-shellhistory-golden-docker,target=/commandhistory --mount type=bind,source=__ROOT__/wts/.containers/golden-docker/credentials/claude,target=/home/agent/.claude --mount type=bind,source=__ROOT__/wts/.containers/golden-docker/credentials/codex,target=/home/agent/.codex --mount type=bind,source=__ROOT__/wts/golden-docker,target=__ROOT__/wts/golden-docker --mount type=bind,source=__ROOT__/repo/.git,target=__ROOT__/repo/.git --mount type=bind,source=__ROOT__/repo/.git/hooks,target=__ROOT__/repo/.git/hooks,readonly --mount type=bind,source=__ROOT__/home/.cache/uv,target=/caches/uv --mount type=bind,source=__ROOT__/home/.local/share/pnpm/store,target=/caches/pnpm --mount type=bind,source=__ROOT__/home/.npm,target=/caches/npm --mount type=bind,source=__ROOT__/home/go/pkg/mod,target=/caches/go --mount type=bind,source=__ROOT__/home/.cargo,target=/caches/cargo treebox-golden-docker-__HASH__ sleep infinity",
+    "docker exec -u agent -w __ROOT__/wts/golden-docker treebox-golden-docker-__HASH__ sh -c 'bash /usr/local/bin/post-create.sh'"
+  ]
+}
+# --- stderr ---

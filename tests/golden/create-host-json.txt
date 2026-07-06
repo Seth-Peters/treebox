@@ -1,0 +1,17 @@
+# treebox create golden-host-json --repo __ROOT__/repo --root __ROOT__/wts --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "name": "golden-host-json",
+  "worktree_path": "__ROOT__/wts/golden-host-json",
+  "branch": "golden-host-json",
+  "base": "main",
+  "entry_command": [
+    "sh",
+    "-c",
+    "cd __ROOT__/wts/golden-host-json && exec claude --dangerously-skip-permissions"
+  ],
+  "created": true
+}
+# --- stderr ---

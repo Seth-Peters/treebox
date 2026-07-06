@@ -1,0 +1,4 @@
+{
+  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
+  "env": { "TREEBOX_FIREWALL": "1" }
+}

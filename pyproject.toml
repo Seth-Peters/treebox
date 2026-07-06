@@ -1,0 +1,88 @@
+[project]
+name = "treebox"
+dynamic = ["version"]
+description = "Isolated, ready-to-run git worktrees for AI coding agents — host-native or docker-sandboxed."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Seth Peters" }]
+keywords = ["git", "worktree", "docker", "sandbox", "ai", "agents", "claude", "codex"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+# rich is imported directly (output.py, cli.py) — declared first-party, not
+# left to arrive transitively via typer's batteries-included distribution.
+dependencies = ["typer>=0.12,<1.0", "questionary>=2,<3", "rich>=13,<16"]
+
+[project.urls]
+Homepage = "https://github.com/Seth-Peters/treebox"
+Documentation = "https://seth-peters.github.io/treebox/"
+Repository = "https://github.com/Seth-Peters/treebox"
+Issues = "https://github.com/Seth-Peters/treebox/issues"
+
+[project.scripts]
+treebox = "treebox.cli:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.15", "mypy>=1.14", "pre-commit>=4"]
+docs = ["mkdocs-material>=9.5"]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+# Version is derived from the latest git tag (e.g. v0.4.0 -> 0.4.0). Untagged
+# commits build as a dev version (0.4.1.devN), which conveniently gives every
+# commit a unique, uploadable version for TestPyPI.
+[tool.hatch.version]
+source = "vcs"
+
+# Drop the "+g<hash>" local-version segment: PyPI/TestPyPI reject local versions,
+# so dev builds need to be plain "0.4.1.devN" to be uploadable.
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/treebox"]
+# Non-Python assets (Dockerfile, *.sh, container.json) live under the package
+# dir and ship as package data automatically; they're read via importlib.resources.
+artifacts = ["src/treebox/assets/**"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer's declarative API puts these calls in parameter defaults by design.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true

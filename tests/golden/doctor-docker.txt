@@ -1,0 +1,19 @@
+# treebox doctor --repo __ROOT__/repo --isolation docker
+# exit: 0
+# --- stdout ---
+
+  ● doctor   isolation: docker
+
+    ✓ git                 __GITVER__
+    ✓ repo                __ROOT__/repo
+    ✓ uid/gid             __UID__:__GID__
+    ✓ login: claude       __ROOT__/home/.claude
+    ✓ login: codex        __ROOT__/home/.codex
+    ✓ .env                __ROOT__/repo/.env
+    ✓ git auth            authenticated · fresh fetch will succeed
+    ✓ isolation: docker   docker daemon ok
+
+  ✓ everything looks good
+
+# --- stderr ---
+  runner: docker (daemon reachable)

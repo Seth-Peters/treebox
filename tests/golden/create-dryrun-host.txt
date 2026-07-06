@@ -1,0 +1,17 @@
+# treebox create golden-host --repo __ROOT__/repo --root __ROOT__/wts --dry-run
+# exit: 0
+# --- stdout ---
+# --- stderr ---
+
+  ● create   golden-host  ·  dry run
+
+    worktree        __ROOT__/wts/golden-host
+    branch          golden-host
+    isolation       host  →  claude
+
+    $ git -C __ROOT__/repo fetch origin --quiet
+    $ git -C __ROOT__/repo worktree add -b golden-host __ROOT__/wts/golden-host origin/main
+    # install pre-push guard: per-worktree core.hooksPath -> <private git dir>/treebox-hooks (treebox/* refs are un-pushable)
+    $ cp .env __ROOT__/wts/golden-host/.env
+    $ sh -c 'echo ran >> setup.log'
+

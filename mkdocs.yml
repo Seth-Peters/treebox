@@ -1,0 +1,87 @@
+site_name: treebox
+site_description: >-
+  Isolated, ready-to-run git worktrees for AI coding agents —
+  host-native or docker-sandboxed.
+site_url: https://seth-peters.github.io/treebox/
+copyright: >-
+  Built by <a href="https://www.linkedin.com/in/seth-peters/">Seth Peters</a>
+  · Apache License 2.0
+
+# Carry each page's raw Markdown source into the build so the "Copy page"
+# button (javascripts/treebox.js) can offer an agent-ready copy, offline.
+hooks:
+  - hooks/copy_page.py
+
+nav:
+  - Overview: index.md
+  - Install: install.md
+  - Usage: usage.md
+  - How it works: how-it-works.md
+  - Agents & sandboxing: agents.md
+  - Configuration: configuration.md
+
+theme:
+  name: material
+  logo: assets/treebox-logo.png
+  favicon: assets/treebox-logo.png
+  # No Google Fonts — the site ships self-contained and uses a system stack
+  # defined in stylesheets/extra.css.
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: "#"
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: false
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/treebox.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Seth-Peters/treebox
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/treebox/
+    - icon: fontawesome/brands/linkedin
+      link: https://www.linkedin.com/in/seth-peters/
+      name: Seth Peters on LinkedIn

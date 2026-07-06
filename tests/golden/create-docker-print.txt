@@ -1,0 +1,22 @@
+# treebox create golden-docker --repo __ROOT__/repo --root __ROOT__/wts --isolation docker --print
+# exit: 0
+# --- stdout ---
+docker exec -i -u agent -w __ROOT__/wts/golden-docker treebox-golden-docker-__HASH__ claude --dangerously-skip-permissions
+# --- stderr ---
+
+  ● create   golden-docker
+
+    branch          golden-docker
+    base            main
+    isolation       docker  →  claude
+
+  runner: docker (daemon reachable)
+  ✓ fetch           origin up to date
+  ✓ worktree        golden-docker from origin/main
+  ✓ push guard      treebox/* refs are un-pushable
+  ✓ secrets         copied
+  ✓ sandbox files   templates written (outside worktree)
+  ✓ credentials     scoped copies staged (outside worktree)
+  ✓ image           built
+  ✓ container       started
+  ✓ setup           post-create complete
