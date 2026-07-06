@@ -12,6 +12,7 @@
   <a href="https://github.com/Seth-Peters/treebox/actions/workflows/ci.yml"><img src="https://github.com/Seth-Peters/treebox/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://seth-peters.github.io/treebox/"><img src="https://img.shields.io/badge/docs-seth--peters.github.io%2Ftreebox-2f6f4f" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-2f6f4f" alt="Platform: macOS and Linux">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2f6f4f" alt="Apache 2.0 License"></a>
   <a href="https://www.linkedin.com/in/seth-peters/"><img src="https://img.shields.io/badge/LinkedIn-Seth%20Peters-0a66c2?logo=linkedin&logoColor=white" alt="Seth Peters on LinkedIn"></a>
 </p>
