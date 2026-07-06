@@ -53,9 +53,9 @@ test against a throwaway local remote:
 ./scripts/validate.sh
 ```
 
-For issue #141 behavior-preserving refactors, `scripts/golden-diff.sh` is the
-focused snapshot-only gate. Refresh snapshots only after the issue explicitly
-accepts a behavior change.
+For behavior-preserving refactors, `scripts/golden-diff.sh` is the focused
+snapshot-only gate. Refresh snapshots only after you've deliberately accepted a
+behavior change.
 
 ```bash
 scripts/golden-diff.sh
