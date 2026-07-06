@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Golden output snapshots for the CLI's observable surface (issue #141, PR 0).
+# Golden output snapshots for the CLI's observable surface.
 #
 # Runs a fixed matrix of commands — doctor, create --print/--dry-run,
 # enter --print, and their --json forms, for both isolations — against a
 # hermetic throwaway repo, normalizes the machine-specific bits (paths,
 # uid/gid, git version, container-name digests), and diffs the result against
-# the committed snapshots in tests/golden/. The refactor PRs under issue #141
-# must leave every snapshot byte-identical: the "output identical" gate is
+# the committed snapshots in tests/golden/. Behavior-preserving changes must
+# leave every snapshot byte-identical: the "output identical" gate is
 # mechanical, not eyeballed.
 #
 #   scripts/golden-diff.sh            # compare against tests/golden/ (CI gate)
@@ -162,9 +162,9 @@ run_case enter-docker-json    "$HOME_FAKE" enter golden-docker "${RW[@]}" --json
 
 if [[ "$MODE" == "diff" && "$FAILED" -ne 0 ]]; then
   echo >&2
-  echo "golden-diff: OUTPUT CHANGED — the stability contract (issue #141) requires" >&2
-  echo "byte-identical CLI output. If the change is intentional, discuss on the" >&2
-  echo "issue first; only regenerate with --update after that decision." >&2
+  echo "golden-diff: OUTPUT CHANGED — the output-stability contract requires" >&2
+  echo "byte-identical CLI output. Only regenerate with --update once you have" >&2
+  echo "confirmed the change is intentional." >&2
   exit 1
 fi
 echo "golden-diff: all snapshots match"
