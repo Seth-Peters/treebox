@@ -67,6 +67,25 @@ For docs-only changes, this is enough:
 uv run --extra docs mkdocs build --strict
 ```
 
+## Commit messages
+
+treebox uses [Conventional Commits](https://www.conventionalcommits.org/):
+`type(scope): summary`, imperative and lowercase. Common types are `feat`,
+`fix`, `docs`, `refactor`, `test`, and `chore`.
+
+```
+fix: copy .env before the runner setup step
+feat(runners): add a podman isolation backend
+docs: document the template command
+```
+
+**Breaking changes** take a `!` (`feat!:`, `fix!:`) or a `BREAKING CHANGE:`
+footer. treebox's public contract is its CLI surface, its `--json` payloads
+(which carry a `schemaVersion`), and its exit codes: if you change that
+observable output, bump `SCHEMA_VERSION` when the JSON shape changes and
+regenerate the golden snapshots with `scripts/golden-diff.sh --update`. Note
+user-facing changes under `[Unreleased]` in `CHANGELOG.md`.
+
 ## Boundaries
 
 Please preserve the basics: fresh refs by default, no trust in target-repo sandbox config, and stable CLI output for scripts.
