@@ -587,10 +587,10 @@ def enter(
     runner.refresh(wt, reporter=reporter)
 
     current = ecosystems.lockfile_hash(wt.path)
-    unfinished = prior is None or not prior.provisioned
+    unfinished = prior is not None and not prior.provisioned
     changed = prior is None or prior.lockfile_hash != current
     if unfinished or changed:
-        if prior is not None and not prior.provisioned:
+        if unfinished:
             reporter.info("setup never completed — finishing setup")
         else:
             reporter.info("dependencies changed since last setup — re-syncing")
