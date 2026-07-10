@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dirtiness check, so the corrupt tree takes the normal confirmation path
   instead (`NEEDS_CONFIRMATION` under `--json` / non-TTY), and `--force`
   removes the directory and git's stale registration without touching the
-  main checkout's files (#3).
+  main checkout's files (#3). Container cleanup survives the corruption too:
+  the recorded isolation and template are recovered through git's own worktree
+  registration rather than the missing `.git` pointer, so a corrupt docker
+  worktree is still torn down with the runner it was created with.
 
 ## [1.0.0] - 2026-07-06
 
