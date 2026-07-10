@@ -913,6 +913,17 @@ def test_template_dir_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert assets.template_dir("anything") == explicit
 
 
+def test_template_dir_tolerates_unresolvable_user(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import treebox.assets as assets
+
+    marker = "~treebox-user-that-cannot-exist/template"
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", marker)
+
+    assert assets.template_dir("anything") == Path(marker)
+
+
 def test_bundled_template_dir_outlives_the_resolution_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1802,6 +1813,34 @@ def test_explicit_missing_config_is_a_loud_usage_error(
     assert err["error"]["code"] == "INVALID_CONFIG"
     assert "TREEBOX_CONFIG" in err["error"]["message"]
     assert "hint" in err["error"]
+
+
+def test_path_env_overrides_tolerate_unresolvable_user(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from treebox.config import config_path, treebox_home
+
+    marker = "~treebox-user-that-cannot-exist"
+    monkeypatch.setenv("TREEBOX_HOME", f"{marker}/home")
+    assert treebox_home() == Path(f"{marker}/home")
+
+    monkeypatch.setenv("TREEBOX_CONFIG", f"{marker}/config.toml")
+    assert config_path() == Path(f"{marker}/config.toml")
+
+
+def test_unresolvable_user_config_is_clean_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv(
+        "TREEBOX_CONFIG",
+        "~treebox-user-that-cannot-exist/config.toml",
+    )
+
+    res = _cli(["list", "--json"])
+
+    assert res.exit_code == 2
+    assert "Traceback" not in res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_CONFIG"
 
 
 def test_default_missing_config_stays_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

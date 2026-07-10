@@ -102,14 +102,14 @@ def treebox_home() -> Path:
     """
     override = os.environ.get("TREEBOX_HOME")
     if override:
-        return Path(override).expanduser()
+        return expand_user(override)
     return Path.home() / ".treebox"
 
 
 def config_path() -> Path:
     explicit = os.environ.get("TREEBOX_CONFIG")
     if explicit:
-        return Path(explicit).expanduser()
+        return expand_user(explicit)
     return treebox_home() / "config.toml"
 
 
