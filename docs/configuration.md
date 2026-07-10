@@ -174,7 +174,10 @@ container config in the target repo itself is deliberately ignored — see
 | `TREEBOX_HOME`    | Base dir for `config.toml` and `templates/` (default `~/.treebox`). |
 | `TREEBOX_CONFIG`  | Explicit path to the config file (overrides `TREEBOX_HOME`). Setting it asserts the file exists — a missing file here is a loud error (exit `2`), not a silent fall-back to defaults. |
 | `TREEBOX_TEMPLATE_DIR` | Explicit template dir; wins for any `--template` name. |
-| `XDG_CACHE_HOME`  | Standard XDG base for the shared package caches treebox mounts. A leading `~` is expanded. |
+| `XDG_CACHE_HOME`  | Standard XDG base for the shared package caches treebox mounts. |
+
+All four expand a leading `~` to your home directory, like the path-valued
+config keys above.
 
 Secrets stay in files: treebox copies your repo's `.env` (or the configured
 `env_file`) into each worktree and mounts it into containers. Host isolation
