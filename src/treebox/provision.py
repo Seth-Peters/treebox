@@ -139,7 +139,12 @@ def dry_run_plan(
     fetch: bool,
     existing_branch: bool = False,
 ) -> tuple[Worktree, list[str]]:
-    """The exact git/runner commands ``create`` would run, without side effects."""
+    """The exact git/runner commands ``create`` would run, without side effects.
+
+    Enforces the same read-only preconditions as a real ``create`` - raising the
+    same conflict/not-found errors rather than returning a plan a real run would
+    refuse - judged against locally available refs (a dry run never fetches).
+    """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
     if wt.path.exists():
