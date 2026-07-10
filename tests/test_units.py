@@ -235,6 +235,14 @@ def test_worktree_path_expands_tilde_root(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert worktree_path("/r", "~/tilde-wts", "fix-auth") == home / "tilde-wts" / "fix-auth"
 
 
+def test_unresolvable_tilde_root_stays_literal_repo_relative():
+    # `Path.expanduser` would raise RuntimeError here; treebox must keep the
+    # pre-expansion behavior: an unknown ~user marker is a literal name.
+    assert worktree_path("/r", "~nosuchuser-treebox/wts", "x") == Path(
+        "/r/~nosuchuser-treebox/wts/x"
+    )
+
+
 def test_resolve_ref_name_branch_substring(monkeypatch: pytest.MonkeyPatch):
     from treebox import git, resolve
     from treebox.provision import NotFoundError
@@ -474,6 +482,24 @@ def test_config_env_file_expands_tilde(tmp_path: Path, monkeypatch: pytest.Monke
     cfg = load_config(cfg_file)
 
     assert resolve_env_file(tmp_path / "repo", cfg.env_file) == home / "tilde-secrets" / ".env"
+
+
+def test_config_unresolvable_tilde_user_stays_literal(tmp_path: Path):
+    # A ~user marker that resolves to no account must load as a literal path,
+    # not raise mid-load — config mistakes stay clean usage errors, never
+    # tracebacks (see test_invalid_config_is_clean_usage_error).
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        'root = "~nosuchuser-treebox/wts"\n'
+        'env_file = "~nosuchuser-treebox/.env"\n'
+        "[caches]\n"
+        'uv = "~nosuchuser-treebox/cache"\n'
+    )
+    cfg = load_config(cfg_file)
+
+    assert cfg.root == "~nosuchuser-treebox/wts"
+    assert cfg.env_file == "~nosuchuser-treebox/.env"
+    assert cfg.caches["uv"] == "~nosuchuser-treebox/cache"
 
 
 def test_config_defaults_and_validation(tmp_path: Path):

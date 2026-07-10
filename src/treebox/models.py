@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,9 +59,16 @@ def flatten_branch(branch: str) -> str:
     return branch.replace("/", "--")
 
 
+def expand_user(path: str | Path) -> Path:
+    """``path`` with a leading ``~`` marker expanded. An unresolvable marker
+    (``~nosuchuser``) stays literal — a config typo must surface as a normal
+    path error, never a traceback (unlike ``Path.expanduser``, which raises)."""
+    return Path(os.path.expanduser(path))
+
+
 def worktree_root(repo: str, root: str) -> Path:
     """Absolute worktree root. ``root`` may be absolute or relative to repo."""
-    p = Path(root).expanduser()
+    p = expand_user(root)
     if p.is_absolute():
         return p
     return Path(repo) / p

@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from .ecosystems import ECOSYSTEMS
 from .harnesses import VALID_HARNESSES
+from .models import expand_user
 
 # The closed vocabularies treebox understands, validated against the
 # registry-derived VALID_* tuples (harnesses.HARNESSES, runners.RUNNERS —
@@ -113,7 +114,7 @@ def config_path() -> Path:
 
 
 def _expand_user_path(value: str | None) -> str | None:
-    return str(Path(value).expanduser()) if value is not None else None
+    return str(expand_user(value)) if value is not None else None
 
 
 def default_caches() -> dict[str, str]:
@@ -124,12 +125,12 @@ def default_caches() -> dict[str, str]:
     """
     home = Path.home()
     xdg_override = os.environ.get("XDG_CACHE_HOME")
-    xdg_cache = Path(xdg_override).expanduser() if xdg_override else home / ".cache"
+    xdg_cache = expand_user(xdg_override) if xdg_override else home / ".cache"
     caches: dict[str, str] = {}
     for eco in ECOSYSTEMS:
         default = eco.default_host_cache(home, xdg_cache)
         if eco.cache_key and default:
-            caches[eco.cache_key] = str(Path(default).expanduser())
+            caches[eco.cache_key] = str(expand_user(default))
     return caches
 
 
@@ -167,7 +168,7 @@ def load_config(path: Path | None = None) -> Config:
             )
     caches = dict(cfg.caches)
     if isinstance(data.get("caches"), dict):
-        caches.update({str(k): str(Path(str(v)).expanduser()) for k, v in data["caches"].items()})
+        caches.update({str(k): str(expand_user(str(v))) for k, v in data["caches"].items()})
 
     cfg = cfg.with_overrides(
         isolation=_typed(data, "isolation", str, path),
