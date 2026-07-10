@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `teardown` no longer misreports a corrupt worktree (a registered directory
+  whose `.git` pointer file is missing) as `DIRTY_WORKTREE` when the *main*
+  checkout has uncommitted changes: git linkage is verified before the
+  dirtiness check, so the corrupt tree takes the normal confirmation path
+  instead (`NEEDS_CONFIRMATION` under `--json` / non-TTY), and `--force`
+  removes the directory and git's stale registration without touching the
+  main checkout's files (#3). Container cleanup survives the corruption too:
+  the recorded isolation and template are recovered through git's own worktree
+  registration rather than the missing `.git` pointer, so a corrupt docker
+  worktree is still torn down with the runner it was created with.
+
 - `doctor` no longer renders a missing (optional) `.env` as a red `✗` failure
   row before concluding all-good: the row is now a muted `·` note marked
   `optional`, still showing the configured path (#5). Exit codes and the

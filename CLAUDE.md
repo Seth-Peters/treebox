@@ -111,7 +111,10 @@ Module map:
   never appears in `git status` and is pruned with the worktree. The lockfile
   hash is what lets `enter` re-sync only when deps changed; the recorded
   choices are what let `enter`/`teardown` recover the worktree's created-time
-  isolation, firewall, harness, and template defaults.
+  isolation, firewall, harness, and template defaults. `teardown` reads the
+  record through the repo's own worktree registration (`load_registered`)
+  rather than the worktree's `.git` pointer, so a corrupt tree's recorded
+  choices still drive container cleanup.
 - **`models.py`** holds the `Worktree` value object and the name-as-identity
   rule: the *name* is the directory leaf and lock key, never renamed; the
   *branch* is a mutable attribute read live from git (the agent renames it
