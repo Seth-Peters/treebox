@@ -1202,7 +1202,15 @@ def teardown(
     # so). For explicit refs it stays all-or-nothing: naming a dirty tree should
     # stop the whole run — a scripting contract, not a partial surprise.
     def _blocked_dirty(c: resolve.Candidate) -> bool:
-        return Path(c.path).is_dir() and not force and git.is_dirty(c.path)
+        path = Path(c.path)
+        # A missing/corrupt .git pointer lets git walk up into the main
+        # checkout, so only ask git about dirtiness after linkage is proven.
+        return (
+            not force
+            and path.is_dir()
+            and provision._links_to_worktree_gitdir(repo_path, path)
+            and git.is_dirty(path)
+        )
 
     skipped_dirty: list[resolve.Candidate] = []
     if from_chooser:
