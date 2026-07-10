@@ -283,7 +283,10 @@ it is dirty: a corrupt worktree is never blocked as "dirty" just because your
 main checkout has uncommitted changes. It takes the normal confirmation path
 instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
-touching the main checkout's files.
+touching the main checkout's files. Container cleanup survives the corruption
+too: teardown reads the worktree's recorded isolation and template through
+git's own registration rather than the missing pointer, so a corrupt docker
+worktree is still torn down with the runner it was created with.
 
 If a worktree's recorded isolation mode is unknown (corrupt or hand-edited
 state), teardown refuses it as a conflict rather than guessing how to drive its
