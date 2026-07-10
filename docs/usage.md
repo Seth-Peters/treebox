@@ -275,6 +275,16 @@ all-or-nothing — naming a dirty tree stops the whole run. `--force` removes
 dirty worktrees either way.) The chooser is interactive-only: under `--json`
 or a non-TTY, pass refs explicitly.
 
+`teardown` is also the recovery path for a **corrupt** worktree - a registered
+directory whose `.git` pointer file is gone (say, after an interrupted removal
+by hand). Git commands inside such a directory silently answer for the *main*
+checkout, so treebox verifies the worktree's git linkage before asking whether
+it is dirty: a corrupt worktree is never blocked as "dirty" just because your
+main checkout has uncommitted changes. It takes the normal confirmation path
+instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
+removal clears both the directory and git's stale registration without
+touching the main checkout's files.
+
 If a worktree's recorded isolation mode is unknown (corrupt or hand-edited
 state), teardown refuses it as a conflict rather than guessing how to drive its
 container — the same stance `enter` takes. Pass `--skip-container` to remove the

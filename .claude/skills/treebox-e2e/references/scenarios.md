@@ -183,6 +183,15 @@ Prereq: `fix-auth` worktree from B1 exists.
 - [ ] **E6 teardown resolves original name after rename** — covered by tearing
       down `fix-auth` (E1–E3) *after* C4 renamed its branch: the original name
       must still resolve.
+- [ ] **E7 corrupt worktree is not "dirty"** - create a throwaway `e2e-corrupt`,
+      remove its pointer file (`rm "$ROOT/e2e-corrupt/.git"`), dirty the main
+      checkout (`touch "$REPO/main-dirt.txt"`), then teardown without `--force`
+      (`--json`)
+      Expect: exit 5 with `NEEDS_CONFIRMATION`, *not* `DIRTY_WORKTREE` (the main
+      checkout's dirt must not be attributed to the corrupt tree); then with
+      `--force --json`: exit 0, directory gone, registration pruned from
+      `git -C "$REPO" worktree list`, and `$REPO/main-dirt.txt` untouched
+      (clean it up afterwards).
 
 ## F. template
 
