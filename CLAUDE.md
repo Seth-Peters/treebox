@@ -78,7 +78,10 @@ Module map:
   `get_runner` and `VALID_ISOLATION` derive from it. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
   not in the run methods; teardown options (docker's `remove_volumes`) arrive
-  at the runner's constructor, never through the protocol.
+  at the runner's constructor, never through the protocol, and each runner's
+  `teardown` returns a `RunnerTeardownResult` (container `cleaned`/`skipped`
+  plus `volumes_removed`) so the `--json` record reports what actually
+  happened without the CLI branching on the backend.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
   list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
