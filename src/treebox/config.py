@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from .ecosystems import ECOSYSTEMS
 from .harnesses import VALID_HARNESSES
+from .models import expand_user
 
 # The closed vocabularies treebox understands, validated against the
 # registry-derived VALID_* tuples (harnesses.HARNESSES, runners.RUNNERS —
@@ -42,7 +43,14 @@ DEFAULT_TEMPLATE = "default"
 
 @dataclass(frozen=True)
 class Config:
-    """Resolved settings for a single invocation."""
+    """Resolved settings for a single invocation.
+
+    Path-valued fields (``root``, ``env_file``, ``caches`` values) coming out
+    of ``load_config`` hold already-``expand_user``-ed strings, so display
+    sites can print them verbatim. Use sites (``worktree_root``,
+    ``resolve_env_file``, ``_cache_dir_for``, docker cache mounts) expand
+    again, idempotently, to also cover CLI flags and directly constructed
+    Configs."""
 
     isolation: str = DEFAULT_ISOLATION
     harness: str = DEFAULT_HARNESS
@@ -101,15 +109,19 @@ def treebox_home() -> Path:
     """
     override = os.environ.get("TREEBOX_HOME")
     if override:
-        return Path(override).expanduser()
+        return expand_user(override)
     return Path.home() / ".treebox"
 
 
 def config_path() -> Path:
     explicit = os.environ.get("TREEBOX_CONFIG")
     if explicit:
-        return Path(explicit).expanduser()
+        return expand_user(explicit)
     return treebox_home() / "config.toml"
+
+
+def _expand_user_path(value: str | None) -> str | None:
+    return str(expand_user(value)) if value is not None else None
 
 
 def default_caches() -> dict[str, str]:
@@ -119,12 +131,13 @@ def default_caches() -> dict[str, str]:
     each tool's standard env override so the host and container agree.
     """
     home = Path.home()
-    xdg_cache = Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    xdg_override = os.environ.get("XDG_CACHE_HOME")
+    xdg_cache = expand_user(xdg_override) if xdg_override else home / ".cache"
     caches: dict[str, str] = {}
     for eco in ECOSYSTEMS:
         default = eco.default_host_cache(home, xdg_cache)
         if eco.cache_key and default:
-            caches[eco.cache_key] = default
+            caches[eco.cache_key] = str(expand_user(default))
     return caches
 
 
@@ -162,14 +175,14 @@ def load_config(path: Path | None = None) -> Config:
             )
     caches = dict(cfg.caches)
     if isinstance(data.get("caches"), dict):
-        caches.update({str(k): str(v) for k, v in data["caches"].items()})
+        caches.update({str(k): str(expand_user(str(v))) for k, v in data["caches"].items()})
 
     cfg = cfg.with_overrides(
         isolation=_typed(data, "isolation", str, path),
         harness=_typed(data, "harness", str, path),
         base=_typed(data, "base", str, path),
-        root=_typed(data, "root", str, path),
-        env_file=_typed(data, "env_file", str, path),
+        root=_expand_user_path(_typed(data, "root", str, path)),
+        env_file=_expand_user_path(_typed(data, "env_file", str, path)),
         firewall=_typed(data, "firewall", bool, path),
         template=_typed(data, "template", str, path),
         setup_hook=setup_hook,

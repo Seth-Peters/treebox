@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registration rather than the missing `.git` pointer, so a corrupt docker
   worktree is still torn down with the runner it was created with.
 
+- `doctor` no longer renders a missing (optional) `.env` as a red `✗` failure
+  row before concluding all-good: the row is now a muted `·` note marked
+  `optional`, still showing the configured path (#5). Exit codes and the
+  `--json` payload are unchanged.
+
+- `teardown --json` now reports what runner cleanup actually did: when Docker
+  is unavailable the worktree is still removed but the record says
+  `container: "skipped"` with `volumes_removed: false` (even under
+  `--remove-volumes`), and `volumes_removed` is `true` only when docker
+  volumes were really removed - never on host isolation (#2).
+
 ## [1.0.0] - 2026-07-06
 
 First stable release. treebox is Apache-2.0 licensed and ready for production

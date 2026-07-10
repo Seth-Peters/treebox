@@ -47,6 +47,7 @@ from .models import (
     Worktree,
     WorktreeRow,
     derive_name,
+    expand_user,
     flatten_branch,
     is_placeholder,
     is_valid_name,
@@ -258,7 +259,7 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
         # Anchor to the *main* worktree so every command sees the same worktree
         # set and root whether invoked from the repo, from .treebox/, or from
         # inside a linked worktree (where --show-toplevel would mislead us).
-        return git.main_worktree(repo)
+        return git.main_worktree(expand_user(repo))
     except git.GitError as exc:
         raise _die(
             reporter,
@@ -1414,6 +1415,7 @@ def _teardown_one(
     )
 
     container: ContainerOutcome
+    volumes_removed = False
     if skip_container:
         container = "skipped"
         reporter.note("container", "skipped")
@@ -1433,8 +1435,9 @@ def _teardown_one(
         try:
             # The runner was constructed with the batch's volume choice
             # (_teardown_runner); teardown options are its own business.
-            run.teardown(wt, reporter=reporter)
-            container = "cleaned"
+            teardown_result = run.teardown(wt, reporter=reporter)
+            container = teardown_result.container
+            volumes_removed = teardown_result.volumes_removed
         except Exception as exc:  # teardown is best-effort
             container = "failed"
             reporter.warn(f"isolation teardown: {exc}")
@@ -1470,7 +1473,7 @@ def _teardown_one(
         removed=exists,
         branch_deleted=branch_deleted,
         container=container,
-        volumes_removed=remove_volumes and container == "cleaned",
+        volumes_removed=volumes_removed,
     )
 
 
@@ -1507,7 +1510,7 @@ def doctor(
 
     repo_path = ""
     try:
-        repo_path = git.main_worktree(repo)
+        repo_path = git.main_worktree(expand_user(repo))
         checks.append(DoctorCheck("repo", True, repo_path))
     except git.GitError as exc:
         checks.append(DoctorCheck("repo", False, str(exc)))
@@ -1529,7 +1532,7 @@ def doctor(
     env_file = (
         provision.resolve_env_file(repo_path, cfg.env_file) if repo_path else Path(cfg.env_file)
     )
-    checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file)))
+    checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file), required=False))
 
     # Slow checks hit the network / Docker daemon — the source of doctor's "dead
     # pause". Deferred as thunks returning a row plus an optional advisory, so the

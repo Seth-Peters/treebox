@@ -78,7 +78,11 @@ Module map:
   `get_runner` and `VALID_ISOLATION` derive from it. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
   not in the run methods; teardown options (docker's `remove_volumes`) arrive
-  at the runner's constructor, never through the protocol.
+  at the runner's constructor, never through the protocol, and each runner's
+  `teardown` is best-effort (attempt every cleanup step, warn on failures) and
+  returns a `RunnerTeardownResult` (container `cleaned`/`skipped`/`failed`
+  plus `volumes_removed`) so the `--json` record reports what actually
+  happened without the CLI branching on the backend.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
   list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
@@ -116,7 +120,9 @@ Module map:
   *branch* is a mutable attribute read live from git (the agent renames it
   with `git branch -m`). Branch-shaped inputs (`create feature/auth`,
   `create --checkout feature/auth`) derive the name by flattening slashes to
-  `--` (`feature--auth`); generated names come from `names.py`.
+  `--` (`feature--auth`); generated names come from `names.py`. Also home to
+  `expand_user`, the tolerant `~`-expansion helper every path-consuming module
+  shares (an unresolvable `~user` stays literal instead of raising).
 - **`config.py`** is **user-level TOML only** (`$TREEBOX_CONFIG`, else
   `$TREEBOX_HOME/config.toml`, default `~/.treebox/config.toml`), never read
   from the target repo — a repo-level config could run arbitrary host commands.

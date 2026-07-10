@@ -42,7 +42,10 @@ Conventions used below:
       no literal to match; a `0.7.1.dev12`-style value is normal off a tag.)
 - [ ] **A2 doctor human** — `tb doctor --repo "$REPO"`
       Expect: exit 0 when git + at least one harness login are healthy; check
-      rows on stderr are readable off-TTY (no raw ANSI garbage when piped).
+      rows on stdout are readable off-TTY (no raw ANSI garbage when piped).
+      Against a repo with no `.env`, the `.env` row is a muted `·` note ending
+      in `· optional` (still showing the configured path), never a red `✗`,
+      and the exit code stays 0.
 - [ ] **A3 doctor json** — `tb doctor --repo "$REPO" --json`
       Expect: exit 0; JSON on stdout with `ok`, `isolation`, `checks[]`,
       `advisories`; `ok` true iff every hard check passed.

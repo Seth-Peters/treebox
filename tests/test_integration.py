@@ -946,6 +946,7 @@ def test_teardown_corrupt_worktree_uses_recorded_runner(
     instead of resolving state through the missing pointer, reading none, and
     silently tearing a docker worktree down with the config-default runner -
     leaking the container while reporting it cleaned."""
+    from treebox.runners import RunnerTeardownResult
     from treebox.runners.docker import DockerRunner
 
     root = ".treebox/worktrees"
@@ -959,7 +960,7 @@ def test_teardown_corrupt_worktree_uses_recorded_runner(
     monkeypatch.setattr(
         DockerRunner,
         "teardown",
-        lambda self, wt, *, reporter: calls.append(wt.name),
+        lambda self, wt, *, reporter: (calls.append(wt.name), RunnerTeardownResult.cleaned())[1],
     )
     res = _run(["teardown", "corrupt-docker", *base, "--force", "--json"])
     assert res.exit_code == 0, res.output
@@ -1900,6 +1901,126 @@ def test_teardown_skip_container_reports_skipped(repo: Path, root: str, hermetic
     assert res.exit_code == 0, res.output
     (record,) = json.loads(res.stdout)["worktrees"]
     assert record["container"] == "skipped"
+    assert record["removed"] is True
+
+
+def test_teardown_json_reports_docker_unavailable_as_skipped(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    from treebox.runners.docker import DockerRunner
+
+    wt = Path(root) / "dockdown"
+    _run(["create", "dockdown", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_state_runner(wt, "docker")
+    monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
+
+    res = _run(
+        [
+            "teardown",
+            "dockdown",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0, res.output
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["container"] == "skipped"
+    assert record["volumes_removed"] is False
+    assert record["removed"] is True
+
+
+def test_teardown_json_reports_failed_volume_removal_honestly(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed volume rm after a successful container rm keeps the two
+    outcomes separate: container stays "cleaned", volumes_removed is false."""
+    from treebox.runners.docker import DockerRunner
+
+    wt = Path(root) / "volfail"
+    _run(["create", "volfail", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_state_runner(wt, "docker")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
+    monkeypatch.setattr(DockerRunner, "_container_ids", lambda self, worktree: ["abc123"])
+    monkeypatch.setattr(
+        DockerRunner,
+        "_container_volumes",
+        lambda self, ids: ["treebox-volfail"],
+    )
+    monkeypatch.setattr(
+        DockerRunner,
+        "_container_image",
+        lambda self, ids: "python:3.14",
+    )
+    monkeypatch.setattr(DockerRunner, "_template_volumes", lambda self, worktree: [])
+
+    def fake_engine(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        if args[:2] == ["volume", "rm"]:
+            return subprocess.CompletedProcess(
+                ["docker", *args],
+                1,
+                "",
+                "volume is in use",
+            )
+        return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+    monkeypatch.setattr(DockerRunner, "_engine", fake_engine)
+
+    res = _run(
+        [
+            "teardown",
+            "volfail",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0, res.output
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["container"] == "cleaned"
+    assert record["volumes_removed"] is False
+    assert record["removed"] is True
+    assert ["rm", "-f", "abc123"] in calls
+    assert ["volume", "rm", "treebox-volfail"] in calls
+    assert not wt.exists()
+
+
+def test_teardown_json_host_remove_volumes_reports_none_removed(
+    repo: Path, root: str, hermetic_config
+):
+    _run(["create", "hostvols", "--repo", str(repo), "--root", root, "--print"])
+
+    res = _run(
+        [
+            "teardown",
+            "hostvols",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0, res.output
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["container"] == "cleaned"
+    assert record["volumes_removed"] is False
     assert record["removed"] is True
 
 

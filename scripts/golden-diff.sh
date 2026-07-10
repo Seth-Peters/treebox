@@ -69,6 +69,16 @@ printf 'SECRET=golden\n' > "$REPO/.env"
 git_q -C "$REPO" add -A
 git_q -C "$REPO" commit -qm init
 git_q -C "$REPO" push -q origin main
+
+# Local-only repo with no .env: doctor should report the optional miss as a
+# muted note, not a hard failure row. Keep it remote-free so git auth stays
+# deterministic.
+REPO_NO_ENV="$ROOT/repo-no-env"
+git_q init -b main "$REPO_NO_ENV"
+printf "[project]\nname=\"golden-no-env\"\nversion=\"0\"\n" > "$REPO_NO_ENV/pyproject.toml"
+git_q -C "$REPO_NO_ENV" add -A
+git_q -C "$REPO_NO_ENV" commit -qm init
+
 WTS="$ROOT/wts"
 
 GITVER="$(git --version | awk '{print $3}')"
@@ -140,6 +150,7 @@ RW=(--repo "$REPO" --root "$WTS")
 # --- host isolation -----------------------------------------------------------
 run_case doctor-host          "$HOME_FAKE" doctor "${R[@]}"
 run_case doctor-host-json     "$HOME_FAKE" doctor "${R[@]}" --json
+run_case doctor-host-no-env   "$HOME_FAKE" doctor --repo "$REPO_NO_ENV"
 run_case doctor-no-login      "$ROOT/home-empty" doctor "${R[@]}"
 run_case create-dryrun-host       "$HOME_FAKE" create golden-host "${RW[@]}" --dry-run
 run_case create-dryrun-host-json  "$HOME_FAKE" create golden-host "${RW[@]}" --dry-run --json

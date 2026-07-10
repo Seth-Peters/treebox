@@ -14,8 +14,9 @@ Two commands sit alongside the lifecycle: [`template`](#template-scaffold-and-in
 scaffolds and inspects the docker sandbox templates, and `version` prints the
 installed version.
 
-Worktree commands run against the current repo; pass `--repo PATH` to point
-elsewhere, or `--root DIR` to override the worktree root for this invocation.
+Worktree commands run against the current repo; pass `--repo PATH` (absolute,
+relative, or `~`-prefixed) to point elsewhere, or `--root DIR` (repo-relative,
+absolute, or `~`-prefixed) to override the worktree root for this invocation.
 `treebox version`, `treebox --version`, and `treebox -V` print the installed
 version.
 
@@ -215,9 +216,15 @@ treebox volumes and `--skip-container` leaves containers/images untouched.
 a prompt).
 
 Container/image cleanup and local branch deletion are best-effort after the
-target set is chosen: if cleanup fails, treebox can still remove the worktree
-and report `container: "failed"`; if branch deletion fails, it warns and
-reports `branch_deleted: false` without undoing the worktree removal.
+target set is chosen: if a container or image removal fails, treebox warns,
+still attempts every remaining cleanup step (volumes, sandbox files), removes
+the worktree, and reports `container: "failed"`; a failed volume removal
+alone warns and reports `volumes_removed: false` without marking the
+container `failed`; if Docker itself is unavailable, the worktree is still
+removed and the record reports `container: "skipped"` with
+`volumes_removed: false`, even under `--remove-volumes`; if branch deletion
+fails, it warns and reports `branch_deleted: false` without undoing the
+worktree removal.
 
 **Run it with no refs** and treebox walks you through the whole decision — an
 arrow-key picker (`↑↓` to move, space to toggle, enter to confirm) over your
@@ -301,10 +308,13 @@ treebox doctor --isolation docker    # also checks the Docker daemon
 ```
 
 Checks git, agent logins, `.env`, and — because `create` requires a fresh
-fetch — whether git can authenticate to `origin` without a prompt. Every
-failing row comes with the command that fixes it. Hard failures (`git`, `repo`,
-or the selected isolation mode) exit `1` in both human and `--json` modes, so
-`treebox doctor --json && treebox create ...` works in scripts.
+fetch — whether git can authenticate to `origin` without a prompt. A missing
+`.env` is not a failure: the row renders as a muted `·` note marked
+"optional" (the configured path still shown), since `create` simply skips the
+copy. Every failing row comes with the command that fixes it. Hard failures
+(`git`, `repo`, or the selected isolation mode) exit `1` in both human and
+`--json` modes, so `treebox doctor --json && treebox create ...` works in
+scripts.
 
 ## `template` — scaffold and inspect sandbox templates
 
@@ -389,7 +399,13 @@ Current success payloads:
 `deps` is `fresh`, `stale`, or `unknown`; `env` is `present` or `absent`.
 `teardown` records contain `name`, `branch`, `worktree_path`, `removed`,
 `branch_deleted`, `container`, and `volumes_removed`; `container` is `cleaned`,
-`skipped`, or `failed`. `doctor` checks contain `name`,
+`skipped`, or `failed`. Each field reports what the runner actually did to
+that resource: `container` is `skipped` when cleanup didn't run
+(`--skip-container`, or Docker unavailable) and `failed` when a container or
+image removal failed, while `volumes_removed` is `true` only when docker
+volumes were really removed - never on host isolation, not merely because
+`--remove-volumes` was passed, and a failed volume removal leaves it `false`
+without marking `container` failed. `doctor` checks contain `name`,
 `ok`, and `detail`.
 
 JSON errors are emitted to stderr as:
