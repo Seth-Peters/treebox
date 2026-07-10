@@ -75,8 +75,8 @@ The core worktree lifecycle is five commands (`template` scaffolds docker
 sandbox templates and `version` prints the version alongside them).
 
 **Check the host.** `doctor` verifies exactly what `create` will need — git,
-agent logins, `.env`, credentials for the required fetch — and prints the fix
-for anything missing:
+agent logins, the (optional) `.env`, credentials for the required fetch — and
+prints the fix for anything missing:
 
 ```bash
 treebox doctor
