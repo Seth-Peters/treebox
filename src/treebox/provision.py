@@ -566,8 +566,9 @@ def enter(
     args: list[str],
     reporter: Reporter,
 ) -> Outcome:
-    """Re-prepare an existing worktree: refresh .env, re-sync deps only if the
-    lockfile changed since last setup. The branch is read live — the agent may
+    """Re-prepare an existing worktree: refresh .env, re-run setup if the
+    lockfile changed since last setup or a prior setup never completed
+    (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
     wt = Worktree.locate(repo, config.root, name)
     if not wt.path.is_dir():

@@ -162,8 +162,10 @@ config.
 Dependencies re-sync **only if the lockfile changed** since the last setup
 (treebox stores the hash in the worktree's private git dir, so it never shows
 up in `git status`); a re-sync preserves the recorded harness and template
-rather than stamping in the session's choice. Anything after `--` is passed
-through to the agent. `--cold` forces a cache-bypassing re-sync.
+rather than stamping in the session's choice. If a previous run died before
+setup completed, `enter` finishes the setup even though the recorded hash
+matches, instead of launching into a half-built tree. Anything after `--` is
+passed through to the agent. `--cold` forces a cache-bypassing re-sync.
 
 Under docker isolation, `enter` **preflights the Docker daemon first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean

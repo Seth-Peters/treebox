@@ -105,9 +105,11 @@ Module map:
 - **`state.py`** stores per-worktree state (lockfile hash + provisioning
   choices) inside the worktree's private git dir (`.git/worktrees/<id>/`), so it
   never appears in `git status` and is pruned with the worktree. The lockfile
-  hash is what lets `enter` re-sync only when deps changed; the recorded
-  choices are what let `enter`/`teardown` recover the worktree's created-time
-  isolation, firewall, harness, and template defaults.
+  hash is what lets `enter` re-sync only when deps changed (the recorded
+  `provisioned` flag makes `enter` finish an interrupted setup even when the
+  hash matches); the recorded choices are what let `enter`/`teardown` recover
+  the worktree's created-time isolation, firewall, harness, and template
+  defaults.
 - **`models.py`** holds the `Worktree` value object and the name-as-identity
   rule: the *name* is the directory leaf and lock key, never renamed; the
   *branch* is a mutable attribute read live from git (the agent renames it

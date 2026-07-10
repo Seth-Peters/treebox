@@ -72,7 +72,8 @@ files (lockfiles) at setup time and stores the hash in the worktree's private
 git dir (`.git/worktrees/<id>/`). That state never appears in `git status`,
 is pruned together with the worktree, and is what lets `enter` re-sync
 dependencies only when they actually changed — and `list` show `fresh` /
-`stale` at a glance.
+`stale` at a glance. It also records whether setup ever completed: `enter`
+finishes an interrupted setup instead of skipping it as unchanged.
 
 The same private state records the worktree's creation-time choices. For an
 existing worktree, `enter` and `teardown` recover the recorded isolation and

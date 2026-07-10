@@ -31,7 +31,8 @@ class WorktreeState:
     # Recorded False *before* setup runs (so the runner is known even if a docker
     # build/run leaves a container behind on failure), flipped True once setup
     # completes. `create` uses it to tell a half-built tree (finish it) from a
-    # fully-provisioned one (a slug conflict).
+    # fully-provisioned one (a slug conflict); `enter` uses it to finish an
+    # interrupted setup even when the lockfile hash is unchanged.
     provisioned: bool = False
     # The firewall choice this worktree was created with, so `enter` honors the
     # created-time decision instead of re-resolving the config default (which
