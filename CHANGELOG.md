@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `create --dry-run` now enforces the same read-only preconditions as a real
+  `create` - `BRANCH_EXISTS` for a name whose branch already exists,
+  `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` (exit 3) for
+  a missing `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout`
+  branch already backing another worktree - failing with the same exit codes
+  and JSON errors instead of printing a plan a real run would refuse (#4).
+  A half-provisioned same-name worktree previews finishing setup, mirroring
+  real `create`; a dry run still changes nothing on disk or in git.
 - `doctor` no longer renders a missing (optional) `.env` as a red `✗` failure
   row before concluding all-good: the row is now a muted `·` note marked
   `optional`, still showing the configured path (#5). Exit codes and the
