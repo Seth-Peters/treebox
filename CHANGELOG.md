@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `teardown` no longer misreports a corrupt worktree (a registered directory
+  whose `.git` pointer file is missing) as `DIRTY_WORKTREE` when the *main*
+  checkout has uncommitted changes: git linkage is verified before the
+  dirtiness check, so the corrupt tree takes the normal confirmation path
+  instead (`NEEDS_CONFIRMATION` under `--json` / non-TTY), and `--force`
+  removes the directory and git's stale registration without touching the
+  main checkout's files (#3).
+
 ## [1.0.0] - 2026-07-06
 
 First stable release. treebox is Apache-2.0 licensed and ready for production
