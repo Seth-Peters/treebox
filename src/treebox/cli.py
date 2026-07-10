@@ -1273,6 +1273,7 @@ def teardown(
                             reporter,
                             cfg,
                             cand,
+                            repo_path,
                             explicit=isolation,
                             remove_volumes=remove_volumes,
                             json_out=json_out,
@@ -1350,12 +1351,21 @@ def _teardown_runner(
     reporter: Reporter,
     cfg: Config,
     cand: resolve.Candidate,
+    repo_path: str,
     *,
     explicit: str | None,
     remove_volumes: bool,
     json_out: bool,
 ) -> Runner:
     """Resolve one teardown target's runner from its recorded isolation mode.
+
+    The record is read through the repo's own worktree registration
+    (`state.load_registered`), never through the worktree's ``.git`` pointer:
+    a corrupt tree (missing pointer, the documented teardown recovery path)
+    would make the pointer route resolve into the MAIN repo, read no state,
+    and silently fall back to the config default - tearing a docker worktree
+    down with the host runner and leaking its container while reporting
+    ``container: "cleaned"``.
 
     Called for the whole batch *before* any removal: the mismatch/unknown
     conflicts `_reconcile_with_state` raises must abort an untouched batch
@@ -1371,7 +1381,7 @@ def _teardown_runner(
     options are owned by the runner, so only runners with per-worktree volumes
     see it."""
     exists = Path(cand.path).is_dir()
-    st = state.load(cand.path) if exists else None
+    st = state.load_registered(repo_path, cand.path) if exists else None
     cfg_run = _reconcile_with_state(reporter, cfg, st, isolation=explicit, json_out=json_out)
     return get_runner(cfg_run, remove_volumes=remove_volumes)
 
@@ -1395,7 +1405,7 @@ def _teardown_one(
     ``--skip-container`` (no container work, so no runner was resolved)."""
     wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
     exists = wt.path.is_dir()
-    st = state.load(wt.path) if exists else None
+    st = state.load_registered(repo_path, wt.path) if exists else None
 
     branch_name = (
         cand.branch

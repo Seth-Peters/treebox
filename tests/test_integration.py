@@ -938,6 +938,37 @@ def test_teardown_corrupt_worktree_force_removes_without_touching_main(repo: Pat
     assert not any(Path(item.path).name == "corrupt-force" for item in git.worktree_list(str(repo)))
 
 
+def test_teardown_corrupt_worktree_uses_recorded_runner(
+    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """The recorded isolation mode survives a corrupt .git pointer: teardown
+    recovers it from git's own registration and drives the recorded runner,
+    instead of resolving state through the missing pointer, reading none, and
+    silently tearing a docker worktree down with the config-default runner -
+    leaking the container while reporting it cleaned."""
+    from treebox.runners.docker import DockerRunner
+
+    root = ".treebox/worktrees"
+    base = ["--repo", str(repo), "--root", root]
+    _run(["create", "corrupt-docker", *base, "--print"])
+    wt = repo / root / "corrupt-docker"
+    _rewrite_state_runner(wt, "docker")
+    (wt / ".git").unlink()
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        DockerRunner,
+        "teardown",
+        lambda self, wt, *, reporter: calls.append(wt.name),
+    )
+    res = _run(["teardown", "corrupt-docker", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["corrupt-docker"]  # DockerRunner.teardown was invoked
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["container"] == "cleaned"
+    assert not wt.exists()
+
+
 def test_teardown_clean_needs_confirmation_non_interactively(
     repo: Path, root: str, hermetic_config
 ):

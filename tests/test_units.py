@@ -1336,6 +1336,7 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     from treebox.resolve import Candidate
 
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    monkeypatch.setattr(git, "registered_gitdir", lambda repo, p: tmp_path)
     state.save(
         tmp_path,
         state.WorktreeState(base="main", isolation="docker", harness="claude", template="hardened"),
@@ -1346,6 +1347,7 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
         Reporter(quiet=True),
         Config(isolation="docker", template="default"),
         cand,
+        str(tmp_path),
         explicit=None,
         remove_volumes=True,
         json_out=False,
