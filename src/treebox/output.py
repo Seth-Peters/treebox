@@ -95,7 +95,9 @@ def new_console(*, stderr: bool) -> Console:
 @dataclass(frozen=True)
 class DoctorCheck:
     """One doctor checklist row, plus the optional remediation advisory a
-    failing slow check surfaces under the list."""
+    failing slow check surfaces under the list. `required=False` marks a
+    nice-to-have (rendering only): its failing row is a muted `·` note
+    suffixed `· optional`, never a red ✗."""
 
     name: str
     ok: bool
