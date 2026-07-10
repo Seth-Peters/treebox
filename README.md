@@ -114,7 +114,9 @@ so push the base first if its latest commits only exist locally.
 the worktree was created with; an explicit `--harness` overrides it for that
 session only, without changing what's recorded on disk. The ref is the name,
 the *current* branch (renames are followed live), or a unique substring of
-either. Dependencies re-sync only if the lockfile changed since last time:
+either. Dependencies re-sync only if the lockfile changed since last time; a
+setup that never completed (a prior run died mid-provision) is finished rather
+than skipped:
 
 ```bash
 treebox enter fix-auth --harness claude

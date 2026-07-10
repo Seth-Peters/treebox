@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row before concluding all-good: the row is now a muted `·` note marked
   `optional`, still showing the configured path (#5). Exit codes and the
   `--json` payload are unchanged.
+- `treebox enter` now finishes an interrupted setup: when a prior run died
+  before setup completed, `enter` re-runs setup (reporting "setup never
+  completed") instead of skipping it as up-to-date because the lockfile hash
+  is unchanged, and records the worktree as provisioned once it succeeds (#7).
 
 - `teardown --json` now reports what runner cleanup actually did: when Docker
   is unavailable the worktree is still removed but the record says

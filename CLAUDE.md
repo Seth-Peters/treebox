@@ -78,11 +78,7 @@ Module map:
   `get_runner` and `VALID_ISOLATION` derive from it. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
   not in the run methods; teardown options (docker's `remove_volumes`) arrive
-  at the runner's constructor, never through the protocol, and each runner's
-  `teardown` is best-effort (attempt every cleanup step, warn on failures) and
-  returns a `RunnerTeardownResult` (container `cleaned`/`skipped`/`failed`
-  plus `volumes_removed`) so the `--json` record reports what actually
-  happened without the CLI branching on the backend.
+  at the runner's constructor, never through the protocol.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
   list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
@@ -109,12 +105,13 @@ Module map:
 - **`state.py`** stores per-worktree state (lockfile hash + provisioning
   choices) inside the worktree's private git dir (`.git/worktrees/<id>/`), so it
   never appears in `git status` and is pruned with the worktree. The lockfile
-  hash is what lets `enter` re-sync only when deps changed; the recorded
-  choices are what let `enter`/`teardown` recover the worktree's created-time
-  isolation, firewall, harness, and template defaults. `teardown` reads the
-  record through the repo's own worktree registration (`load_registered`)
-  rather than the worktree's `.git` pointer, so a corrupt tree's recorded
-  choices still drive container cleanup.
+  hash is what lets `enter` re-sync only when deps changed (the recorded
+  `provisioned` flag makes `enter` finish an interrupted setup even when the
+  hash matches); the recorded choices are what let `enter`/`teardown` recover
+  the worktree's created-time isolation, firewall, harness, and template
+  defaults. `teardown` reads the record through the repo's own worktree
+  registration (`load_registered`) rather than the worktree's `.git` pointer,
+  so a corrupt tree's recorded choices still drive container cleanup.
 - **`models.py`** holds the `Worktree` value object and the name-as-identity
   rule: the *name* is the directory leaf and lock key, never renamed; the
   *branch* is a mutable attribute read live from git (the agent renames it
