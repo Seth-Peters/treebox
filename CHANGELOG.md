@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-10
+
 ### Fixed
+
+- Path-valued configuration now expands a leading `~` consistently for
+  `root`, `env_file`, cache paths, `TREEBOX_*` environment variables, and the
+  `--repo` / `--root` CLI flags. Relative `root` and `env_file` values remain
+  repository-relative (#6).
 
 - `create --dry-run` now enforces the same read-only preconditions as a real
   `create` - `BRANCH_EXISTS` for a name whose branch already exists,
