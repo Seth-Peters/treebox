@@ -2799,6 +2799,29 @@ def test_render_doctor_runs_slow_checks_and_collects_advisories():
     assert "doctor" in out and "✓ git" in out and "✗ git auth" in out
 
 
+def test_render_doctor_marks_missing_optional_env_as_note():
+    import io
+
+    from rich.console import Console
+
+    from treebox.output import THEME, DoctorCheck, Reporter
+
+    buf = io.StringIO()
+    r = Reporter()
+    r.data_console = Console(file=buf, width=100, theme=THEME, highlight=False, color_system=None)
+
+    checks, advisories = r.render_doctor(
+        [DoctorCheck(".env", False, "/repo/.env", required=False)], [], "host", width=4
+    )
+
+    assert checks == [DoctorCheck(".env", False, "/repo/.env", required=False)]
+    assert advisories == []
+    out = buf.getvalue()
+    assert "· .env" in out
+    assert "/repo/.env · optional" in out
+    assert "✗ .env" not in out
+
+
 def test_render_doctor_verdict_branches():
     import io
 

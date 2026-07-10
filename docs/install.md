@@ -66,22 +66,22 @@ $ treebox doctor
 
   ● doctor   isolation: host
 
-    ✓ git             2.47.3
-    ✓ repo            ~/code/myapp
-    ✓ uid/gid         1000:1000
-    ✓ login: claude   ~/.claude
-    ✓ login: codex    ~/.codex
-    ✓ .env            ~/code/myapp/.env
-    ✓ git auth        authenticated · fresh fetch will succeed
-    ✓ isolation: host    no container dependencies
+    ✓ git               2.47.3
+    ✓ repo              ~/code/myapp
+    ✓ uid/gid           1000:1000
+    ✓ login: claude     ~/.claude
+    ✓ login: codex      ~/.codex
+    ✓ .env              ~/code/myapp/.env
+    ✓ git auth          authenticated · fresh fetch will succeed
+    ✓ isolation: host   no container dependencies
 
-  ✓ ready
+  ✓ everything looks good
 ```
 
 `doctor` checks the exact things `create` will need — git, agent logins,
 credentials for the required `origin` fetch — and prints an advisory with the
-fix when something is off. Pass `--isolation docker` to check the Docker daemon
-too.
+fix when something is off. A missing `.env` is only noted as optional, never a
+failure. Pass `--isolation docker` to check the Docker daemon too.
 
 ## Updating
 
