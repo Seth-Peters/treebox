@@ -19,7 +19,7 @@ from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter, StepError
 from ..system import have
-from .base import RunnerFacts
+from .base import RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -120,7 +120,8 @@ class HostRunner:
         proc = subprocess.run(cmd, cwd=str(wt.path))
         return proc.returncode
 
-    def teardown(self, wt: Worktree, *, reporter: Reporter) -> None:
+    def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         # Nothing host-side to tear down beyond the worktree itself; the note
         # keeps the teardown checklist honest about what was (not) touched.
         reporter.note("container", "n/a (host isolation)")
+        return RunnerTeardownResult.cleaned()

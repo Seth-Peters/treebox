@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final
 
-from .base import PreflightError, Runner, RunnerFacts
+from .base import PreflightError, Runner, RunnerFacts, RunnerTeardownResult
 from .docker import DockerRunner
 from .host import HostRunner
 
@@ -56,5 +56,6 @@ __all__ = [
     "PreflightError",
     "Runner",
     "RunnerFacts",
+    "RunnerTeardownResult",
     "get_runner",
 ]

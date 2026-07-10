@@ -1213,8 +1213,10 @@ def test_docker_teardown_removes_own_image_and_treebox_volumes(tmp_path: Path):
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == "cleaned"
+    assert result.volumes_removed is True
     assert ["rm", "-f", "abc123"] in fake.calls
     assert ["image", "rm", image] in fake.calls
     volume_rms = [c for c in fake.calls if c[:2] == ["volume", "rm"]]
@@ -1230,8 +1232,10 @@ def test_docker_teardown_keeps_foreign_image_and_volumes_by_default(tmp_path: Pa
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
     wt = _boxed_worktree(tmp_path)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == "cleaned"
+    assert result.volumes_removed is False
     assert ["rm", "-f", "abc123"] in fake.calls
     assert not any(c[:2] == ["image", "rm"] for c in fake.calls)
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
@@ -1244,8 +1248,10 @@ def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == "skipped"
+    assert result.volumes_removed is False
     # No daemon → nothing beyond the availability probe touches docker.
     assert fake.calls == [["info"]]
 

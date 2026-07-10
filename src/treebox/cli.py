@@ -1396,6 +1396,7 @@ def _teardown_one(
     )
 
     container: ContainerOutcome
+    volumes_removed = False
     if skip_container:
         container = "skipped"
         reporter.note("container", "skipped")
@@ -1415,8 +1416,9 @@ def _teardown_one(
         try:
             # The runner was constructed with the batch's volume choice
             # (_teardown_runner); teardown options are its own business.
-            run.teardown(wt, reporter=reporter)
-            container = "cleaned"
+            teardown_result = run.teardown(wt, reporter=reporter)
+            container = teardown_result.container
+            volumes_removed = teardown_result.volumes_removed
         except Exception as exc:  # teardown is best-effort
             container = "failed"
             reporter.warn(f"isolation teardown: {exc}")
@@ -1452,7 +1454,7 @@ def _teardown_one(
         removed=exists,
         branch_deleted=branch_deleted,
         container=container,
-        volumes_removed=remove_volumes and container == "cleaned",
+        volumes_removed=volumes_removed,
     )
 
 

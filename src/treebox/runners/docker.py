@@ -78,7 +78,7 @@ from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
 from ..models import Worktree
 from ..output import Reporter
-from .base import PreflightError, RunnerFacts
+from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -694,12 +694,12 @@ class DockerRunner:
             volumes.append(source.replace("${workspaceName}", _sanitize(wt.name)))
         return volumes
 
-    def teardown(self, wt: Worktree, *, reporter: Reporter) -> None:
+    def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Remove the worktree's container/image (and, when this runner was
         constructed with ``remove_volumes``, its per-workspace volumes)."""
         if not self._available():
             reporter.note("container", "skipped; Docker unavailable")
-            return
+            return RunnerTeardownResult.skipped()
         ids = self._container_ids(wt)
         # Read the container's mounts BEFORE rm; and never rely on them alone —
         # when the container is already gone (manual docker rm, or a prior
@@ -722,10 +722,12 @@ class DockerRunner:
                 self._engine(["image", "rm", image])
         else:
             reporter.note("container", "none found")
+        volumes_removed = False
         if self._remove_volumes:
             if volumes:
                 self._engine(["volume", "rm", *volumes])
                 reporter.ok("volumes", f"removed {' '.join(volumes)}")
+                volumes_removed = True
         elif container_volumes:
             reporter.note("volumes", f"kept {' '.join(container_volumes)}")
 
@@ -734,6 +736,7 @@ class DockerRunner:
         if cfg_dir.exists():
             shutil.rmtree(cfg_dir, ignore_errors=True)
             reporter.ok("sandbox files", "removed")
+        return RunnerTeardownResult.cleaned(volumes_removed=volumes_removed)
 
 
 # --- docker helpers ----------------------------------------------------------
