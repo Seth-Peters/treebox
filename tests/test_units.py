@@ -1264,44 +1264,47 @@ def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("failed_command", "remove_volumes", "image", "volumes"),
+    ("failed_command", "expected_container", "expected_volumes_removed", "image_rm_attempted"),
     [
-        (("rm", "-f", "abc123"), False, "python:3.14\n", ""),
-        (
-            ("image", "rm", "treebox-feature--x-deadbeef00"),
-            False,
-            "treebox-feature--x-deadbeef00\n",
-            "",
-        ),
-        (
-            ("volume", "rm", "treebox-claude-config"),
-            True,
-            "python:3.14\n",
-            "treebox-claude-config\n",
-        ),
+        (("rm", "-f", "abc123"), "failed", True, False),
+        (("image", "rm", "treebox-feature--x-deadbeef00"), "failed", True, True),
+        (("volume", "rm", "treebox-claude-config"), "cleaned", False, True),
     ],
 )
-def test_docker_teardown_raises_on_destructive_command_failure(
+def test_docker_teardown_continues_past_destructive_command_failure(
     tmp_path: Path,
     failed_command: tuple[str, ...],
-    remove_volumes: bool,
-    image: str,
-    volumes: str,
+    expected_container: str,
+    expected_volumes_removed: bool,
+    image_rm_attempted: bool,
 ):
+    """One failed removal must not abort the rest of the cleanup — the caller
+    deletes the state that could retry it right after teardown, so every
+    remaining step still runs (only a doomed image rm after a failed container
+    rm is skipped) and the result reports each resource's outcome honestly:
+    a failed volume rm alone leaves the container status accurate."""
     from treebox.output import Reporter
 
+    image = "treebox-feature--x-deadbeef00"
     fake = _FakeDocker(
         ids="abc123\n",
-        image=image,
-        volumes=volumes,
+        image=f"{image}\n",
+        volumes="treebox-claude-config\n",
         failures={failed_command: "removal denied"},
     )
-    runner = DockerRunner(Config(isolation="docker"), remove_volumes=remove_volumes, docker=fake)
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
+    wt = _boxed_worktree(tmp_path)
+    cfg_dir = runner._config_dir(wt)
+    cfg_dir.mkdir(parents=True)
 
-    with pytest.raises(RuntimeError, match="removal denied"):
-        runner.teardown(_boxed_worktree(tmp_path), reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == expected_container
+    assert result.volumes_removed is expected_volumes_removed
     assert list(failed_command) in fake.calls
+    assert (["image", "rm", image] in fake.calls) is image_rm_attempted
+    assert ["volume", "rm", "treebox-claude-config"] in fake.calls
+    assert not cfg_dir.exists()
 
 
 def test_docker_teardown_no_container_removes_config_dir(tmp_path: Path):
