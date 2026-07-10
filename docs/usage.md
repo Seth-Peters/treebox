@@ -15,7 +15,8 @@ scaffolds and inspects the docker sandbox templates, and `version` prints the
 installed version.
 
 Worktree commands run against the current repo; pass `--repo PATH` to point
-elsewhere, or `--root DIR` to override the worktree root for this invocation.
+elsewhere, or `--root DIR` (repo-relative, absolute, or `~`-prefixed) to
+override the worktree root for this invocation.
 `treebox version`, `treebox --version`, and `treebox -V` print the installed
 version.
 

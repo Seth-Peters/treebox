@@ -67,7 +67,8 @@ def expand_user(path: str | Path) -> Path:
 
 
 def worktree_root(repo: str, root: str) -> Path:
-    """Absolute worktree root. ``root`` may be absolute or relative to repo."""
+    """Absolute worktree root. ``root`` may be absolute, ``~``-prefixed, or
+    relative to repo."""
     p = expand_user(root)
     if p.is_absolute():
         return p
