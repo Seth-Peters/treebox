@@ -429,11 +429,19 @@ def _dry_run(
     *,
     fetch: bool,
     json_out: bool,
+    checkout: str | None,
 ) -> None:
     """Render what ``create`` would do, executing nothing."""
     try:
         wt, cmds = provision.dry_run_plan(
-            cfg, run, repo=repo_path, name=name, branch=branch, base=cfg.base, fetch=fetch
+            cfg,
+            run,
+            repo=repo_path,
+            name=name,
+            branch=branch,
+            base=cfg.base,
+            fetch=fetch,
+            existing_branch=checkout is not None,
         )
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
@@ -583,6 +591,7 @@ def create(
             target_branch,
             fetch=not no_fetch,
             json_out=json_out,
+            checkout=checkout,
         )
         return
 

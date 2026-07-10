@@ -137,17 +137,30 @@ def dry_run_plan(
     branch: str,
     base: str,
     fetch: bool,
+    existing_branch: bool = False,
 ) -> tuple[Worktree, list[str]]:
     """The exact git/runner commands ``create`` would run, without side effects."""
     wt = Worktree.locate(repo, config.root, name, branch, base)
-    cmds: list[str] = []
-    if fetch:
-        cmds.append(f"git -C {repo} fetch origin --quiet")
-    plan = git.resolve_branch(repo, branch, base)
-    if plan.kind == "local":
-        cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
+    resuming = False
+    if wt.path.exists():
+        resuming = _is_resumable_unprovisioned_worktree(repo, wt, branch)
+        if not resuming:
+            raise _slug_conflict_for_existing_path(repo, wt)
     else:
-        cmds.append(f"git -C {repo} worktree add -b {plan.name} {wt.path} {plan.start_point}")
+        _check_requested_branch(repo, branch=branch, existing_branch=existing_branch)
+        _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
+        _check_base_exists(repo, base=base, existing_branch=existing_branch)
+    cmds: list[str] = []
+    if resuming:
+        cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
+    else:
+        if fetch:
+            cmds.append(f"git -C {repo} fetch origin --quiet")
+        plan = git.resolve_branch(repo, branch, base)
+        if plan.kind == "local":
+            cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
+        else:
+            cmds.append(f"git -C {repo} worktree add -b {plan.name} {wt.path} {plan.start_point}")
     cmds.append(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
@@ -379,6 +392,85 @@ def _links_to_worktree_gitdir(repo: str, path: Path) -> bool:
     return worktrees in gitdir.parents
 
 
+def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictError:
+    conflict = SlugConflictError(wt.name, wt.path)
+    linked = _links_to_worktree_gitdir(repo, wt.path)
+    actual = git.branch_for_path(repo, str(wt.path)) or ""
+    if not linked or (not actual and not git.worktree_registered(repo, str(wt.path))):
+        conflict.hint = (
+            "The directory is not a healthy registered worktree (likely leftover "
+            f"from an interrupted teardown). Recover with `treebox teardown {wt.name}` "
+            "— it clears both the directory and git's stale registration — then "
+            f"re-run. By hand: rm -rf {wt.path} && git -C {repo} worktree prune "
+            "(a bare rm -rf leaves the registration behind and re-create fails)."
+        )
+    return conflict
+
+
+def _is_resumable_unprovisioned_worktree(repo: str, wt: Worktree, branch: str) -> bool:
+    """Whether real create would finish setup in this existing worktree."""
+    if not _links_to_worktree_gitdir(repo, wt.path):
+        return False
+    prior = state.load(wt.path)
+    actual = git.branch_for_path(repo, str(wt.path)) or ""
+    return actual == branch and not (prior is not None and prior.provisioned)
+
+
+def _check_requested_branch(
+    repo: str,
+    *,
+    branch: str,
+    existing_branch: bool,
+) -> None:
+    """Validate whether create should resume or create the requested branch."""
+    if existing_branch and not (
+        git.local_branch_exists(repo, branch) or git.remote_branch_exists(repo, branch)
+    ):
+        exc = NotFoundError(f"Branch '{branch}' not found locally or on origin.")
+        exc.hint = "Fetchable branches only: check the name, or drop --checkout to start new work."
+        raise exc
+
+    if not existing_branch and not is_placeholder(branch):
+        if git.local_branch_exists(repo, branch):
+            raise BranchConflictError(branch, "locally")
+        if git.remote_branch_exists(repo, branch):
+            raise BranchConflictError(branch, "on origin")
+
+
+def _check_checkout_branch_in_use(
+    repo: str,
+    wt: Worktree,
+    *,
+    branch: str,
+    existing_branch: bool,
+) -> None:
+    """Reject a checkout branch that already backs a different worktree."""
+    if existing_branch:
+        in_use = next(
+            (
+                rec
+                for rec in git.worktree_list(repo)
+                if rec.branch == branch and not same_path(rec.path, wt.path)
+            ),
+            None,
+        )
+        if in_use is not None:
+            raise BranchInUseError(branch, in_use.path)
+
+
+def _check_base_exists(repo: str, *, base: str, existing_branch: bool) -> None:
+    """Reject a new branch whose requested base cannot be resolved."""
+    if not existing_branch and not (
+        git.remote_branch_exists(repo, base) or git.local_branch_exists(repo, base)
+    ):
+        exc = NotFoundError(f"Base branch '{base}' not found locally or on origin.")
+        exc.hint = (
+            "Pass --base <branch> (e.g. --base master for a master-default repo) "
+            "or set base in config.toml."
+        )
+        raise exc
+
+
 def create(
     config: Config,
     runner: Runner,
@@ -411,31 +503,13 @@ def create(
     # recorded only after runner.setup completes). Launching into that
     # half-built tree would be the "said Ready, then failed" bug; finish it.
     if wt.path.exists():
-        # A healthy treebox worktree links back to its per-worktree git dir via
-        # a .git pointer FILE. If that's missing/corrupt the tree is a stray
-        # leftover (e.g. an interrupted teardown rm-rf'd the pointer but left
-        # git's main-side registration): git commands inside it silently resolve
-        # to the MAIN repository, so "finishing setup" would rewrite the real
-        # checkout's hooksPath — and state.load would walk up and read None.
-        linked = _links_to_worktree_gitdir(repo, wt.path)
-        prior = state.load(wt.path) if linked else None
-        actual = git.branch_for_path(repo, str(wt.path)) or ""
         # Resume ONLY a genuinely half-built treebox worktree: linkage intact,
         # registered with git on the exact expected branch, setup unfinished.
         # Anything else is a conflict.
-        if linked and actual == branch and not (prior is not None and prior.provisioned):
+        if _is_resumable_unprovisioned_worktree(repo, wt, branch):
             reporter.note("worktree", "exists but unprovisioned — finishing setup")
             return _finish_setup(config, runner, wt, harness=harness, cold=cold, reporter=reporter)
-        conflict = SlugConflictError(name, wt.path)
-        if not linked or (not actual and not git.worktree_registered(repo, str(wt.path))):
-            conflict.hint = (
-                "The directory is not a healthy registered worktree (likely leftover "
-                f"from an interrupted teardown). Recover with `treebox teardown {name}` "
-                "— it clears both the directory and git's stale registration — then "
-                f"re-run. By hand: rm -rf {wt.path} && git -C {repo} worktree prune "
-                "(a bare rm -rf leaves the registration behind and re-create fails)."
-            )
-        raise conflict
+        raise _slug_conflict_for_existing_path(repo, wt)
 
     # Freshness is the whole point: a fetch is REQUIRED by default and fails
     # loudly (never silently falls back to stale local refs). The only escape is
@@ -457,26 +531,7 @@ def create(
     else:
         reporter.note("fetch", "skipped (--no-fetch) · refs may be stale")
 
-    # --checkout means "this exact branch": resume work or review a PR. A branch
-    # that exists nowhere would silently degrade into "new branch off base" — the
-    # placeholder-less path must never invent branches.
-    if existing_branch and not (
-        git.local_branch_exists(repo, branch) or git.remote_branch_exists(repo, branch)
-    ):
-        exc = NotFoundError(f"Branch '{branch}' not found locally or on origin.")
-        exc.hint = "Fetchable branches only: check the name, or drop --checkout to start new work."
-        raise exc
-
-    # An explicit NAME promises a fresh branch off origin/<base> — never a
-    # silent adoption of something that already exists. Without this check,
-    # resolve_branch below would quietly reuse a local branch or track
-    # origin/<name>, turning "start new work" into "resume old work" (a stale-
-    # code hazard). Resuming is --checkout's explicitly-asked-for job.
-    if not existing_branch and not is_placeholder(branch):
-        if git.local_branch_exists(repo, branch):
-            raise BranchConflictError(branch, "locally")
-        if git.remote_branch_exists(repo, branch):
-            raise BranchConflictError(branch, "on origin")
+    _check_requested_branch(repo, branch=branch, existing_branch=existing_branch)
 
     # An interrupted teardown (working dir removed, registration left behind)
     # leaves a stale entry git flags as prunable: it still holds the branch's
@@ -488,37 +543,12 @@ def create(
         git.worktree_prune(repo)
         reporter.note("worktree", "pruned stale registration from an interrupted teardown")
 
-    # A branch can back only one worktree at a time: handing a --checkout branch
-    # that's already checked out (the main checkout, or another treebox worktree)
-    # to `git worktree add` would die with a raw plumbing fatal. Name the
-    # collision and the ways out instead. Runs after the prune above so a stale
-    # registration git already flagged as dead never counts as "in use".
-    if existing_branch:
-        in_use = next(
-            (
-                rec
-                for rec in git.worktree_list(repo)
-                if rec.branch == branch and not same_path(rec.path, wt.path)
-            ),
-            None,
-        )
-        if in_use is not None:
-            raise BranchInUseError(branch, in_use.path)
+    # A branch can back only one worktree. Keep this after prune so a stale
+    # registration at the requested path is self-healed before the check.
+    _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
 
-    # The new branch is cut from <base>, and everything below (the stale-
-    # placeholder reset, `worktree add`) assumes it resolves. When it exists
-    # neither on origin nor locally — a master/trunk-default repo under the
-    # default base=main — git would die with a raw `fatal: invalid reference`,
-    # so pre-check it and say how to fix it.
-    if not existing_branch and not (
-        git.remote_branch_exists(repo, base) or git.local_branch_exists(repo, base)
-    ):
-        exc = NotFoundError(f"Base branch '{base}' not found locally or on origin.")
-        exc.hint = (
-            "Pass --base <branch> (e.g. --base master for a master-default repo) "
-            "or set base in config.toml."
-        )
-        raise exc
+    # Everything below assumes a resolvable base for new work.
+    _check_base_exists(repo, base=base, existing_branch=existing_branch)
 
     # A lingering local placeholder (teardown keeps branches by default) must
     # not silently bypass the freshness invariant: it is a guaranteed-unpushed

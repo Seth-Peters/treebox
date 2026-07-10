@@ -932,6 +932,122 @@ def test_dry_run_changes_nothing(repo: Path, root: str, hermetic_config):
     assert not git.local_branch_exists(str(repo), "planned-x")
 
 
+def test_dry_run_existing_branch_is_branch_exists_conflict(repo: Path, root: str, hermetic_config):
+    subprocess.run(["git", "-C", str(repo), "branch", "taken-dry"], check=True)
+    before = _git(repo, "worktree", "list", "--porcelain").stdout
+    base = ["create", "taken-dry", "--repo", str(repo), "--root", root, "--dry-run"]
+
+    human = _run(base)
+    assert human.exit_code == 5, human.output
+    assert human.stdout == ""
+    assert "already exists locally" in human.stderr
+    assert "worktree add" not in human.stderr
+
+    machine = _run([*base, "--json"])
+    assert machine.exit_code == 5, machine.output
+    assert machine.stdout == ""
+    err = json.loads(machine.stderr)
+    assert err["error"]["code"] == "BRANCH_EXISTS"
+    assert "--checkout taken-dry" in err["error"]["hint"]
+    assert not (Path(root) / "taken-dry").exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before
+
+    subprocess.run(
+        ["git", "-C", str(repo), "push", "-q", "origin", "main:taken-remote-dry"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo), "fetch", "-q", "origin"], check=True)
+    remote = _run(
+        [
+            "create",
+            "taken-remote-dry",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--dry-run",
+            "--json",
+        ]
+    )
+    assert remote.exit_code == 5, remote.output
+    assert json.loads(remote.stderr)["error"]["code"] == "BRANCH_EXISTS"
+    assert not (Path(root) / "taken-remote-dry").exists()
+
+
+def test_dry_run_existing_worktree_dir_is_slug_conflict(repo: Path, root: str, hermetic_config):
+    assert (
+        _run(["create", "taken-dir", "--repo", str(repo), "--root", root, "--print"]).exit_code == 0
+    )
+    wt = Path(root) / "taken-dir"
+    before = _git(repo, "worktree", "list", "--porcelain").stdout
+    state_before = state._state_path(wt).read_bytes()
+    setup_before = (wt / "setup.log").read_bytes()
+
+    res = _run(["create", "taken-dir", "--repo", str(repo), "--root", root, "--dry-run", "--json"])
+
+    assert res.exit_code == 5, res.output
+    assert res.stdout == ""
+    err = json.loads(res.stderr)
+    assert err["error"]["code"] == "SLUG_CONFLICT"
+    assert "treebox enter taken-dir" in err["error"]["hint"]
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before
+    assert state._state_path(wt).read_bytes() == state_before
+    assert (wt / "setup.log").read_bytes() == setup_before
+
+
+@pytest.mark.parametrize(
+    ("args", "name", "exit_code", "code"),
+    [
+        (["create", "--checkout", "ghost/branch"], "ghost--branch", 3, "NOT_FOUND"),
+        (["create", "dry-base", "--base", "ghost"], "dry-base", 3, "NOT_FOUND"),
+        (["create", "--checkout", "main"], "main", 5, "BRANCH_IN_USE"),
+    ],
+)
+def test_dry_run_read_only_prechecks_match_create_errors(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    args: list[str],
+    name: str,
+    exit_code: int,
+    code: str,
+):
+    before = _git(repo, "worktree", "list", "--porcelain").stdout
+    res = _run([*args, "--repo", str(repo), "--root", root, "--dry-run", "--json"])
+
+    assert res.exit_code == exit_code, res.output
+    assert res.stdout == ""
+    assert json.loads(res.stderr)["error"]["code"] == code
+    assert not (Path(root) / name).exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before
+    if name == "dry-base":
+        assert _git(repo, "branch", "--list", name).stdout == ""
+
+
+def test_dry_run_previews_unprovisioned_resume_without_mutation(
+    repo: Path, root: str, hermetic_config
+):
+    wt = Path(root) / "resume-dry"
+    base = ["create", "resume-dry", "--repo", str(repo), "--root", root]
+    assert _run([*base, "--print"]).exit_code == 0
+    state_path = state._state_path(wt)
+    state_path.unlink()
+    (wt / "setup.log").unlink()
+    before_worktrees = _git(repo, "worktree", "list", "--porcelain").stdout
+    before_status = _git(wt, "status", "--porcelain", "--ignore-submodules=all").stdout
+
+    res = _run([*base, "--dry-run", "--json"])
+
+    assert res.exit_code == 0, res.output
+    commands = json.loads(res.stdout)["commands"]
+    assert any("resume existing unprovisioned worktree" in cmd for cmd in commands)
+    assert any("echo ran >> setup.log" in cmd for cmd in commands)
+    assert not any("fetch origin" in cmd or "worktree add" in cmd for cmd in commands)
+    assert not state_path.exists()
+    assert not (wt / "setup.log").exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before_worktrees
+    assert _git(wt, "status", "--porcelain", "--ignore-submodules=all").stdout == before_status
+
+
 def test_create_and_doctor_json_have_schema_version(repo: Path, root: str, hermetic_config):
     created = json.loads(
         _run(["create", "sv", "--repo", str(repo), "--root", root, "--json"]).stdout
