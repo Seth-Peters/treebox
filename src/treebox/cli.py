@@ -47,6 +47,7 @@ from .models import (
     Worktree,
     WorktreeRow,
     derive_name,
+    expand_user,
     flatten_branch,
     is_placeholder,
     is_valid_name,
@@ -258,7 +259,7 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
         # Anchor to the *main* worktree so every command sees the same worktree
         # set and root whether invoked from the repo, from .treebox/, or from
         # inside a linked worktree (where --show-toplevel would mislead us).
-        return git.main_worktree(repo)
+        return git.main_worktree(expand_user(repo))
     except git.GitError as exc:
         raise _die(
             reporter,
@@ -1491,7 +1492,7 @@ def doctor(
 
     repo_path = ""
     try:
-        repo_path = git.main_worktree(repo)
+        repo_path = git.main_worktree(expand_user(repo))
         checks.append(DoctorCheck("repo", True, repo_path))
     except git.GitError as exc:
         checks.append(DoctorCheck("repo", False, str(exc)))
@@ -1513,7 +1514,7 @@ def doctor(
     env_file = (
         provision.resolve_env_file(repo_path, cfg.env_file) if repo_path else Path(cfg.env_file)
     )
-    checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file)))
+    checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file), required=False))
 
     # Slow checks hit the network / Docker daemon — the source of doctor's "dead
     # pause". Deferred as thunks returning a row plus an optional advisory, so the

@@ -38,6 +38,12 @@ uv  = "/mnt/fast/cache/uv"
 npm = "/mnt/fast/cache/npm"
 ```
 
+Path-valued keys understand a leading `~`: `root`, `env_file`, and every
+`caches` entry expand `~/…` to your home directory before use, as do quoted
+`--root '~/trees'` and `--repo '~/proj'` on the command line. Ordinary
+relative paths keep their meaning: `root` and `env_file` stay relative to the
+repo.
+
 For a new `create`, precedence is what you'd expect:
 
 ```text
@@ -56,8 +62,8 @@ template for docker volume cleanup because it has no `--template` flag.
 | `isolation`| `host`               | Where agents run: the worktree shell, or a docker sandbox. |
 | `harness`  | `claude`             | Which agent `create` launches by default; `enter` reuses the harness the worktree was created with unless `--harness` overrides it. |
 | `base`     | `main`               | Base branch for new branches (resolved as `origin/<base>`). |
-| `root`     | `.treebox/worktrees` | Where worktree directories are created, relative to the repo. |
-| `env_file` | `.env`               | The secrets file copied into every new worktree.          |
+| `root`     | `.treebox/worktrees` | Where worktree directories are created: repo-relative, absolute, or `~`-prefixed. |
+| `env_file` | `.env`               | The secrets file copied into every new worktree; repo-relative unless absolute or `~`-prefixed. |
 | `firewall` | `false`              | Restrict container egress (docker isolation).              |
 | `template` | `default`            | Which operator template defines the sandbox.              |
 | `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. |
@@ -169,6 +175,9 @@ container config in the target repo itself is deliberately ignored — see
 | `TREEBOX_CONFIG`  | Explicit path to the config file (overrides `TREEBOX_HOME`). Setting it asserts the file exists — a missing file here is a loud error (exit `2`), not a silent fall-back to defaults. |
 | `TREEBOX_TEMPLATE_DIR` | Explicit template dir; wins for any `--template` name. |
 | `XDG_CACHE_HOME`  | Standard XDG base for the shared package caches treebox mounts. |
+
+All four expand a leading `~` to your home directory, like the path-valued
+config keys above.
 
 Secrets stay in files: treebox copies your repo's `.env` (or the configured
 `env_file`) into each worktree and mounts it into containers. Host isolation

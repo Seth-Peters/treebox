@@ -21,7 +21,7 @@ from pathlib import Path
 from . import ecosystems, git, state
 from .config import Config
 from .harnesses import Harness
-from .models import Worktree, is_placeholder, same_path, worktree_root
+from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
 from .output import Reporter
 from .runners.base import Runner
 
@@ -227,12 +227,13 @@ def ensure_root_ignored(repo: str, root: str) -> None:
 
 
 def resolve_env_file(repo: str | Path, env_file: str) -> Path:
-    """The canonical ``.env`` source: ``env_file`` as-is when absolute, else
-    resolved against the repo root. The single definition of where secrets come
-    from — used by both ``copy_env`` and ``doctor`` so they never disagree."""
-    src = Path(env_file)
+    """The canonical ``.env`` source: ``env_file`` with a leading ``~``
+    expanded, taken as-is when absolute, else resolved against the repo root.
+    The single definition of where secrets come from — used by both
+    ``copy_env`` and ``doctor`` so they never disagree."""
+    src = expand_user(env_file)
     if not src.is_absolute():
-        src = Path(repo) / env_file
+        src = Path(repo) / src
     return src
 
 

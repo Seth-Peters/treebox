@@ -14,8 +14,9 @@ Two commands sit alongside the lifecycle: [`template`](#template-scaffold-and-in
 scaffolds and inspects the docker sandbox templates, and `version` prints the
 installed version.
 
-Worktree commands run against the current repo; pass `--repo PATH` to point
-elsewhere, or `--root DIR` to override the worktree root for this invocation.
+Worktree commands run against the current repo; pass `--repo PATH` (absolute,
+relative, or `~`-prefixed) to point elsewhere, or `--root DIR` (repo-relative,
+absolute, or `~`-prefixed) to override the worktree root for this invocation.
 `treebox version`, `treebox --version`, and `treebox -V` print the installed
 version.
 
@@ -294,10 +295,13 @@ treebox doctor --isolation docker    # also checks the Docker daemon
 ```
 
 Checks git, agent logins, `.env`, and — because `create` requires a fresh
-fetch — whether git can authenticate to `origin` without a prompt. Every
-failing row comes with the command that fixes it. Hard failures (`git`, `repo`,
-or the selected isolation mode) exit `1` in both human and `--json` modes, so
-`treebox doctor --json && treebox create ...` works in scripts.
+fetch — whether git can authenticate to `origin` without a prompt. A missing
+`.env` is not a failure: the row renders as a muted `·` note marked
+"optional" (the configured path still shown), since `create` simply skips the
+copy. Every failing row comes with the command that fixes it. Hard failures
+(`git`, `repo`, or the selected isolation mode) exit `1` in both human and
+`--json` modes, so `treebox doctor --json && treebox create ...` works in
+scripts.
 
 ## `template` — scaffold and inspect sandbox templates
 

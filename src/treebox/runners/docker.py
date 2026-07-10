@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from .. import assets, git, system
 from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
-from ..models import Worktree
+from ..models import Worktree, expand_user
 from ..output import Reporter
 from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 
@@ -422,7 +422,7 @@ class DockerRunner:
             host_dir = self.config.caches.get(eco.cache_key)
             if not host_dir:
                 continue
-            mounts.append(_mount(host_dir, target))
+            mounts.append(_mount(expand_user(host_dir), target))
             var = eco.container_env_var()
             if var:
                 env[var] = target
@@ -446,7 +446,7 @@ class DockerRunner:
                 continue
             host_dir = self.config.caches.get(eco.cache_key)
             if host_dir:
-                Path(host_dir).mkdir(parents=True, exist_ok=True)
+                expand_user(host_dir).mkdir(parents=True, exist_ok=True)
 
     def _write_config(self, wt: Worktree, *, cold: bool) -> ContainerConfig:
         """Render the operator template into the host-side config dir (outside

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `doctor` no longer renders a missing (optional) `.env` as a red `✗` failure
+  row before concluding all-good: the row is now a muted `·` note marked
+  `optional`, still showing the configured path (#5). Exit codes and the
+  `--json` payload are unchanged.
+
 - `teardown --json` now reports what runner cleanup actually did: when Docker
   is unavailable the worktree is still removed but the record says
   `container: "skipped"` with `volumes_removed: false` (even under

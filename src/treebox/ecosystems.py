@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .models import expand_user
+
 # Root under which shared host caches are bind-mounted inside the sandbox container.
 CONTAINER_CACHE_ROOT = "/caches"
 
@@ -152,13 +154,14 @@ def _cache_dir_for(
     if not eco.cache_key:
         return None
     if cold_cache_root:
-        cache_dir: str | None = str(Path(cold_cache_root) / eco.name)
+        cache_dir: str | None = str(expand_user(cold_cache_root) / eco.name)
     else:
         cache_dir = caches.get(eco.cache_key)
     if not cache_dir:
         return None
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    cache_path = expand_user(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return str(cache_path)
 
 
 def setup_steps(
