@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `doctor` no longer renders a missing (optional) `.env` as a red `✗` failure
+  row before concluding all-good: the row is now a muted `·` note marked
+  `optional`, still showing the configured path (#5). Exit codes and the
+  `--json` payload are unchanged.
+
 ## [1.0.0] - 2026-07-06
 
 First stable release. treebox is Apache-2.0 licensed and ready for production
