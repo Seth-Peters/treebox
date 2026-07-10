@@ -1511,7 +1511,7 @@ def doctor(
     env_file = (
         provision.resolve_env_file(repo_path, cfg.env_file) if repo_path else Path(cfg.env_file)
     )
-    checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file)))
+    checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file), required=False))
 
     # Slow checks hit the network / Docker daemon — the source of doctor's "dead
     # pause". Deferred as thunks returning a row plus an optional advisory, so the

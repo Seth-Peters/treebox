@@ -101,6 +101,7 @@ class DoctorCheck:
     ok: bool
     detail: str
     advisory: str | None = None
+    required: bool = True
 
 
 class StepError(RuntimeError):
@@ -520,13 +521,23 @@ class Reporter:
         console.print(Text("  Summary: " + caption, style="wt.muted"))
         console.print()
 
-    def _doctor_row(self, name: str, ok: bool, detail: str, width: int) -> None:
+    def _doctor_row(self, check: DoctorCheck, width: int) -> None:
         """One aligned, color-coded doctor checklist row."""
+        if check.ok:
+            symbol, style, detail = "✓ ", "wt.ok", check.detail
+            label_style, detail_style = "wt.name", "wt.muted"
+        elif check.required:
+            symbol, style, detail = "✗ ", "wt.fail", check.detail
+            label_style = detail_style = "wt.fail"
+        else:
+            symbol, style = "· ", "wt.muted"
+            detail = f"{check.detail} · optional"
+            label_style = detail_style = "wt.muted"
         row = Text("    ")
-        row.append("✓ " if ok else "✗ ", style="wt.ok" if ok else "wt.fail")
-        row.append(f"{name:<{width}}", style="wt.name" if ok else "wt.fail")
+        row.append(symbol, style=style)
+        row.append(f"{check.name:<{width}}", style=label_style)
         row.append("   ")
-        row.append(detail, style="wt.muted" if ok else "wt.fail")
+        row.append(detail, style=detail_style)
         self.data_console.print(row)
 
     def render_doctor(
@@ -551,7 +562,7 @@ class Reporter:
 
         checks = list(cheap)
         for c in cheap:
-            self._doctor_row(c.name, c.ok, c.detail, width)
+            self._doctor_row(c, width)
 
         advisories: list[str] = []
         for label, check in slow:
@@ -566,7 +577,7 @@ class Reporter:
             )
             with spinner:
                 result = check()
-            self._doctor_row(result.name, result.ok, result.detail, width)
+            self._doctor_row(result, width)
             checks.append(result)
             if result.advisory:
                 advisories.append(result.advisory)
