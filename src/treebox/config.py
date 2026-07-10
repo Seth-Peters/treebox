@@ -43,7 +43,14 @@ DEFAULT_TEMPLATE = "default"
 
 @dataclass(frozen=True)
 class Config:
-    """Resolved settings for a single invocation."""
+    """Resolved settings for a single invocation.
+
+    Path-valued fields (``root``, ``env_file``, ``caches`` values) coming out
+    of ``load_config`` hold already-``expand_user``-ed strings, so display
+    sites can print them verbatim. Use sites (``worktree_root``,
+    ``resolve_env_file``, ``_cache_dir_for``, docker cache mounts) expand
+    again, idempotently, to also cover CLI flags and directly constructed
+    Configs."""
 
     isolation: str = DEFAULT_ISOLATION
     harness: str = DEFAULT_HARNESS

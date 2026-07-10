@@ -1773,6 +1773,19 @@ def test_create_root_flag_expands_quoted_tilde_in_dry_run_json(
     assert payload["worktree_path"] == str(home / "cli-wts" / "tilde-root")
 
 
+def test_repo_flag_expands_quoted_tilde(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_user_config
+):
+    # Without expansion the literal ~/repo is NOT_A_REPO and exits 2.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    res = _cli(["list", "--repo", "~/repo", "--json"])
+
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["worktrees"] == []
+
+
 def test_invalid_config_is_clean_usage_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # A one-character typo in the user's TOML must not dump a traceback: every
     # command exits 2 (EXIT_USAGE) with a styled message instead.

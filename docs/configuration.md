@@ -39,9 +39,10 @@ npm = "/mnt/fast/cache/npm"
 ```
 
 Path-valued keys understand a leading `~`: `root`, `env_file`, and every
-`caches` entry expand `~/…` to your home directory before use, as does a
-quoted `--root '~/trees'` on the command line. Ordinary relative paths keep
-their meaning: `root` and `env_file` stay relative to the repo.
+`caches` entry expand `~/…` to your home directory before use, as do quoted
+`--root '~/trees'` and `--repo '~/proj'` on the command line. Ordinary
+relative paths keep their meaning: `root` and `env_file` stay relative to the
+repo.
 
 For a new `create`, precedence is what you'd expect:
 

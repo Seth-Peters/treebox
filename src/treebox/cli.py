@@ -47,6 +47,7 @@ from .models import (
     Worktree,
     WorktreeRow,
     derive_name,
+    expand_user,
     flatten_branch,
     is_placeholder,
     is_valid_name,
@@ -258,7 +259,7 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
         # Anchor to the *main* worktree so every command sees the same worktree
         # set and root whether invoked from the repo, from .treebox/, or from
         # inside a linked worktree (where --show-toplevel would mislead us).
-        return git.main_worktree(repo)
+        return git.main_worktree(expand_user(repo))
     except git.GitError as exc:
         raise _die(
             reporter,
@@ -1489,7 +1490,7 @@ def doctor(
 
     repo_path = ""
     try:
-        repo_path = git.main_worktree(repo)
+        repo_path = git.main_worktree(expand_user(repo))
         checks.append(DoctorCheck("repo", True, repo_path))
     except git.GitError as exc:
         checks.append(DoctorCheck("repo", False, str(exc)))
