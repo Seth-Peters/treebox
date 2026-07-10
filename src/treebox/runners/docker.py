@@ -409,7 +409,7 @@ class DockerRunner:
             host_dir = self.config.caches.get(eco.cache_key)
             if not host_dir:
                 continue
-            mounts.append(_mount(host_dir, target))
+            mounts.append(_mount(Path(host_dir).expanduser(), target))
             var = eco.container_env_var()
             if var:
                 env[var] = target
@@ -433,7 +433,7 @@ class DockerRunner:
                 continue
             host_dir = self.config.caches.get(eco.cache_key)
             if host_dir:
-                Path(host_dir).mkdir(parents=True, exist_ok=True)
+                Path(host_dir).expanduser().mkdir(parents=True, exist_ok=True)
 
     def _write_config(self, wt: Worktree, *, cold: bool) -> ContainerConfig:
         """Render the operator template into the host-side config dir (outside

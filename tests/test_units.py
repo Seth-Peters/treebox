@@ -229,6 +229,12 @@ def test_worktree_path_is_name_keyed(tmp_path: Path):
     assert worktree_path("/r", "/abs/wt", "x") == Path("/abs/wt/x")
 
 
+def test_worktree_path_expands_tilde_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    assert worktree_path("/r", "~/tilde-wts", "fix-auth") == home / "tilde-wts" / "fix-auth"
+
+
 def test_resolve_ref_name_branch_substring(monkeypatch: pytest.MonkeyPatch):
     from treebox import git, resolve
     from treebox.provision import NotFoundError
@@ -373,6 +379,21 @@ def test_setup_steps_wire_cache_env(tmp_path: Path):
     assert uv.argv[:2] == ["uv", "sync"]
 
 
+def test_setup_steps_expand_tilde_cache_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "uv.lock").write_text("")
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[caches]\nuv = "~/tilde-uv-cache"\n')
+    cfg = load_config(cfg_file)
+
+    steps = ecosystems.setup_steps(ecosystems.detect(tmp_path), cfg.caches, cold_cache_root=None)
+    uv = next(s for s in steps if s.name == "uv")
+    assert uv.env["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    assert ecosystems.cache_env(cfg.caches)["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    assert (home / "tilde-uv-cache").is_dir()
+
+
 def test_setup_steps_cold_redirects_cache(tmp_path: Path):
     (tmp_path / "uv.lock").write_text("")
     cold = str(tmp_path / "cold")
@@ -443,6 +464,18 @@ def test_cache_dir_routing_agrees_between_setup_steps_and_cache_env(tmp_path: Pa
     assert uv.env["UV_CACHE_DIR"] == env["UV_CACHE_DIR"] == str(Path(cold) / "uv")
 
 
+def test_config_env_file_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from treebox.provision import resolve_env_file
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('env_file = "~/tilde-secrets/.env"\n')
+    cfg = load_config(cfg_file)
+
+    assert resolve_env_file(tmp_path / "repo", cfg.env_file) == home / "tilde-secrets" / ".env"
+
+
 def test_config_defaults_and_validation(tmp_path: Path):
     cfg = load_config(tmp_path / "missing.toml")
     assert cfg.isolation == "host" and cfg.harness == "claude"
@@ -480,6 +513,22 @@ def _boxed_worktree(tmp_path: Path, branch: str = "feature/x") -> Worktree:
     wt_path = tmp_path / "root" / name
     wt_path.mkdir(parents=True, exist_ok=True)
     return Worktree("/repo", name, branch, "main", wt_path)
+
+
+def test_docker_cache_mount_expands_tilde_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    runner = DockerRunner(Config(isolation="docker", caches={"uv": "~/tilde-uv-cache"}))
+    wt = _boxed_worktree(tmp_path)
+
+    runner._write_config(wt, cold=False)
+
+    data = json.loads(runner._config_file(wt).read_text())
+    expected = "type=bind,source=" + str(home / "tilde-uv-cache") + ",target=/caches/uv"
+    assert expected in data["mounts"]
+    assert data["env"]["UV_CACHE_DIR"] == "/caches/uv"
 
 
 def test_docker_config_injection(tmp_path: Path, fake_common_dir):
@@ -1660,6 +1709,31 @@ def test_emit_json_serialization_is_defined_once():
     payload = {"schemaVersion": 1, "error": {"code": "X", "message": "m"}}
     _emit_json(payload, stream=buf)
     assert buf.getvalue() == json.dumps(payload, indent=2) + "\n"
+
+
+def test_create_root_flag_expands_quoted_tilde_in_dry_run_json(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_user_config
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    res = _cli(
+        [
+            "create",
+            "tilde-root",
+            "--repo",
+            str(repo),
+            "--root",
+            "~/cli-wts",
+            "--dry-run",
+            "--no-fetch",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["worktree_path"] == str(home / "cli-wts" / "tilde-root")
 
 
 def test_invalid_config_is_clean_usage_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

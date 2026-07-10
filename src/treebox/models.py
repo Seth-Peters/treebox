@@ -60,10 +60,10 @@ def flatten_branch(branch: str) -> str:
 
 def worktree_root(repo: str, root: str) -> Path:
     """Absolute worktree root. ``root`` may be absolute or relative to repo."""
-    p = Path(root)
+    p = Path(root).expanduser()
     if p.is_absolute():
         return p
-    return Path(repo) / root
+    return Path(repo) / p
 
 
 def worktree_path(repo: str, root: str, name: str) -> Path:

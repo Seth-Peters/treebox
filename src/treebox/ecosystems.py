@@ -152,13 +152,14 @@ def _cache_dir_for(
     if not eco.cache_key:
         return None
     if cold_cache_root:
-        cache_dir: str | None = str(Path(cold_cache_root) / eco.name)
+        cache_dir: str | None = str(Path(cold_cache_root).expanduser() / eco.name)
     else:
         cache_dir = caches.get(eco.cache_key)
     if not cache_dir:
         return None
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    cache_path = Path(cache_dir).expanduser()
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return str(cache_path)
 
 
 def setup_steps(
