@@ -55,6 +55,21 @@ def load(worktree: str | Path) -> WorktreeState | None:
         path = _state_path(worktree)
     except git.GitError:
         return None
+    return _read(path)
+
+
+def load_registered(repo: str | Path, worktree: str | Path) -> WorktreeState | None:
+    """Load state through the repo's own worktree registration instead of the
+    worktree's ``.git`` pointer. A corrupt worktree (missing pointer) makes the
+    pointer route resolve into the MAIN repo and read nothing, while the state
+    recorded at create time still sits in the surviving registration dir."""
+    gitdir = git.registered_gitdir(repo, worktree)
+    if gitdir is None:
+        return None
+    return _read(gitdir / _STATE_FILE)
+
+
+def _read(path: Path) -> WorktreeState | None:
     if not path.is_file():
         return None
     try:

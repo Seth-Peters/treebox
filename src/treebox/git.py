@@ -588,6 +588,27 @@ def worktree_registered(repo: str | Path, path: str) -> bool:
     return any(same_path(rec.path, path) for rec in worktree_list(repo))
 
 
+def registered_gitdir(repo: str | Path, path: str | Path) -> Path | None:
+    """The per-worktree git dir (``.git/worktrees/<id>``) the repo's own
+    registration records for ``path``, found without consulting the worktree's
+    ``.git`` pointer - so it still resolves when that pointer is missing or
+    corrupt. None when no registration names ``path``."""
+    try:
+        worktrees = common_dir(repo) / "worktrees"
+    except GitError:
+        return None
+    if not worktrees.is_dir():
+        return None
+    for admin in sorted(worktrees.iterdir()):
+        try:
+            pointer = (admin / "gitdir").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if pointer and same_path(Path(pointer).parent, path):
+            return admin
+    return None
+
+
 def is_dirty(worktree: str | Path) -> bool:
     # Submodules are copied without linkage (their gitlink points at a modules
     # dir that doesn't exist in the worktree), so ignore submodule state — both

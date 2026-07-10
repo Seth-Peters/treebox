@@ -363,7 +363,7 @@ def _finish_setup(
 # --- orchestration -----------------------------------------------------------
 
 
-def _links_to_worktree_gitdir(repo: str, path: Path) -> bool:
+def links_to_worktree_gitdir(repo: str, path: Path) -> bool:
     """Whether ``path`` is a healthy linked worktree of ``repo``: its ``.git``
     pointer FILE resolves to a per-worktree git dir under the repo's common git
     dir. A missing/corrupt pointer (e.g. an interrupted teardown that rm-rf'd it
@@ -417,7 +417,7 @@ def create(
         # git's main-side registration): git commands inside it silently resolve
         # to the MAIN repository, so "finishing setup" would rewrite the real
         # checkout's hooksPath — and state.load would walk up and read None.
-        linked = _links_to_worktree_gitdir(repo, wt.path)
+        linked = links_to_worktree_gitdir(repo, wt.path)
         prior = state.load(wt.path) if linked else None
         actual = git.branch_for_path(repo, str(wt.path)) or ""
         # Resume ONLY a genuinely half-built treebox worktree: linkage intact,

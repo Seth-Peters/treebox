@@ -80,6 +80,9 @@ existing worktree, `enter` and `teardown` recover the recorded isolation and
 template instead of drifting to today's config defaults; `enter` also reuses the
 recorded firewall, and it reuses the recorded harness unless a per-session
 harness override is passed.
+`teardown` reads that record through the repo's own worktree registration
+rather than the worktree's `.git` pointer, so the recorded choices survive
+even a corrupt worktree whose pointer file is gone.
 An explicit `--isolation` that disagrees with the recorded mode is a conflict,
 not an override.
 
