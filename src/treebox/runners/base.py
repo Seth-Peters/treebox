@@ -27,7 +27,7 @@ login dirs and normal host repo access.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from ..harnesses import Harness
 from ..models import Worktree
@@ -51,6 +51,30 @@ class PreflightError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.hint = hint
+
+
+RunnerTeardownStatus = Literal["cleaned", "skipped"]
+
+
+@dataclass(frozen=True)
+class RunnerTeardownResult:
+    """Observable result of a runner-specific teardown attempt.
+
+    Exceptions still mean cleanup failed best-effort; this result distinguishes
+    successful cleanup work from an honest skip, and reports whether per-runner
+    volumes were actually removed.
+    """
+
+    container: RunnerTeardownStatus
+    volumes_removed: bool = False
+
+    @classmethod
+    def cleaned(cls, *, volumes_removed: bool = False) -> RunnerTeardownResult:
+        return cls("cleaned", volumes_removed=volumes_removed)
+
+    @classmethod
+    def skipped(cls) -> RunnerTeardownResult:
+        return cls("skipped")
 
 
 @dataclass(frozen=True)
@@ -105,7 +129,9 @@ class Runner(Protocol):
         """Launch the agent, returning its exit code."""
         ...
 
-    def teardown(self, wt: Worktree, *, reporter: Reporter) -> None:
+    def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Tear down this runner's resources for ``wt``, honoring any
-        teardown options the runner was constructed with."""
+        teardown options the runner was constructed with. Returns the resources
+        that were actually touched; raises when cleanup was attempted and failed.
+        """
         ...
