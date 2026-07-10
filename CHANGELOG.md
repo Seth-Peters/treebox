@@ -18,13 +18,13 @@ or inside a docker sandbox.
 - `treebox template init|list|path` — scaffold and inspect operator-owned docker
   sandbox templates from any install (`uv tool` / pipx included), so customizing
   a sandbox no longer means hand-copying the shipped template directory or
-  reaching into the package internals (#155).
+  reaching into the package internals.
 
 ### Changed
 
 - **Breaking:** `treebox create NAME` now uses `NAME` directly as the branch
   name, created fresh from `origin/<base>` — no more `treebox/NAME`
-  placeholder or forced rename for explicitly named work (#153). Names may
+  placeholder or forced rename for explicitly named work. Names may
   contain slashes (`feature/auth`); the directory flattens them to `--`
   (`feature--auth`). Scripts that expected the guarded `treebox/<NAME>`
   placeholder get a directly pushable `NAME` branch instead. The `treebox/`
