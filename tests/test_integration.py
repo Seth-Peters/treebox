@@ -1829,6 +1829,67 @@ def test_teardown_json_reports_docker_unavailable_as_skipped(
     assert record["removed"] is True
 
 
+def test_teardown_json_reports_failed_volume_removal_honestly(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    from treebox.runners.docker import DockerRunner
+
+    wt = Path(root) / "volfail"
+    _run(["create", "volfail", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_state_runner(wt, "docker")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
+    monkeypatch.setattr(DockerRunner, "_container_ids", lambda self, worktree: ["abc123"])
+    monkeypatch.setattr(
+        DockerRunner,
+        "_container_volumes",
+        lambda self, ids: ["treebox-volfail"],
+    )
+    monkeypatch.setattr(
+        DockerRunner,
+        "_container_image",
+        lambda self, ids: "python:3.14",
+    )
+    monkeypatch.setattr(DockerRunner, "_template_volumes", lambda self, worktree: [])
+
+    def fake_engine(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        if args[:2] == ["volume", "rm"]:
+            return subprocess.CompletedProcess(
+                ["docker", *args],
+                1,
+                "",
+                "volume is in use",
+            )
+        return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+    monkeypatch.setattr(DockerRunner, "_engine", fake_engine)
+
+    res = _run(
+        [
+            "teardown",
+            "volfail",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0, res.output
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["container"] == "failed"
+    assert record["volumes_removed"] is False
+    assert record["removed"] is True
+    assert ["rm", "-f", "abc123"] in calls
+    assert ["volume", "rm", "treebox-volfail"] in calls
+    assert not wt.exists()
+
+
 def test_teardown_json_host_remove_volumes_reports_none_removed(
     repo: Path, root: str, hermetic_config
 ):
