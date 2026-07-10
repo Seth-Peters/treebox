@@ -174,8 +174,10 @@ config.
 Dependencies re-sync **only if the lockfile changed** since the last setup
 (treebox stores the hash in the worktree's private git dir, so it never shows
 up in `git status`); a re-sync preserves the recorded harness and template
-rather than stamping in the session's choice. Anything after `--` is passed
-through to the agent. `--cold` forces a cache-bypassing re-sync.
+rather than stamping in the session's choice. If a previous run died before
+setup completed, `enter` finishes the setup even though the recorded hash
+matches, instead of launching into a half-built tree. Anything after `--` is
+passed through to the agent. `--cold` forces a cache-bypassing re-sync.
 
 Under docker isolation, `enter` **preflights the Docker daemon first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
@@ -228,9 +230,15 @@ treebox volumes and `--skip-container` leaves containers/images untouched.
 a prompt).
 
 Container/image cleanup and local branch deletion are best-effort after the
-target set is chosen: if cleanup fails, treebox can still remove the worktree
-and report `container: "failed"`; if branch deletion fails, it warns and
-reports `branch_deleted: false` without undoing the worktree removal.
+target set is chosen: if a container or image removal fails, treebox warns,
+still attempts every remaining cleanup step (volumes, sandbox files), removes
+the worktree, and reports `container: "failed"`; a failed volume removal
+alone warns and reports `volumes_removed: false` without marking the
+container `failed`; if Docker itself is unavailable, the worktree is still
+removed and the record reports `container: "skipped"` with
+`volumes_removed: false`, even under `--remove-volumes`; if branch deletion
+fails, it warns and reports `branch_deleted: false` without undoing the
+worktree removal.
 
 **Run it with no refs** and treebox walks you through the whole decision — an
 arrow-key picker (`↑↓` to move, space to toggle, enter to confirm) over your
@@ -287,6 +295,19 @@ so a script can still tell the run wasn't total. (Passing refs explicitly stays
 all-or-nothing — naming a dirty tree stops the whole run. `--force` removes
 dirty worktrees either way.) The chooser is interactive-only: under `--json`
 or a non-TTY, pass refs explicitly.
+
+`teardown` is also the recovery path for a **corrupt** worktree - a registered
+directory whose `.git` pointer file is gone (say, after an interrupted removal
+by hand). Git commands inside such a directory silently answer for the *main*
+checkout, so treebox verifies the worktree's git linkage before asking whether
+it is dirty: a corrupt worktree is never blocked as "dirty" just because your
+main checkout has uncommitted changes. It takes the normal confirmation path
+instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
+removal clears both the directory and git's stale registration without
+touching the main checkout's files. Container cleanup survives the corruption
+too: teardown reads the worktree's recorded isolation and template through
+git's own registration rather than the missing pointer, so a corrupt docker
+worktree is still torn down with the runner it was created with.
 
 If a worktree's recorded isolation mode is unknown (corrupt or hand-edited
 state), teardown refuses it as a conflict rather than guessing how to drive its
@@ -392,7 +413,13 @@ Current success payloads:
 `deps` is `fresh`, `stale`, or `unknown`; `env` is `present` or `absent`.
 `teardown` records contain `name`, `branch`, `worktree_path`, `removed`,
 `branch_deleted`, `container`, and `volumes_removed`; `container` is `cleaned`,
-`skipped`, or `failed`. `doctor` checks contain `name`,
+`skipped`, or `failed`. Each field reports what the runner actually did to
+that resource: `container` is `skipped` when cleanup didn't run
+(`--skip-container`, or Docker unavailable) and `failed` when a container or
+image removal failed, while `volumes_removed` is `true` only when docker
+volumes were really removed - never on host isolation, not merely because
+`--remove-volumes` was passed, and a failed volume removal leaves it `false`
+without marking `container` failed. `doctor` checks contain `name`,
 `ok`, and `detail`.
 
 JSON errors are emitted to stderr as:

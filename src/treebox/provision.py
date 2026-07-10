@@ -381,7 +381,7 @@ def _finish_setup(
 # --- orchestration -----------------------------------------------------------
 
 
-def _links_to_worktree_gitdir(repo: str, path: Path) -> bool:
+def links_to_worktree_gitdir(repo: str, path: Path) -> bool:
     """Whether ``path`` is a healthy linked worktree of ``repo``: its ``.git``
     pointer FILE resolves to a per-worktree git dir under the repo's common git
     dir. A missing/corrupt pointer (e.g. an interrupted teardown that rm-rf'd it
@@ -399,7 +399,7 @@ def _links_to_worktree_gitdir(repo: str, path: Path) -> bool:
 
 def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictError:
     conflict = SlugConflictError(wt.name, wt.path)
-    linked = _links_to_worktree_gitdir(repo, wt.path)
+    linked = links_to_worktree_gitdir(repo, wt.path)
     actual = git.branch_for_path(repo, str(wt.path)) or ""
     if not linked or (not actual and not git.worktree_registered(repo, str(wt.path))):
         conflict.hint = (
@@ -414,7 +414,7 @@ def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictErr
 
 def _is_resumable_unprovisioned_worktree(repo: str, wt: Worktree, branch: str) -> bool:
     """Whether real create would finish setup in this existing worktree."""
-    if not _links_to_worktree_gitdir(repo, wt.path):
+    if not links_to_worktree_gitdir(repo, wt.path):
         return False
     prior = state.load(wt.path)
     actual = git.branch_for_path(repo, str(wt.path)) or ""
@@ -601,8 +601,9 @@ def enter(
     args: list[str],
     reporter: Reporter,
 ) -> Outcome:
-    """Re-prepare an existing worktree: refresh .env, re-sync deps only if the
-    lockfile changed since last setup. The branch is read live — the agent may
+    """Re-prepare an existing worktree: refresh .env, re-run setup if the
+    lockfile changed since last setup or a prior setup never completed
+    (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
     wt = Worktree.locate(repo, config.root, name)
     if not wt.path.is_dir():
@@ -621,9 +622,13 @@ def enter(
     runner.refresh(wt, reporter=reporter)
 
     current = ecosystems.lockfile_hash(wt.path)
+    unfinished = prior is not None and not prior.provisioned
     changed = prior is None or prior.lockfile_hash != current
-    if changed:
-        reporter.info("dependencies changed since last setup — re-syncing")
+    if unfinished or changed:
+        if unfinished:
+            reporter.info("setup never completed — finishing setup")
+        else:
+            reporter.info("dependencies changed since last setup — re-syncing")
         runner.setup(wt, cold=cold, reporter=reporter)
         # Preserve the recorded harness: ``harness`` is this session's launch
         # choice (possibly an explicit one-off -H override), and a dep re-sync

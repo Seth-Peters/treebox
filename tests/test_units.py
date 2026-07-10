@@ -985,6 +985,7 @@ class _FakeDocker:
         env: str = "",
         volume_ls: str = "",
         info_rc: int = 0,
+        failures: dict[tuple[str, ...], str] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self._ids = ids
@@ -995,12 +996,14 @@ class _FakeDocker:
         self._env = env
         self._volume_ls = volume_ls
         self._info_rc = info_rc
+        self._failures = failures or {}
 
     def __call__(self, args: list[str]):
         import subprocess
 
         self.calls.append(list(args))
         stdout = ""
+        stderr = ""
         rc = 0
         if args[0] == "info":
             rc = self._info_rc  # daemon down <=> non-zero `docker info`
@@ -1017,7 +1020,11 @@ class _FakeDocker:
                 stdout = f"/{self._name}\n{running}\n{self._env}"
             else:
                 stdout = self._volumes
-        return subprocess.CompletedProcess(["docker", *args], rc, stdout, "")
+        failure = self._failures.get(tuple(args))
+        if failure is not None:
+            rc = 1
+            stderr = failure
+        return subprocess.CompletedProcess(["docker", *args], rc, stdout, stderr)
 
 
 class _RecordingReporter:
@@ -1299,8 +1306,10 @@ def test_docker_teardown_removes_own_image_and_treebox_volumes(tmp_path: Path):
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == "cleaned"
+    assert result.volumes_removed is True
     assert ["rm", "-f", "abc123"] in fake.calls
     assert ["image", "rm", image] in fake.calls
     volume_rms = [c for c in fake.calls if c[:2] == ["volume", "rm"]]
@@ -1316,8 +1325,10 @@ def test_docker_teardown_keeps_foreign_image_and_volumes_by_default(tmp_path: Pa
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
     wt = _boxed_worktree(tmp_path)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == "cleaned"
+    assert result.volumes_removed is False
     assert ["rm", "-f", "abc123"] in fake.calls
     assert not any(c[:2] == ["image", "rm"] for c in fake.calls)
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
@@ -1330,10 +1341,56 @@ def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
+    assert result.container == "skipped"
+    assert result.volumes_removed is False
     # No daemon → nothing beyond the availability probe touches docker.
     assert fake.calls == [["info"]]
+
+
+@pytest.mark.parametrize(
+    ("failed_command", "expected_container", "expected_volumes_removed", "image_rm_attempted"),
+    [
+        (("rm", "-f", "abc123"), "failed", True, False),
+        (("image", "rm", "treebox-feature--x-deadbeef00"), "failed", True, True),
+        (("volume", "rm", "treebox-claude-config"), "cleaned", False, True),
+    ],
+)
+def test_docker_teardown_continues_past_destructive_command_failure(
+    tmp_path: Path,
+    failed_command: tuple[str, ...],
+    expected_container: str,
+    expected_volumes_removed: bool,
+    image_rm_attempted: bool,
+):
+    """One failed removal must not abort the rest of the cleanup — the caller
+    deletes the state that could retry it right after teardown, so every
+    remaining step still runs (only a doomed image rm after a failed container
+    rm is skipped) and the result reports each resource's outcome honestly:
+    a failed volume rm alone leaves the container status accurate."""
+    from treebox.output import Reporter
+
+    image = "treebox-feature--x-deadbeef00"
+    fake = _FakeDocker(
+        ids="abc123\n",
+        image=f"{image}\n",
+        volumes="treebox-claude-config\n",
+        failures={failed_command: "removal denied"},
+    )
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
+    wt = _boxed_worktree(tmp_path)
+    cfg_dir = runner._config_dir(wt)
+    cfg_dir.mkdir(parents=True)
+
+    result = runner.teardown(wt, reporter=Reporter(quiet=True))
+
+    assert result.container == expected_container
+    assert result.volumes_removed is expected_volumes_removed
+    assert list(failed_command) in fake.calls
+    assert (["image", "rm", image] in fake.calls) is image_rm_attempted
+    assert ["volume", "rm", "treebox-claude-config"] in fake.calls
+    assert not cfg_dir.exists()
 
 
 def test_docker_teardown_no_container_removes_config_dir(tmp_path: Path):
@@ -1422,6 +1479,7 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     from treebox.resolve import Candidate
 
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    monkeypatch.setattr(git, "registered_gitdir", lambda repo, p: tmp_path)
     state.save(
         tmp_path,
         state.WorktreeState(base="main", isolation="docker", harness="claude", template="hardened"),
@@ -1432,6 +1490,7 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
         Reporter(quiet=True),
         Config(isolation="docker", template="default"),
         cand,
+        str(tmp_path),
         explicit=None,
         remove_volumes=True,
         json_out=False,

@@ -1212,7 +1212,15 @@ def teardown(
     # so). For explicit refs it stays all-or-nothing: naming a dirty tree should
     # stop the whole run — a scripting contract, not a partial surprise.
     def _blocked_dirty(c: resolve.Candidate) -> bool:
-        return Path(c.path).is_dir() and not force and git.is_dirty(c.path)
+        path = Path(c.path)
+        # A missing/corrupt .git pointer lets git walk up into the main
+        # checkout, so only ask git about dirtiness after linkage is proven.
+        return (
+            not force
+            and path.is_dir()
+            and provision.links_to_worktree_gitdir(repo_path, path)
+            and git.is_dirty(path)
+        )
 
     skipped_dirty: list[resolve.Candidate] = []
     if from_chooser:
@@ -1275,6 +1283,7 @@ def teardown(
                             reporter,
                             cfg,
                             cand,
+                            repo_path,
                             explicit=isolation,
                             remove_volumes=remove_volumes,
                             json_out=json_out,
@@ -1352,12 +1361,21 @@ def _teardown_runner(
     reporter: Reporter,
     cfg: Config,
     cand: resolve.Candidate,
+    repo_path: str,
     *,
     explicit: str | None,
     remove_volumes: bool,
     json_out: bool,
 ) -> Runner:
     """Resolve one teardown target's runner from its recorded isolation mode.
+
+    The record is read through the repo's own worktree registration
+    (`state.load_registered`), never through the worktree's ``.git`` pointer:
+    a corrupt tree (missing pointer, the documented teardown recovery path)
+    would make the pointer route resolve into the MAIN repo, read no state,
+    and silently fall back to the config default - tearing a docker worktree
+    down with the host runner and leaking its container while reporting
+    ``container: "cleaned"``.
 
     Called for the whole batch *before* any removal: the mismatch/unknown
     conflicts `_reconcile_with_state` raises must abort an untouched batch
@@ -1373,7 +1391,7 @@ def _teardown_runner(
     options are owned by the runner, so only runners with per-worktree volumes
     see it."""
     exists = Path(cand.path).is_dir()
-    st = state.load(cand.path) if exists else None
+    st = state.load_registered(repo_path, cand.path) if exists else None
     cfg_run = _reconcile_with_state(reporter, cfg, st, isolation=explicit, json_out=json_out)
     return get_runner(cfg_run, remove_volumes=remove_volumes)
 
@@ -1397,7 +1415,7 @@ def _teardown_one(
     ``--skip-container`` (no container work, so no runner was resolved)."""
     wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
     exists = wt.path.is_dir()
-    st = state.load(wt.path) if exists else None
+    st = state.load_registered(repo_path, wt.path) if exists else None
 
     branch_name = (
         cand.branch
@@ -1406,6 +1424,7 @@ def _teardown_one(
     )
 
     container: ContainerOutcome
+    volumes_removed = False
     if skip_container:
         container = "skipped"
         reporter.note("container", "skipped")
@@ -1425,8 +1444,9 @@ def _teardown_one(
         try:
             # The runner was constructed with the batch's volume choice
             # (_teardown_runner); teardown options are its own business.
-            run.teardown(wt, reporter=reporter)
-            container = "cleaned"
+            teardown_result = run.teardown(wt, reporter=reporter)
+            container = teardown_result.container
+            volumes_removed = teardown_result.volumes_removed
         except Exception as exc:  # teardown is best-effort
             container = "failed"
             reporter.warn(f"isolation teardown: {exc}")
@@ -1462,7 +1482,7 @@ def _teardown_one(
         removed=exists,
         branch_deleted=branch_deleted,
         container=container,
-        volumes_removed=remove_volumes and container == "cleaned",
+        volumes_removed=volumes_removed,
     )
 
 

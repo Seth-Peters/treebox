@@ -31,7 +31,8 @@ class WorktreeState:
     # Recorded False *before* setup runs (so the runner is known even if a docker
     # build/run leaves a container behind on failure), flipped True once setup
     # completes. `create` uses it to tell a half-built tree (finish it) from a
-    # fully-provisioned one (a slug conflict).
+    # fully-provisioned one (a slug conflict); `enter` uses it to finish an
+    # interrupted setup even when the lockfile hash is unchanged.
     provisioned: bool = False
     # The firewall choice this worktree was created with, so `enter` honors the
     # created-time decision instead of re-resolving the config default (which
@@ -54,6 +55,21 @@ def load(worktree: str | Path) -> WorktreeState | None:
         path = _state_path(worktree)
     except git.GitError:
         return None
+    return _read(path)
+
+
+def load_registered(repo: str | Path, worktree: str | Path) -> WorktreeState | None:
+    """Load state through the repo's own worktree registration instead of the
+    worktree's ``.git`` pointer. A corrupt worktree (missing pointer) makes the
+    pointer route resolve into the MAIN repo and read nothing, while the state
+    recorded at create time still sits in the surviving registration dir."""
+    gitdir = git.registered_gitdir(repo, worktree)
+    if gitdir is None:
+        return None
+    return _read(gitdir / _STATE_FILE)
+
+
+def _read(path: Path) -> WorktreeState | None:
     if not path.is_file():
         return None
     try:

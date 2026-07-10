@@ -59,7 +59,8 @@ plain SSH.
     ---
 
     Installs hardlink from shared caches (`~/.cache/uv`, the pnpm store, …).
-    `enter` re-syncs only when the lockfile changed.
+    `enter` re-syncs only when the lockfile changed (an interrupted setup
+    is finished rather than skipped).
 
 - :material-cube-outline:{ .lg .middle } **The sandbox config lives outside the box**
 
