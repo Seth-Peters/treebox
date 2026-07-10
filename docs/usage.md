@@ -14,8 +14,9 @@ Two commands sit alongside the lifecycle: [`template`](#template-scaffold-and-in
 scaffolds and inspects the docker sandbox templates, and `version` prints the
 installed version.
 
-Worktree commands run against the current repo; pass `--repo PATH` to point
-elsewhere, or `--root DIR` to override the worktree root for this invocation.
+Worktree commands run against the current repo; pass `--repo PATH` (absolute,
+relative, or `~`-prefixed) to point elsewhere, or `--root DIR` (repo-relative,
+absolute, or `~`-prefixed) to override the worktree root for this invocation.
 `treebox version`, `treebox --version`, and `treebox -V` print the installed
 version.
 

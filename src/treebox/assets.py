@@ -28,6 +28,7 @@ from importlib import resources
 from pathlib import Path
 
 from .config import treebox_home
+from .models import expand_user
 
 DEFAULT_TEMPLATE = "default"
 
@@ -92,7 +93,7 @@ def template_dir(name: str = DEFAULT_TEMPLATE) -> Path:
     """
     explicit = os.environ.get("TREEBOX_TEMPLATE_DIR")
     if explicit:
-        return Path(explicit).expanduser()
+        return expand_user(explicit)
 
     user = user_templates_root() / name
     if user.is_dir():

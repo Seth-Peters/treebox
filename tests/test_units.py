@@ -229,6 +229,20 @@ def test_worktree_path_is_name_keyed(tmp_path: Path):
     assert worktree_path("/r", "/abs/wt", "x") == Path("/abs/wt/x")
 
 
+def test_worktree_path_expands_tilde_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    assert worktree_path("/r", "~/tilde-wts", "fix-auth") == home / "tilde-wts" / "fix-auth"
+
+
+def test_unresolvable_tilde_root_stays_literal_repo_relative():
+    # `Path.expanduser` would raise RuntimeError here; treebox must keep the
+    # pre-expansion behavior: an unknown ~user marker is a literal name.
+    assert worktree_path("/r", "~nosuchuser-treebox/wts", "x") == Path(
+        "/r/~nosuchuser-treebox/wts/x"
+    )
+
+
 def test_resolve_ref_name_branch_substring(monkeypatch: pytest.MonkeyPatch):
     from treebox import git, resolve
     from treebox.provision import NotFoundError
@@ -373,6 +387,21 @@ def test_setup_steps_wire_cache_env(tmp_path: Path):
     assert uv.argv[:2] == ["uv", "sync"]
 
 
+def test_setup_steps_expand_tilde_cache_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "uv.lock").write_text("")
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[caches]\nuv = "~/tilde-uv-cache"\n')
+    cfg = load_config(cfg_file)
+
+    steps = ecosystems.setup_steps(ecosystems.detect(tmp_path), cfg.caches, cold_cache_root=None)
+    uv = next(s for s in steps if s.name == "uv")
+    assert uv.env["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    assert ecosystems.cache_env(cfg.caches)["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    assert (home / "tilde-uv-cache").is_dir()
+
+
 def test_setup_steps_cold_redirects_cache(tmp_path: Path):
     (tmp_path / "uv.lock").write_text("")
     cold = str(tmp_path / "cold")
@@ -443,6 +472,36 @@ def test_cache_dir_routing_agrees_between_setup_steps_and_cache_env(tmp_path: Pa
     assert uv.env["UV_CACHE_DIR"] == env["UV_CACHE_DIR"] == str(Path(cold) / "uv")
 
 
+def test_config_env_file_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from treebox.provision import resolve_env_file
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('env_file = "~/tilde-secrets/.env"\n')
+    cfg = load_config(cfg_file)
+
+    assert resolve_env_file(tmp_path / "repo", cfg.env_file) == home / "tilde-secrets" / ".env"
+
+
+def test_config_unresolvable_tilde_user_stays_literal(tmp_path: Path):
+    # A ~user marker that resolves to no account must load as a literal path,
+    # not raise mid-load — config mistakes stay clean usage errors, never
+    # tracebacks (see test_invalid_config_is_clean_usage_error).
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        'root = "~nosuchuser-treebox/wts"\n'
+        'env_file = "~nosuchuser-treebox/.env"\n'
+        "[caches]\n"
+        'uv = "~nosuchuser-treebox/cache"\n'
+    )
+    cfg = load_config(cfg_file)
+
+    assert cfg.root == "~nosuchuser-treebox/wts"
+    assert cfg.env_file == "~nosuchuser-treebox/.env"
+    assert cfg.caches["uv"] == "~nosuchuser-treebox/cache"
+
+
 def test_config_defaults_and_validation(tmp_path: Path):
     cfg = load_config(tmp_path / "missing.toml")
     assert cfg.isolation == "host" and cfg.harness == "claude"
@@ -480,6 +539,22 @@ def _boxed_worktree(tmp_path: Path, branch: str = "feature/x") -> Worktree:
     wt_path = tmp_path / "root" / name
     wt_path.mkdir(parents=True, exist_ok=True)
     return Worktree("/repo", name, branch, "main", wt_path)
+
+
+def test_docker_cache_mount_expands_tilde_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    runner = DockerRunner(Config(isolation="docker", caches={"uv": "~/tilde-uv-cache"}))
+    wt = _boxed_worktree(tmp_path)
+
+    runner._write_config(wt, cold=False)
+
+    data = json.loads(runner._config_file(wt).read_text())
+    expected = "type=bind,source=" + str(home / "tilde-uv-cache") + ",target=/caches/uv"
+    assert expected in data["mounts"]
+    assert data["env"]["UV_CACHE_DIR"] == "/caches/uv"
 
 
 def test_docker_config_injection(tmp_path: Path, fake_common_dir):
@@ -836,6 +911,17 @@ def test_template_dir_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     explicit.mkdir()
     monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(explicit))
     assert assets.template_dir("anything") == explicit
+
+
+def test_template_dir_tolerates_unresolvable_user(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import treebox.assets as assets
+
+    marker = "~treebox-user-that-cannot-exist/template"
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", marker)
+
+    assert assets.template_dir("anything") == Path(marker)
 
 
 def test_bundled_template_dir_outlives_the_resolution_context(
@@ -1662,6 +1748,44 @@ def test_emit_json_serialization_is_defined_once():
     assert buf.getvalue() == json.dumps(payload, indent=2) + "\n"
 
 
+def test_create_root_flag_expands_quoted_tilde_in_dry_run_json(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_user_config
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    res = _cli(
+        [
+            "create",
+            "tilde-root",
+            "--repo",
+            str(repo),
+            "--root",
+            "~/cli-wts",
+            "--dry-run",
+            "--no-fetch",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["worktree_path"] == str(home / "cli-wts" / "tilde-root")
+
+
+def test_repo_flag_expands_quoted_tilde(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_user_config
+):
+    # Without expansion the literal ~/repo is NOT_A_REPO and exits 2.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    res = _cli(["list", "--repo", "~/repo", "--json"])
+
+    assert res.exit_code == 0
+    payload = json.loads(res.stdout)
+    assert payload["worktrees"] == []
+
+
 def test_invalid_config_is_clean_usage_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # A one-character typo in the user's TOML must not dump a traceback: every
     # command exits 2 (EXIT_USAGE) with a styled message instead.
@@ -1702,6 +1826,34 @@ def test_explicit_missing_config_is_a_loud_usage_error(
     assert err["error"]["code"] == "INVALID_CONFIG"
     assert "TREEBOX_CONFIG" in err["error"]["message"]
     assert "hint" in err["error"]
+
+
+def test_path_env_overrides_tolerate_unresolvable_user(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from treebox.config import config_path, treebox_home
+
+    marker = "~treebox-user-that-cannot-exist"
+    monkeypatch.setenv("TREEBOX_HOME", f"{marker}/home")
+    assert treebox_home() == Path(f"{marker}/home")
+
+    monkeypatch.setenv("TREEBOX_CONFIG", f"{marker}/config.toml")
+    assert config_path() == Path(f"{marker}/config.toml")
+
+
+def test_unresolvable_user_config_is_clean_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv(
+        "TREEBOX_CONFIG",
+        "~treebox-user-that-cannot-exist/config.toml",
+    )
+
+    res = _cli(["list", "--json"])
+
+    assert res.exit_code == 2
+    assert "Traceback" not in res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_CONFIG"
 
 
 def test_default_missing_config_stays_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
