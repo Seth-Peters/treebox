@@ -141,7 +141,9 @@ error - `BRANCH_EXISTS` for a name whose branch already exists,
 backing another worktree - rather than printing a plan a real run would
 refuse. The one exception mirrors real `create`: a half-built worktree from an
 interrupted run previews finishing setup (no fetch, no `worktree add`) instead
-of conflicting. Either way, nothing on disk or in git changes.
+of conflicting. Dry-run verdicts reflect the refs already available locally;
+run `git fetch origin` first when exact parity with create's normal fetch is
+required. Either way, nothing on disk or in git changes.
 
 ## `enter` — come back to a worktree
 
