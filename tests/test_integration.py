@@ -556,6 +556,47 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
     assert calls == ["refresh"]  # deps unchanged: setup skipped, refresh still ran
 
 
+def test_enter_finishes_unprovisioned_state_even_when_lockfile_hash_matches(
+    repo: Path, root: str, hermetic_config
+):
+    """A setup crash records provisioned=False before dependencies finish.
+    enter must treat that as unfinished work even when the current lockfile
+    hash matches the recorded hash (notably "" for repos without lockfiles)."""
+    from treebox import ecosystems
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "half-built", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "half-built"
+    prior = state.load(wt)
+    assert prior is not None
+
+    (wt / "uv.lock").unlink()
+    (wt / "setup.log").unlink()
+    current = ecosystems.lockfile_hash(wt)
+    assert current == ""
+    state.save(
+        wt,
+        state.WorktreeState(
+            base=prior.base,
+            isolation=prior.isolation,
+            harness=prior.harness,
+            lockfile_hash=current,
+            provisioned=False,
+            firewall=prior.firewall,
+            template=prior.template,
+        ),
+    )
+
+    res = _run(["enter", "half-built", *base, "--print"])
+    assert res.exit_code == 0, res.output
+    assert "setup never completed" in res.stderr
+    assert (wt / "setup.log").read_text().strip() == "ran"
+    st = state.load(wt)
+    assert st is not None
+    assert st.provisioned is True
+    assert st.lockfile_hash == current
+
+
 def test_cold_create(repo: Path, root: str, hermetic_config):
     res = _run(["create", "cold-x", "--repo", str(repo), "--root", root, "--cold", "--print"])
     assert res.exit_code == 0, res.output

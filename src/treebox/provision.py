@@ -586,9 +586,13 @@ def enter(
     runner.refresh(wt, reporter=reporter)
 
     current = ecosystems.lockfile_hash(wt.path)
+    unfinished = prior is None or not prior.provisioned
     changed = prior is None or prior.lockfile_hash != current
-    if changed:
-        reporter.info("dependencies changed since last setup — re-syncing")
+    if unfinished or changed:
+        if prior is not None and not prior.provisioned:
+            reporter.info("setup never completed — finishing setup")
+        else:
+            reporter.info("dependencies changed since last setup — re-syncing")
         runner.setup(wt, cold=cold, reporter=reporter)
         # Preserve the recorded harness: ``harness`` is this session's launch
         # choice (possibly an explicit one-off -H override), and a dep re-sync
