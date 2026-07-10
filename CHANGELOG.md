@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `optional`, still showing the configured path (#5). Exit codes and the
   `--json` payload are unchanged.
 
+- `teardown --json` now reports what runner cleanup actually did: when Docker
+  is unavailable the worktree is still removed but the record says
+  `container: "skipped"` with `volumes_removed: false` (even under
+  `--remove-volumes`), and `volumes_removed` is `true` only when docker
+  volumes were really removed - never on host isolation (#2).
+
 ## [1.0.0] - 2026-07-06
 
 First stable release. treebox is Apache-2.0 licensed and ready for production
@@ -25,13 +31,13 @@ or inside a docker sandbox.
 - `treebox template init|list|path` — scaffold and inspect operator-owned docker
   sandbox templates from any install (`uv tool` / pipx included), so customizing
   a sandbox no longer means hand-copying the shipped template directory or
-  reaching into the package internals.
+  reaching into the package internals (#155).
 
 ### Changed
 
 - **Breaking:** `treebox create NAME` now uses `NAME` directly as the branch
   name, created fresh from `origin/<base>` — no more `treebox/NAME`
-  placeholder or forced rename for explicitly named work. Names may
+  placeholder or forced rename for explicitly named work (#153). Names may
   contain slashes (`feature/auth`); the directory flattens them to `--`
   (`feature--auth`). Scripts that expected the guarded `treebox/<NAME>`
   placeholder get a directly pushable `NAME` branch instead. The `treebox/`
