@@ -715,17 +715,17 @@ class DockerRunner:
             volumes = sorted(set(container_volumes) | (set(self._template_volumes(wt)) & existing))
         if ids:
             image = self._container_image(ids)
-            self._engine(["rm", "-f", *ids])
+            self._engine_check(["rm", "-f", *ids])
             reporter.ok("container", f"removed {' '.join(ids)}")
             # Only images we know we built: this runner's treebox-* tags.
             if image and image.startswith("treebox-"):
-                self._engine(["image", "rm", image])
+                self._engine_check(["image", "rm", image])
         else:
             reporter.note("container", "none found")
         volumes_removed = False
         if self._remove_volumes:
             if volumes:
-                self._engine(["volume", "rm", *volumes])
+                self._engine_check(["volume", "rm", *volumes])
                 reporter.ok("volumes", f"removed {' '.join(volumes)}")
                 volumes_removed = True
         elif container_volumes:

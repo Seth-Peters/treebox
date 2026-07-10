@@ -899,6 +899,7 @@ class _FakeDocker:
         env: str = "",
         volume_ls: str = "",
         info_rc: int = 0,
+        failures: dict[tuple[str, ...], str] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self._ids = ids
@@ -909,12 +910,14 @@ class _FakeDocker:
         self._env = env
         self._volume_ls = volume_ls
         self._info_rc = info_rc
+        self._failures = failures or {}
 
     def __call__(self, args: list[str]):
         import subprocess
 
         self.calls.append(list(args))
         stdout = ""
+        stderr = ""
         rc = 0
         if args[0] == "info":
             rc = self._info_rc  # daemon down <=> non-zero `docker info`
@@ -931,7 +934,11 @@ class _FakeDocker:
                 stdout = f"/{self._name}\n{running}\n{self._env}"
             else:
                 stdout = self._volumes
-        return subprocess.CompletedProcess(["docker", *args], rc, stdout, "")
+        failure = self._failures.get(tuple(args))
+        if failure is not None:
+            rc = 1
+            stderr = failure
+        return subprocess.CompletedProcess(["docker", *args], rc, stdout, stderr)
 
 
 class _RecordingReporter:
@@ -1254,6 +1261,47 @@ def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
     assert result.volumes_removed is False
     # No daemon → nothing beyond the availability probe touches docker.
     assert fake.calls == [["info"]]
+
+
+@pytest.mark.parametrize(
+    ("failed_command", "remove_volumes", "image", "volumes"),
+    [
+        (("rm", "-f", "abc123"), False, "python:3.14\n", ""),
+        (
+            ("image", "rm", "treebox-feature--x-deadbeef00"),
+            False,
+            "treebox-feature--x-deadbeef00\n",
+            "",
+        ),
+        (
+            ("volume", "rm", "treebox-claude-config"),
+            True,
+            "python:3.14\n",
+            "treebox-claude-config\n",
+        ),
+    ],
+)
+def test_docker_teardown_raises_on_destructive_command_failure(
+    tmp_path: Path,
+    failed_command: tuple[str, ...],
+    remove_volumes: bool,
+    image: str,
+    volumes: str,
+):
+    from treebox.output import Reporter
+
+    fake = _FakeDocker(
+        ids="abc123\n",
+        image=image,
+        volumes=volumes,
+        failures={failed_command: "removal denied"},
+    )
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=remove_volumes, docker=fake)
+
+    with pytest.raises(RuntimeError, match="removal denied"):
+        runner.teardown(_boxed_worktree(tmp_path), reporter=Reporter(quiet=True))
+
+    assert list(failed_command) in fake.calls
 
 
 def test_docker_teardown_no_container_removes_config_dir(tmp_path: Path):
