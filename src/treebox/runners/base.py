@@ -53,15 +53,18 @@ class PreflightError(RuntimeError):
         self.hint = hint
 
 
-RunnerTeardownStatus = Literal["cleaned", "skipped"]
+RunnerTeardownStatus = Literal["cleaned", "skipped", "failed"]
 
 
 @dataclass(frozen=True)
 class RunnerTeardownResult:
     """Observable result of a runner-specific teardown attempt.
 
-    Exceptions still mean cleanup failed best-effort; this result distinguishes
-    successful cleanup work from an honest skip, and reports whether per-runner
+    ``failed`` means a container/image removal was attempted and failed after
+    every remaining cleanup step was still tried - the caller deletes the
+    worktree's recorded state right after teardown, so a step skipped here
+    could never be retried and its resources would leak forever. This result
+    distinguishes that from an honest skip, and reports whether per-runner
     volumes were actually removed.
     """
 
@@ -131,7 +134,8 @@ class Runner(Protocol):
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Tear down this runner's resources for ``wt``, honoring any
-        teardown options the runner was constructed with. Returns the resources
-        that were actually touched; raises when cleanup was attempted and failed.
+        teardown options the runner was constructed with. Best-effort: warn
+        and keep going when a cleanup step fails, then report what actually
+        happened in the result instead of raising.
         """
         ...

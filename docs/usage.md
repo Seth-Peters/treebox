@@ -215,9 +215,12 @@ treebox volumes and `--skip-container` leaves containers/images untouched.
 a prompt).
 
 Container/image cleanup and local branch deletion are best-effort after the
-target set is chosen: if cleanup fails, treebox can still remove the worktree
-and report `container: "failed"`; if Docker itself is unavailable, the
-worktree is still removed and the record reports `container: "skipped"` with
+target set is chosen: if a container or image removal fails, treebox warns,
+still attempts every remaining cleanup step (volumes, sandbox files), removes
+the worktree, and reports `container: "failed"`; a failed volume removal
+alone warns and reports `volumes_removed: false` without marking the
+container `failed`; if Docker itself is unavailable, the worktree is still
+removed and the record reports `container: "skipped"` with
 `volumes_removed: false`, even under `--remove-volumes`; if branch deletion
 fails, it warns and reports `branch_deleted: false` without undoing the
 worktree removal.
@@ -382,11 +385,13 @@ Current success payloads:
 `deps` is `fresh`, `stale`, or `unknown`; `env` is `present` or `absent`.
 `teardown` records contain `name`, `branch`, `worktree_path`, `removed`,
 `branch_deleted`, `container`, and `volumes_removed`; `container` is `cleaned`,
-`skipped`, or `failed`. Both fields report what the runner actually did:
-`container` is `skipped` when cleanup didn't run (`--skip-container`, or
-Docker unavailable), and `volumes_removed` is `true` only when docker volumes
-were really removed - never on host isolation, and not merely because
-`--remove-volumes` was passed. `doctor` checks contain `name`,
+`skipped`, or `failed`. Each field reports what the runner actually did to
+that resource: `container` is `skipped` when cleanup didn't run
+(`--skip-container`, or Docker unavailable) and `failed` when a container or
+image removal failed, while `volumes_removed` is `true` only when docker
+volumes were really removed - never on host isolation, not merely because
+`--remove-volumes` was passed, and a failed volume removal leaves it `false`
+without marking `container` failed. `doctor` checks contain `name`,
 `ok`, and `detail`.
 
 JSON errors are emitted to stderr as:

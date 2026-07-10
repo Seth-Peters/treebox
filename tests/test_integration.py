@@ -1832,6 +1832,8 @@ def test_teardown_json_reports_docker_unavailable_as_skipped(
 def test_teardown_json_reports_failed_volume_removal_honestly(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
+    """A failed volume rm after a successful container rm keeps the two
+    outcomes separate: container stays "cleaned", volumes_removed is false."""
     from treebox.runners.docker import DockerRunner
 
     wt = Path(root) / "volfail"
@@ -1882,7 +1884,7 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
 
     assert res.exit_code == 0, res.output
     (record,) = json.loads(res.stdout)["worktrees"]
-    assert record["container"] == "failed"
+    assert record["container"] == "cleaned"
     assert record["volumes_removed"] is False
     assert record["removed"] is True
     assert ["rm", "-f", "abc123"] in calls

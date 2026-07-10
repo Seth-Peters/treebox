@@ -222,6 +222,19 @@ class DockerRunner:
             detail = (proc.stderr or proc.stdout or "").strip()
             raise RuntimeError(detail or f"docker {' '.join(args)} failed")
 
+    def _engine_attempt(self, args: list[str], *, reporter: Reporter) -> bool:
+        """Run a destructive docker command best-effort: warn with the
+        daemon's message and return False on failure, so the caller can keep
+        going with the remaining cleanup instead of aborting it."""
+        proc = self._engine(args)
+        if proc.returncode == 0:
+            return True
+        detail = (proc.stderr or proc.stdout or "").strip()
+        reporter.warn(
+            f"docker {' '.join(args)}: {detail}" if detail else f"docker {' '.join(args)} failed"
+        )
+        return False
+
     def _run_engine(self, argv: list[str]) -> None:
         """Execute a full builder argv (leading "docker" included) through the
         seam."""
@@ -696,7 +709,10 @@ class DockerRunner:
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Remove the worktree's container/image (and, when this runner was
-        constructed with ``remove_volumes``, its per-workspace volumes)."""
+        constructed with ``remove_volumes``, its per-workspace volumes). Every
+        step runs even when an earlier one failed: the caller deletes the
+        worktree's recorded state right after this returns, so a skipped step
+        could never be retried and its resources would leak forever."""
         if not self._available():
             reporter.note("container", "skipped; Docker unavailable")
             return RunnerTeardownResult.skipped()
@@ -713,19 +729,25 @@ class DockerRunner:
             # list so we never try to rm (or report) a volume that isn't there.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
             volumes = sorted(set(container_volumes) | (set(self._template_volumes(wt)) & existing))
+        container_failed = False
         if ids:
             image = self._container_image(ids)
-            self._engine_check(["rm", "-f", *ids])
-            reporter.ok("container", f"removed {' '.join(ids)}")
-            # Only images we know we built: this runner's treebox-* tags.
-            if image and image.startswith("treebox-"):
-                self._engine_check(["image", "rm", image])
+            if self._engine_attempt(["rm", "-f", *ids], reporter=reporter):
+                reporter.ok("container", f"removed {' '.join(ids)}")
+                # Only images we know we built: this runner's treebox-* tags.
+                # An image whose container still exists is unremovable, so a
+                # failed container rm skips the image (nothing to retry-leak).
+                if image and image.startswith("treebox-"):
+                    container_failed = not self._engine_attempt(
+                        ["image", "rm", image], reporter=reporter
+                    )
+            else:
+                container_failed = True
         else:
             reporter.note("container", "none found")
         volumes_removed = False
         if self._remove_volumes:
-            if volumes:
-                self._engine_check(["volume", "rm", *volumes])
+            if volumes and self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
                 reporter.ok("volumes", f"removed {' '.join(volumes)}")
                 volumes_removed = True
         elif container_volumes:
@@ -736,7 +758,10 @@ class DockerRunner:
         if cfg_dir.exists():
             shutil.rmtree(cfg_dir, ignore_errors=True)
             reporter.ok("sandbox files", "removed")
-        return RunnerTeardownResult.cleaned(volumes_removed=volumes_removed)
+        return RunnerTeardownResult(
+            "failed" if container_failed else "cleaned",
+            volumes_removed=volumes_removed,
+        )
 
 
 # --- docker helpers ----------------------------------------------------------
