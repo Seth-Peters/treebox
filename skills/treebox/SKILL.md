@@ -54,7 +54,7 @@ treebox teardown fix-auth --force --delete-branch
 Provision without launching the agent (for scripting / over SSH / when you only need the worktree prepared):
 
 ```bash
-treebox create fix-auth --dry-run  # print the git/setup commands it would run; change nothing
+treebox create fix-auth --dry-run  # print the git/setup commands it would run; change nothing (fails like a real create on conflicts)
 treebox create fix-auth --print    # prints the launch command (self-contained: carries the worktree dir, runnable from anywhere), no launch
 treebox create fix-auth --json     # JSON {schemaVersion, name, worktree_path, branch, base, entry_command, created}
 treebox list --json                     # JSON {schemaVersion, worktrees:[…]}
@@ -84,6 +84,7 @@ With `--json`, a failure prints **one object on stderr**: `{"schemaVersion":1,"e
 - Every worktree gets a pre-push guard that blocks pushing any `treebox/*` ref: generated placeholder branches must be renamed (`git branch -m <type>/<short-name>`) before push; explicitly named branches push as-is.
 - `create` launches the agent (Claude by default) after provisioning and exits with the agent process's exit code. Use `--harness codex`, or `--print` / `--json` / `--dry-run` to avoid launching.
 - Re-running `create` on a fully provisioned same-name worktree is a `SLUG_CONFLICT` (exit `5`), not an idempotent enter. Use `enter` to re-launch. If the dir exists but setup never finished (a prior run died mid-provision), `create` resumes setup instead of launching into a half-built tree.
+- `--dry-run` enforces the same read-only preconditions as a real `create` with the same exit codes and JSON errors (`BRANCH_EXISTS`, `SLUG_CONFLICT`, `NOT_FOUND` for a missing `--checkout`/base branch, `BRANCH_IN_USE`), so it doubles as a safe preflight; the half-provisioned same-name case previews resuming setup instead of a fresh `worktree add`. Verdicts reflect the refs already available locally (a dry run never fetches); run `git fetch origin` first when exact parity with create's fetch is required. Nothing changes on disk or in git either way.
 - **Freshness is enforced.** `create` *requires* a successful `git fetch origin` and branches from the freshly-fetched `origin/<base>` (preferred over a stale local branch). If the fetch fails it exits `4` and does **not** fall back to stale refs. In a terminal, git/ssh will prompt for credentials (no pre-loaded ssh-agent needed); headless/`--json` runs need working non-interactive auth. Pass `--no-fetch` only when the user explicitly accepts possibly-stale local refs (e.g. offline). A repo with no `origin` skips the fetch. Run `doctor` to check origin reachability up front.
 - `enter` recomputes the dependency-manifest hash and re-syncs only when deps changed; if a prior run died before setup completed, it finishes setup even when the hash is unchanged. It always refreshes `.env`. It reuses the worktree's recorded isolation/firewall/harness/template defaults, so config changes do not silently change an existing worktree. A mismatched explicit `--isolation` is a conflict; explicit `--harness` and `--template` are per-session overrides. Pass extra agent args after `--`. `--cold` bypasses the shared cache.
 - `--cold` is the escape hatch for a corrupted cache: from-source dependency resolution.

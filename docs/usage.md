@@ -133,6 +133,18 @@ $ treebox create fix-auth --dry-run
     $ uv sync
 ```
 
+A dry run is also a real preflight: it enforces the same read-only
+preconditions as `create` and fails with the identical exit code and JSON
+error - `BRANCH_EXISTS` for a name whose branch already exists,
+`SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
+`--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
+backing another worktree - rather than printing a plan a real run would
+refuse. The one exception mirrors real `create`: a half-built worktree from an
+interrupted run previews finishing setup (no fetch, no `worktree add`) instead
+of conflicting. Dry-run verdicts reflect the refs already available locally;
+run `git fetch origin` first when exact parity with create's normal fetch is
+required. Either way, nothing on disk or in git changes.
+
 ## `enter` — come back to a worktree
 
 ```bash

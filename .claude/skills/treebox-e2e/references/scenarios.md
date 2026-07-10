@@ -97,6 +97,16 @@ Conventions used below:
       on **stderr**, stdout empty. JSON mode: object on **stdout** with
       `"dry_run": true` and a `commands` array. Both: exit 0 and
       `$ROOT/plan-x` does not exist.
+- [ ] **B10b --dry-run preflights like a real create** -
+      `tb create fix-auth --repo "$REPO" --root "$SBX/wts2" --dry-run --json`
+      (branch `fix-auth` exists from B1)
+      Expect: exit 5; JSON error `BRANCH_EXISTS` on stderr, stdout empty;
+      `$SBX/wts2/fix-auth` not created and `git -C "$REPO" worktree list`
+      unchanged - a dry run fails with the same error a real create would,
+      never printing a plan a real run refuses. Same parity for
+      `SLUG_CONFLICT` (existing dir), `NOT_FOUND` (missing `--checkout`/base
+      branch, exit 3), and `BRANCH_IN_USE` (`--checkout` of a checked-out
+      branch).
 - [ ] **B11 --print** — `tb create print-x --repo "$REPO" --root "$ROOT" --print`
       Expect: exit 0; stdout is exactly one runnable launch command that carries
       the worktree dir (self-contained — no reliance on cwd) and the harness
