@@ -1208,7 +1208,7 @@ def teardown(
         return (
             not force
             and path.is_dir()
-            and provision._links_to_worktree_gitdir(repo_path, path)
+            and provision.links_to_worktree_gitdir(repo_path, path)
             and git.is_dirty(path)
         )
 
