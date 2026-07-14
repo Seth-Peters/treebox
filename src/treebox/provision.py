@@ -311,7 +311,15 @@ def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
             continue
         src, dest = resolved
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dest, dirs_exist_ok=True, symlinks=True)
+        # Exclude .git pointers/dirs: a copied pointer's relative gitdir path
+        # breaks every git command in the linked worktree (issue #16).
+        shutil.copytree(
+            src,
+            dest,
+            dirs_exist_ok=True,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".git"),
+        )
         copied += 1
     reporter.ok("submodules", f"copied {copied}")
     return copied
