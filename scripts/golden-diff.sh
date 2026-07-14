@@ -12,11 +12,12 @@
 #   scripts/golden-diff.sh            # compare against tests/golden/ (CI gate)
 #   scripts/golden-diff.sh --update   # regenerate the snapshots (review the diff!)
 #
-# Docker is replaced by a no-op shim on PATH so the docker-isolation cases are
-# deterministic and run on hosts without a daemon: `docker ps -aq` reports no
-# containers and every other subcommand succeeds silently, which drives the
-# fresh-create path (render config -> stage credentials -> build -> run ->
-# post-create) end to end without a real container.
+# Docker is replaced by a stateful shim on PATH so the docker-isolation cases
+# are deterministic and run on hosts without a daemon: `docker ps` reports no
+# containers until `run` records one, which drives the fresh-create path
+# (render config -> stage credentials -> build -> run -> post-create) end to
+# end, and thereafter reports it as running so enter's entry-readiness check
+# sees a healthy container - all without a real daemon.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
