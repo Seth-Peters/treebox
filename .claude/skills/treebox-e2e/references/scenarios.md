@@ -249,7 +249,7 @@ Each writes `$TREEBOX_CONFIG`, runs, then restores the empty file (`: > "$TREEBO
 
 **Name every worktree here with the `e2e-` prefix** (see the docker naming marker
 in the preamble): the container/image become `treebox-e2e-*`, so `e2e_cleanup` /
-`e2e_reap_docker` remove them even when a scenario (H5's `--skip-container`) leaves
+`e2e_reap_docker` remove them even when a scenario (H6's `--skip-container`) leaves
 one behind on purpose.
 
 - [ ] **H1 docker create** — `tb create e2e-dockered --repo "$REPO" --root "$ROOT" --isolation docker --print`
@@ -277,7 +277,14 @@ one behind on purpose.
       `--isolation` flag
       Expect: exit 0; still docker (recorded at create), even if the config
       default says host.
-- [ ] **H5 docker teardown** — `tb teardown e2e-dockered … --force --json`; then
+- [ ] **H5 stopped container revived on enter** — `docker stop` the
+      `treebox-e2e-dockered-*` container, then `tb enter e2e-dockered … --print`
+      Expect: exit 0; the container is running again (`docker ps`) *before* the
+      command is printed, so the emitted `docker exec …` replays cleanly — a
+      stopped sandbox never yields a dead entry command. With a `--firewall`
+      worktree, egress lockdown is re-applied on the restart (iptables rules
+      don't survive a container restart).
+- [ ] **H6 docker teardown** — `tb teardown e2e-dockered … --force --json`; then
       `--remove-volumes` on a fresh `e2e-dockered2`; then `--skip-container` on a
       fresh `e2e-dockered3`
       Expect: exit 0 each; `--remove-volumes` reports `volumes_removed: true`;

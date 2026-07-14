@@ -99,7 +99,7 @@ scenario you add.
 e2e_cleanup   # reaps treebox-e2e-* docker containers/images, then removes $SBX
 ```
 
-`e2e_cleanup` is one pass: it reaps every `treebox-e2e-*` docker artifact — so H5's
+`e2e_cleanup` is one pass: it reaps every `treebox-e2e-*` docker artifact — so H6's
 intentional `--skip-container` leftover and any containers from a crashed run go
 too — and then removes the sandbox dir. If a run died before you could call it,
 `e2e_reap_docker` alone clears the docker side; it only ever touches
