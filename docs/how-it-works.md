@@ -134,7 +134,9 @@ treebox assumes the caller is often another program:
   without parsing prose.
 - **`--json` with a `schemaVersion`** that only gains fields within a version
   (git-porcelain discipline), plus `--print` and `--dry-run` for scripts that
-  want the commands, not the side effects.
+  want the commands, not the side effects. An emitted entry command is
+  entry-ready: a stopped docker sandbox is restarted (firewall re-applied)
+  before the command is printed, never dead on replay.
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
   so racing operations on one name — two `create fix-auth` calls, or a
   `teardown fix-auth` against a concurrent provision — conflict cleanly (`5`)

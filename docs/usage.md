@@ -185,7 +185,10 @@ Under docker isolation, `enter` **preflights the Docker daemon first** (like
 error deeper in launch. It also **re-stages the scoped credential copies**
 from the host on every entry — independent of the lockfile-hash skip — so a
 host logout/revocation drops the stale copies and a fresh login reaches the
-sandbox on the very next entry.
+sandbox on the very next entry. A container that stopped since setup (host
+reboot, manual `docker stop`) is restarted with the firewall re-established
+before the agent launches - and before a `--print`/`--json` command is
+emitted - so a treebox-owned restart never leaves egress silently open.
 
 ## `list` — what exists, what's stale
 
@@ -394,6 +397,9 @@ agent — it hands you the launch command instead, so your script decides when
 to run it. The command is self-contained for both isolation modes: it carries
 the worktree directory (`cd … && exec …` on host, `docker exec -w …` in
 docker), so replaying it from any directory launches the agent in the box.
+It is also entry-ready: for a docker worktree, a stopped container is
+restarted (with the firewall re-applied) before the command is printed, so
+the emitted command is never dead on replay.
 Without `--json`, `--print`, or `--dry-run`, `create` and `enter` launch the
 agent and exit with the agent process's exit code. Human `--dry-run` writes the
 would-run plan to stderr; `--dry-run --json` writes its payload to stdout.
