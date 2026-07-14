@@ -1106,6 +1106,51 @@ def test_docker_setup_reuses_existing_container(tmp_path: Path, fake_common_dir)
     assert any("init-firewall.sh" in a for a in joined)
 
 
+def test_docker_prepare_entry_restarts_stopped_container_and_relocks_egress(
+    tmp_path: Path, fake_common_dir
+):
+    """iptables rules don't survive a restart: prepare_entry on a stopped
+    container must docker-start it and re-run the guarded firewall init, in
+    that order - a hand-run `docker start` would leave egress silently open."""
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=False)
+
+    DockerRunner(cfg, docker=fake).prepare_entry(wt)
+
+    start = fake.calls.index(["start", "abc123"])
+    firewall = next(i for i, c in enumerate(fake.calls) if "init-firewall.sh" in " ".join(c))
+    assert start < firewall
+
+
+def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fake_common_dir):
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=True)
+
+    DockerRunner(cfg, docker=fake).prepare_entry(wt)
+
+    assert not any(c[0] == "start" or "init-firewall.sh" in " ".join(c) for c in fake.calls)
+
+
+def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
+    fake = _FakeDocker(ids="")
+    runner = DockerRunner(Config(isolation="docker"), docker=fake)
+
+    with pytest.raises(RuntimeError, match="treebox teardown"):
+        runner.prepare_entry(_boxed_worktree(tmp_path))
+
+
+def test_host_prepare_entry_is_a_noop(tmp_path: Path):
+    """The host runner needs no entry readiness: an emitted entry_command
+    works whenever the worktree exists."""
+    from treebox.runners.host import HostRunner
+
+    assert HostRunner(Config()).prepare_entry(_boxed_worktree(tmp_path)) is None
+
+
 def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir):
     """A labeled container this runner didn't create is an explicit error
     pointing at teardown — not silently adopted with the wrong

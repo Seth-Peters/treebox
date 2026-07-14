@@ -47,10 +47,46 @@ printf '{}\n' > "$HOME_FAKE/.claude/settings.json"
 printf '{}\n' > "$HOME_FAKE/.codex/auth.json"
 printf '\n' > "$HOME_FAKE/.codex/config.toml"
 
-# --- docker shim: no containers exist; every subcommand succeeds -------------
+# --- docker shim: simulates a healthy engine with persistent containers ------
+# `run` records the container name keyed by its treebox label; `ps --filter
+# label=...` then reports a deterministic id, and `inspect` answers the
+# runner's combined name/running/env state query as "running". Everything
+# else succeeds silently. A first create still exercises the fresh-create
+# path (ps is empty until `run`), while enter's entry-readiness check
+# (prepare_entry) sees a healthy running container, as on a real host.
 SHIM="$ROOT/shim"
-mkdir -p "$SHIM"
-printf '#!/bin/sh\nexit 0\n' > "$SHIM/docker"
+mkdir -p "$SHIM" "$SHIM/containers"
+cat > "$SHIM/docker" <<'EOF'
+#!/bin/sh
+STATE="$(dirname "$0")/containers"
+key() { printf '%s' "$1" | cksum | cut -d' ' -f1; }
+case "$1" in
+  run)
+    name=""; label=""; prev=""
+    for a in "$@"; do
+      case "$prev" in
+        --name) name="$a" ;;
+        --label) label="$a" ;;
+      esac
+      prev="$a"
+    done
+    [ -n "$label" ] && printf '%s\n' "$name" > "$STATE/$(key "$label")"
+    ;;
+  ps)
+    # ps -aq --filter label=<label>
+    k="$(key "${4#label=}")"
+    [ -f "$STATE/$k" ] && echo "cafe$k"
+    ;;
+  inspect)
+    # inspect <id> --format <fmt>
+    k="${2#cafe}"
+    case "$4" in
+      *State.Running*) [ -f "$STATE/$k" ] && printf '/%s\ntrue\n' "$(cat "$STATE/$k")" ;;
+    esac
+    ;;
+esac
+exit 0
+EOF
 chmod +x "$SHIM/docker"
 
 # --- hermetic config: setup is a marker-writing hook, never a real installer -

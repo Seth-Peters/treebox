@@ -781,6 +781,13 @@ def _run_session(
         run.preflight(reporter)
         with locking.worktree_lock(repo_path, root, name):
             outcome = provision_call()
+            if json_out or print_only:
+                # The launch path makes the sandbox entry-ready inside
+                # run.launch; the emit path must do the same, or a stopped
+                # container yields an entry_command that is dead on replay
+                # (and a manual `docker start` workaround would silently
+                # skip the firewall re-init).
+                run.prepare_entry(outcome.worktree)
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
