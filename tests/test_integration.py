@@ -59,8 +59,13 @@ def test_create_provisions_everything(repo: Path, root: str, hermetic_config):
     assert git.branch_for_path(str(repo), str(wt)) == "feature-auth"
     # Fresh secrets copied from canonical .env.
     assert (wt / ".env").read_text() == "SECRET=canonical\n"
-    # Submodule working tree copied (copy only).
+    # Submodule working tree copied (copy only), genuinely linkage-free: the
+    # .git pointer must not come along, or its relative gitdir path breaks
+    # every git command in the linked worktree (issue #16).
     assert (wt / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+    assert not (wt / "sub" / ".git").exists()
+    status = _git(wt, "status", "--porcelain")
+    assert status.returncode == 0, status.stderr
     # Setup hook ran exactly once.
     assert (wt / "setup.log").read_text().strip() == "ran"
     # Lockfile hash recorded.
