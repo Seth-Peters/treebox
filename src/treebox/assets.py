@@ -32,6 +32,18 @@ from .models import expand_user
 
 DEFAULT_TEMPLATE = "default"
 
+
+class TemplateNotFoundError(RuntimeError):
+    """A named template that resolves to no directory (see ``template_dir``).
+
+    Typed so the CLI classifies it as not-found (exit 3, ``TEMPLATE_NOT_FOUND``)
+    on every path - the template sub-app and provisioning alike."""
+
+    def __init__(self, name: str, message: str) -> None:
+        super().__init__(message)
+        self.name = name
+
+
 # The main "blocks" the bundled default image ships, curated from its
 # Dockerfile — surfaced under `template list` so an operator can see what the
 # stock sandbox gives them without reading the build recipe. This describes the
@@ -102,10 +114,11 @@ def template_dir(name: str = DEFAULT_TEMPLATE) -> Path:
     if name == DEFAULT_TEMPLATE:
         return _bundled_template_dir()
 
-    raise RuntimeError(
+    raise TemplateNotFoundError(
+        name,
         f"No template named '{name}'. Create one at {user} "
         f"(or point $TREEBOX_TEMPLATE_DIR at a template dir). "
-        f"'{DEFAULT_TEMPLATE}' is the only built-in template."
+        f"'{DEFAULT_TEMPLATE}' is the only built-in template.",
     )
 
 

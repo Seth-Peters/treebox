@@ -2361,8 +2361,10 @@ def test_template_flag_reaches_the_docker_runner(
             "--json",
         ]
     )
-    assert res.exit_code == 1
+    # Classified like the template sub-app: not-found, never the catch-all.
+    assert res.exit_code == 3
     err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEMPLATE_NOT_FOUND"
     assert "No template named 'ghost'" in err["message"]
     assert not (Path(root) / "tpl").exists()
 

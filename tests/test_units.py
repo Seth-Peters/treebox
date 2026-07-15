@@ -3461,6 +3461,53 @@ def test_template_path_resolves_default_and_named(template_home: Path):
     assert _cli(["template", "path", "ghost"]).exit_code == 3
 
 
+def test_create_missing_template_is_not_found_and_leaves_no_debris(
+    repo: Path, tmp_path: Path, template_home: Path
+):
+    # A bad --template on the provisioning path is the same user error the
+    # template sub-app classifies as not-found: exit 3 + TEMPLATE_NOT_FOUND,
+    # never the generic catch-all (issue #20) - and it fails before any git
+    # state exists, so no worktree or branch is left behind.
+    from treebox import git as git_mod
+
+    root = tmp_path / "wts"
+    res = _cli(
+        [
+            "create",
+            "t1",
+            "--repo",
+            str(repo),
+            "--root",
+            str(root),
+            "--isolation",
+            "docker",
+            "--template",
+            "nope",
+            "--no-fetch",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 3
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEMPLATE_NOT_FOUND"
+    assert "treebox template init nope" in err["hint"]
+    assert not git_mod.local_branch_exists(str(repo), "t1")
+    assert not (root / "t1").exists()
+
+
+def test_classify_template_not_found_matches_template_subapp():
+    # The provisioning classifier and the template sub-app must agree on what
+    # a missing template means - enter with a deleted recorded template routes
+    # through _classify at container-render time.
+    import treebox.assets as assets
+    from treebox.cli import EXIT_NOTFOUND, _classify
+
+    info = _classify(assets.TemplateNotFoundError("nope", "No template named 'nope'."))
+    assert info.exit_code == EXIT_NOTFOUND
+    assert info.error_code == "TEMPLATE_NOT_FOUND"
+    assert info.hint is not None and "treebox template init nope" in info.hint
+
+
 def test_template_list_json_marks_default_and_flags_broken(template_home: Path):
     # A dir missing required files is surfaced as invalid, not hidden — so a
     # broken template is caught here rather than mid-`create`.

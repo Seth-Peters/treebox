@@ -138,7 +138,8 @@ preconditions as `create` and fails with the identical exit code and JSON
 error - `BRANCH_EXISTS` for a name whose branch already exists,
 `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
 `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
-backing another worktree - rather than printing a plan a real run would
+backing another worktree, `TEMPLATE_NOT_FOUND` for a docker `--template` that
+doesn't resolve - rather than printing a plan a real run would
 refuse. The one exception mirrors real `create`: a half-built worktree from an
 interrupted run previews finishing setup (no fetch, no `worktree add`) instead
 of conflicting. Dry-run verdicts reflect the refs already available locally;
@@ -370,7 +371,7 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 | `0`  | ok                                                     |
 | `1`  | runtime failure, missing runner dependency, or failed doctor hard check |
 | `2`  | usage — invalid name/branch, ambiguous ref, bad option |
-| `3`  | not found — the worktree/branch doesn't exist          |
+| `3`  | not found — the worktree/branch/template doesn't exist |
 | `4`  | auth — fetch or credential problem                     |
 | `5`  | conflict — name taken, dirty tree, or lock held        |
 
@@ -458,7 +459,7 @@ failure.
 | `FETCH_FAILED` | `4` | Required fetch/auth failed. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
-| `ERROR` | `1` | Unclassified runtime, setup, or template failure. |
+| `ERROR` | `1` | Unclassified runtime or setup failure. |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken. |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
@@ -467,6 +468,6 @@ failure.
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. |
 | `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (corrupt or hand-edited state). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
-| `TEMPLATE_NOT_FOUND` | `3` | `template init --from` / `template path` names a template that doesn't exist. |
+| `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
