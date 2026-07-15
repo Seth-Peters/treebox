@@ -323,7 +323,10 @@ def _record_runner(
     """Persist the runner *before* setup runs. Setup is what builds a docker
     image and starts its container, so if it fails we'd otherwise be left with a
     container and no record of which runner owns it — an un-tearable orphan. With
-    the runner on disk first, teardown always knows host vs. docker."""
+    the runner on disk first, teardown always knows host vs. docker. The
+    per-workspace volume names are recorded here for the same reason: setup's
+    ``docker run`` is what creates the volumes, and teardown must be able to
+    remove them even when the template they derive from is later deleted."""
     state.save(
         worktree.path,
         state.WorktreeState(
@@ -334,6 +337,7 @@ def _record_runner(
             provisioned=False,
             firewall=firewall,
             template=template,
+            volumes=runner.workspace_volumes(worktree),
         ),
     )
 
@@ -351,6 +355,7 @@ def _record_hash(
             provisioned=True,
             firewall=firewall,
             template=template,
+            volumes=runner.workspace_volumes(worktree),
         ),
     )
 

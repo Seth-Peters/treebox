@@ -1387,13 +1387,20 @@ def _teardown_runner(
     `--remove-volumes` (teardown has no `--template` flag; state is the only
     source) — and folds the recorded harness too, which nothing in a teardown
     reads today; only the firewall stays at the config default here (see
-    ``honor_firewall``). ``remove_volumes`` is handed to the factory: teardown
-    options are owned by the runner, so only runners with per-worktree volumes
-    see it."""
+    ``honor_firewall``). ``remove_volumes`` and the volume names recorded at
+    create time are handed to the factory: teardown options are owned by the
+    runner, so only runners with per-worktree volumes see them. The recorded
+    names are what let `--remove-volumes` still work when the container is
+    gone AND the recorded template was deleted (nothing left to derive from);
+    a pre-record state (volumes=None) falls back to template derivation."""
     exists = Path(cand.path).is_dir()
     st = state.load_registered(repo_path, cand.path) if exists else None
     cfg_run = _reconcile_with_state(reporter, cfg, st, isolation=explicit, json_out=json_out)
-    return get_runner(cfg_run, remove_volumes=remove_volumes)
+    return get_runner(
+        cfg_run,
+        remove_volumes=remove_volumes,
+        recorded_volumes=st.volumes if st else None,
+    )
 
 
 def _teardown_one(

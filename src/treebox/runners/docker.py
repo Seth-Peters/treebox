@@ -195,14 +195,20 @@ class DockerRunner:
         config: Config,
         *,
         remove_volumes: bool = False,
+        recorded_volumes: list[str] | None = None,
         docker: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
-        """``remove_volumes`` is this runner's teardown option (volumes are a
-        docker concept — see ``teardown``). ``docker`` injects a canned engine
-        CLI for tests; it defaults to the real subprocess seam and is invisible
-        to ``get_runner`` callers — an internal constructor detail, not API."""
+        """``remove_volumes`` and ``recorded_volumes`` are this runner's
+        teardown options (volumes are a docker concept - see ``teardown``):
+        the latter carries the per-workspace volume names recorded in the
+        worktree state at create time, preferred over re-deriving them from a
+        template that may since have been deleted. ``docker`` injects a canned
+        engine CLI for tests; it defaults to the real subprocess seam and is
+        invisible to ``get_runner`` callers - an internal constructor detail,
+        not API."""
         self.config = config
         self._remove_volumes = remove_volumes
+        self._recorded_volumes = recorded_volumes
         self._docker_cli = docker
 
     # --- the engine seam -------------------------------------------------------
@@ -683,6 +689,13 @@ class DockerRunner:
             self._engine_check(["start", ids[0]])
             self._run_engine(self._firewall_command(wt))
 
+    def workspace_volumes(self, wt: Worktree) -> list[str] | None:
+        """The per-workspace volume names to record in the worktree state at
+        create time (see ``Runner.workspace_volumes``): the template is present
+        then, so the derivation is authoritative - at teardown time it may not
+        be, which is exactly why the record exists."""
+        return self._template_volumes(wt)
+
     def _template_volumes(self, wt: Worktree) -> list[str]:
         """The treebox volume names the template's ``${workspaceName}``
         substitution produces for this worktree — the same deterministic
@@ -719,16 +732,26 @@ class DockerRunner:
         ids = self._container_ids(wt)
         # Read the container's mounts BEFORE rm; and never rely on them alone —
         # when the container is already gone (manual docker rm, or a prior
-        # teardown without --remove-volumes) the template-derived names are the
+        # teardown without --remove-volumes) the names recorded at create time
+        # (or, for pre-record worktrees, the template-derived ones) are the
         # only way to find the volumes, or they leak forever.
         container_volumes = self._container_volumes(ids) if ids else []
         volumes: list[str] = []
         if self._remove_volumes:
-            # Container-derived names exist by definition; template-derived
+            # Recorded names beat re-derivation: the template may have been
+            # deleted or edited since create, while the record is what the
+            # container was actually run with. None means unrecorded
+            # (pre-record worktree) - fall back to deriving from the template.
+            recorded = (
+                self._recorded_volumes
+                if self._recorded_volumes is not None
+                else self._template_volumes(wt)
+            )
+            # Container-derived names exist by definition; recorded/derived
             # ones are only candidates — filter them against the live volume
             # list so we never try to rm (or report) a volume that isn't there.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
-            volumes = sorted(set(container_volumes) | (set(self._template_volumes(wt)) & existing))
+            volumes = sorted(set(container_volumes) | (set(recorded) & existing))
         container_failed = False
         if ids:
             image = self._container_image(ids)
@@ -750,6 +773,10 @@ class DockerRunner:
             if volumes and self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
                 reporter.ok("volumes", f"removed {' '.join(volumes)}")
                 volumes_removed = True
+            elif not volumes:
+                # Never silent: the operator asked for volume removal, so say
+                # when no removable volume could be found from any source.
+                reporter.note("volumes", "none found")
         elif container_volumes:
             reporter.note("volumes", f"kept {' '.join(container_volumes)}")
 

@@ -2155,6 +2155,66 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
     assert not wt.exists()
 
 
+def test_teardown_removes_recorded_volumes_when_container_and_template_gone(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """The issue-21 leak, end to end: the container was removed manually AND
+    the recorded template no longer exists on disk, so nothing can be derived
+    at teardown time - the volume names recorded in state at create time must
+    still drive the removal (volumes_removed: true), instead of exiting 0 with
+    the volume orphaned forever."""
+    import dataclasses
+
+    from treebox.runners.docker import DockerRunner
+
+    wt = Path(root) / "volleak"
+    _run(["create", "volleak", "--repo", str(repo), "--root", root, "--print"])
+    st = state.load(wt)
+    assert st is not None
+    state.save(
+        wt,
+        dataclasses.replace(
+            st,
+            isolation="docker",
+            template="deleted-template",  # since removed from disk
+            volumes=["treebox-shellhistory-volleak"],
+        ),
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
+    monkeypatch.setattr(DockerRunner, "_container_ids", lambda self, worktree: [])
+
+    def fake_engine(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        stdout = (
+            "treebox-shellhistory-volleak\nother-volume\n" if args[:2] == ["volume", "ls"] else ""
+        )
+        return subprocess.CompletedProcess(["docker", *args], 0, stdout, "")
+
+    monkeypatch.setattr(DockerRunner, "_engine", fake_engine)
+
+    res = _run(
+        [
+            "teardown",
+            "volleak",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0, res.output
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["volumes_removed"] is True
+    assert ["volume", "rm", "treebox-shellhistory-volleak"] in calls
+    assert not wt.exists()
+
+
 def test_teardown_json_host_remove_volumes_reports_none_removed(
     repo: Path, root: str, hermetic_config
 ):
