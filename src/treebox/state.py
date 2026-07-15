@@ -44,6 +44,12 @@ class WorktreeState:
     # to the config default when `--template` is omitted. None means unrecorded —
     # the caller falls back to the config default.
     template: str | None = None
+    # The per-workspace volume names the runner derived at create time, so
+    # `teardown --remove-volumes` can still find them when both the container
+    # and the recorded template are gone (they would otherwise leak forever).
+    # None means unrecorded (pre-field worktree, or a runner without volumes) -
+    # teardown falls back to deriving from the container/template.
+    volumes: list[str] | None = None
 
 
 def _state_path(worktree: str | Path) -> Path:
@@ -85,6 +91,9 @@ def _read(path: Path) -> WorktreeState | None:
         firewall=data.get("firewall", False),
         # None means unrecorded, so enter/teardown fall back to the config default.
         template=data.get("template"),
+        # None means unrecorded, so teardown falls back to container/template
+        # derivation.
+        volumes=data.get("volumes"),
     )
 
 

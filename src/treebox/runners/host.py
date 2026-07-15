@@ -60,6 +60,9 @@ class HostRunner:
         # ~/.claude / ~/.codex, so host logins/logouts apply immediately.
         return
 
+    def workspace_volumes(self, wt: Worktree) -> list[str] | None:
+        return None  # volumes are a container concept; nothing to record
+
     def _run_auto(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
         ecos = ecosystems.detect(wt.path)
         if not ecos:
