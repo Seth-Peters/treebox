@@ -138,7 +138,8 @@ preconditions as `create` and fails with the identical exit code and JSON
 error - `BRANCH_EXISTS` for a name whose branch already exists,
 `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
 `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
-backing another worktree - rather than printing a plan a real run would
+backing another worktree, `TEMPLATE_NOT_FOUND` for a docker `--template` that
+doesn't resolve - rather than printing a plan a real run would
 refuse. The one exception mirrors real `create`: a half-built worktree from an
 interrupted run previews finishing setup (no fetch, no `worktree add`) instead
 of conflicting. Dry-run verdicts reflect the refs already available locally;
@@ -367,7 +368,7 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 | `0`  | ok                                                     |
 | `1`  | runtime failure, missing runner dependency, or failed doctor hard check |
 | `2`  | usage — invalid name/branch, ambiguous ref, bad option |
-| `3`  | not found — the worktree/branch doesn't exist          |
+| `3`  | not found — the worktree/branch/template doesn't exist |
 | `4`  | auth — fetch or credential problem                     |
 | `5`  | conflict — name taken, dirty tree, or lock held        |
 
