@@ -368,6 +368,15 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_USAGE, "AMBIGUOUS_REF", exc.hint)
     if isinstance(exc, provision.NotFoundError):
         return _ErrorInfo(EXIT_NOTFOUND, "NOT_FOUND", exc.hint)
+    if isinstance(exc, assets.TemplateNotFoundError):
+        # Same classification the template sub-app gives this condition: a
+        # missing template is not-found everywhere, never the generic catch-all.
+        return _ErrorInfo(
+            EXIT_NOTFOUND,
+            "TEMPLATE_NOT_FOUND",
+            "Run 'treebox template list' to see available templates, or scaffold "
+            f"this one: treebox template init {exc.name}",
+        )
     if isinstance(exc, PreflightError):
         # Runner dependency problems keep exit 1 (codes are stable; agents
         # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE).
@@ -580,6 +589,16 @@ def create(
         target_branch = placeholder_branch(wt_name)
 
     run = get_runner(cfg)
+
+    # Resolve the template before any git state exists: failing at container
+    # render time would strand a freshly provisioned worktree + branch (a
+    # retried create then hits BRANCH_EXISTS). create-only on purpose - enter
+    # must keep tolerating a deleted recorded template on an existing container.
+    if cfg.isolation == "docker":
+        try:
+            assets.template_dir(cfg.template)
+        except assets.TemplateNotFoundError as exc:
+            raise _handle(reporter, exc, json_out=json_out) from exc
 
     if dry_run:
         _dry_run(
@@ -1721,7 +1740,7 @@ def template_init(
         )
     try:
         src = assets.template_dir(from_template)
-    except RuntimeError as exc:
+    except assets.TemplateNotFoundError as exc:
         raise _die(
             reporter,
             str(exc),
@@ -1852,7 +1871,7 @@ def template_list(
     for name in assets.available_templates():
         try:
             path = assets.template_dir(name)
-        except RuntimeError:
+        except assets.TemplateNotFoundError:
             continue  # enumerated names resolve by construction; skip if racy
         missing = assets.missing_template_files(path)
         rows.append(
@@ -1907,7 +1926,7 @@ def template_path(
     reporter = Reporter()
     try:
         path = assets.template_dir(name)
-    except RuntimeError as exc:
+    except assets.TemplateNotFoundError as exc:
         raise _die(reporter, str(exc), code=EXIT_NOTFOUND, error_code="TEMPLATE_NOT_FOUND") from exc
     sys.stdout.write(f"{path}\n")
 
