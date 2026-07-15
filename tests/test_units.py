@@ -1595,7 +1595,9 @@ def test_teardown_runner_passes_recorded_volumes_to_docker(tmp_path, monkeypatch
             volumes=["treebox-shellhistory-work"],
         ),
     )
-    cand = Candidate(name="work", branch="treebox/work", path=str(tmp_path))
+    # The worktree dir itself is gone (rm -rf'd tree): the record must still
+    # be readable through the surviving registration.
+    cand = Candidate(name="work", branch="treebox/work", path=str(tmp_path / "gone"))
 
     run = _teardown_runner(
         Reporter(quiet=True),
@@ -2198,9 +2200,10 @@ def test_teardown_json_already_gone_and_delete_branch(repo: Path, hermetic_confi
     (record,) = json.loads(res.stdout)["worktrees"]
     assert record["removed"] is False  # already gone, still exit 0
     assert record["branch_deleted"] is True
-    # With the dir gone the recorded isolation mode is unreadable, so container
-    # teardown is skipped — never reported "cleaned" off a guessed mode.
-    assert record["container"] == "skipped"
+    # The dir is gone but the state recorded at create time survives in the
+    # repo's own registration, so the recorded isolation mode still drives
+    # container teardown instead of being skipped.
+    assert record["container"] == "cleaned"
 
 
 def test_teardown_pruned_worktree_by_exact_branch(repo: Path, hermetic_config):

@@ -501,6 +501,67 @@ def test_enter_resync_preserves_recorded_harness(repo: Path, root: str, hermetic
     assert "codex" in res.stdout and "claude" not in res.stdout
 
 
+def test_enter_resync_preserves_recorded_volumes(repo: Path, root: str, hermetic_config):
+    """A dep re-sync on enter re-records state; like the harness and template,
+    the create-time volume record must survive it. The template may have been
+    edited since create while the container keeps its creation-time mounts, so
+    a fresh derivation is merged into the record, never substituted for it."""
+    from treebox import provision
+    from treebox.config import Config
+    from treebox.harnesses import get_harness
+    from treebox.output import Reporter
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "voldrift", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "voldrift"
+    prior = state.load(wt)
+    assert prior is not None
+    state.save(
+        wt,
+        state.WorktreeState(
+            base=prior.base,
+            isolation="docker",
+            harness=prior.harness,
+            lockfile_hash=prior.lockfile_hash,
+            provisioned=False,  # unfinished setup: enter must re-run it
+            firewall=prior.firewall,
+            template=prior.template,
+            volumes=["treebox-shellhistory-voldrift"],
+        ),
+    )
+
+    class _DriftedRunner:
+        name = "docker"
+
+        def setup(self, wt, *, cold, reporter):
+            return None
+
+        def refresh(self, wt, *, reporter):
+            return None
+
+        def workspace_volumes(self, wt):
+            # The template was edited since create: a fresh derivation no
+            # longer names the volume the existing container still mounts.
+            return ["treebox-scratch-voldrift"]
+
+        def entry_command(self, wt, *, harness, args):
+            return ["true"]
+
+    provision.enter(
+        Config(root=root, isolation="docker"),
+        _DriftedRunner(),
+        repo=str(repo),
+        name="voldrift",
+        harness=get_harness("claude"),
+        cold=False,
+        args=[],
+        reporter=Reporter(quiet=True),
+    )
+    st = state.load(wt)
+    assert st is not None and st.provisioned is True
+    assert st.volumes == ["treebox-scratch-voldrift", "treebox-shellhistory-voldrift"]
+
+
 def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_config):
     """provision.enter runs runner.refresh even when deps are unchanged: the
     docker runner's credential copies must not ride the lockfile-hash cache

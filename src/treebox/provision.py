@@ -343,7 +343,12 @@ def _record_runner(
 
 
 def _record_hash(
-    worktree: Worktree, runner: Runner, harness: str, firewall: bool, template: str
+    worktree: Worktree,
+    runner: Runner,
+    harness: str,
+    firewall: bool,
+    template: str,
+    volumes: list[str] | None,
 ) -> None:
     state.save(
         worktree.path,
@@ -355,7 +360,7 @@ def _record_hash(
             provisioned=True,
             firewall=firewall,
             template=template,
-            volumes=runner.workspace_volumes(worktree),
+            volumes=volumes,
         ),
     )
 
@@ -379,7 +384,9 @@ def _finish_setup(
     # the config default.
     _record_runner(wt, runner, harness.name, config.firewall, config.template)
     runner.setup(wt, cold=cold, reporter=reporter)
-    _record_hash(wt, runner, harness.name, config.firewall, config.template)
+    _record_hash(
+        wt, runner, harness.name, config.firewall, config.template, runner.workspace_volumes(wt)
+    )
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=[]), created=True)
 
 
@@ -645,7 +652,10 @@ def enter(
         # never overwrite the created-time template with the config default.
         recorded = prior.harness if prior and prior.harness else harness.name
         recorded_template = prior.template if prior and prior.template else config.template
-        _record_hash(wt, runner, recorded, config.firewall, recorded_template)
+        volumes = runner.workspace_volumes(wt)
+        if prior and prior.volumes is not None:
+            volumes = sorted(set(prior.volumes) | set(volumes or []))
+        _record_hash(wt, runner, recorded, config.firewall, recorded_template, volumes)
     else:
         reporter.note("deps", "unchanged · skipping setup")
 
