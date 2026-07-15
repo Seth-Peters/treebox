@@ -89,7 +89,9 @@ Module map:
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
   `create` and `enter` share `_run_session` for runner preflight, the
   per-name lock, provision error classification, and the final
-  `--json`/`--print`/launch fork. `_reconcile_with_state` folds recorded
+  `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
+  so the printed `entry_command` is never dead on replay).
+  `_reconcile_with_state` folds recorded
   creation-time choices into existing-worktree sessions before the runner and
   harness objects are resolved: recorded isolation conflicts with a mismatched
   explicit `--isolation`, while recorded firewall/harness/template protect an
@@ -178,7 +180,9 @@ What a sandboxed backend must **guarantee** (the security invariants):
   agent cannot edit the definition of its own box.
 - The shared `.git/hooks` is presented read-only (host git executes it).
 - Egress lockdown, when enabled, exists before any workspace-derived code
-  runs (firewall-before-post-create).
+  runs (firewall-before-post-create), and is re-established when
+  `prepare_entry` restarts a stopped sandbox (iptables rules don't survive
+  a container restart).
 - Only user-level treebox config is ever read — never the target repo's.
 
 What a backend may **assume** (host locality):

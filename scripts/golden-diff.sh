@@ -12,11 +12,12 @@
 #   scripts/golden-diff.sh            # compare against tests/golden/ (CI gate)
 #   scripts/golden-diff.sh --update   # regenerate the snapshots (review the diff!)
 #
-# Docker is replaced by a no-op shim on PATH so the docker-isolation cases are
-# deterministic and run on hosts without a daemon: `docker ps -aq` reports no
-# containers and every other subcommand succeeds silently, which drives the
-# fresh-create path (render config -> stage credentials -> build -> run ->
-# post-create) end to end without a real container.
+# Docker is replaced by a stateful shim on PATH so the docker-isolation cases
+# are deterministic and run on hosts without a daemon: `docker ps` reports no
+# containers until `run` records one, which drives the fresh-create path
+# (render config -> stage credentials -> build -> run -> post-create) end to
+# end, and thereafter reports it as running so enter's entry-readiness check
+# sees a healthy container - all without a real daemon.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -47,10 +48,46 @@ printf '{}\n' > "$HOME_FAKE/.claude/settings.json"
 printf '{}\n' > "$HOME_FAKE/.codex/auth.json"
 printf '\n' > "$HOME_FAKE/.codex/config.toml"
 
-# --- docker shim: no containers exist; every subcommand succeeds -------------
+# --- docker shim: simulates a healthy engine with persistent containers ------
+# `run` records the container name keyed by its treebox label; `ps --filter
+# label=...` then reports a deterministic id, and `inspect` answers the
+# runner's combined name/running/env state query as "running". Everything
+# else succeeds silently. A first create still exercises the fresh-create
+# path (ps is empty until `run`), while enter's entry-readiness check
+# (prepare_entry) sees a healthy running container, as on a real host.
 SHIM="$ROOT/shim"
-mkdir -p "$SHIM"
-printf '#!/bin/sh\nexit 0\n' > "$SHIM/docker"
+mkdir -p "$SHIM" "$SHIM/containers"
+cat > "$SHIM/docker" <<'EOF'
+#!/bin/sh
+STATE="$(dirname "$0")/containers"
+key() { printf '%s' "$1" | cksum | cut -d' ' -f1; }
+case "$1" in
+  run)
+    name=""; label=""; prev=""
+    for a in "$@"; do
+      case "$prev" in
+        --name) name="$a" ;;
+        --label) label="$a" ;;
+      esac
+      prev="$a"
+    done
+    [ -n "$label" ] && printf '%s\n' "$name" > "$STATE/$(key "$label")"
+    ;;
+  ps)
+    # ps -aq --filter label=<label>
+    k="$(key "${4#label=}")"
+    [ -f "$STATE/$k" ] && echo "cafe$k"
+    ;;
+  inspect)
+    # inspect <id> --format <fmt>
+    k="${2#cafe}"
+    case "$4" in
+      *State.Running*) [ -f "$STATE/$k" ] && printf '/%s\ntrue\n' "$(cat "$STATE/$k")" ;;
+    esac
+    ;;
+esac
+exit 0
+EOF
 chmod +x "$SHIM/docker"
 
 # --- hermetic config: setup is a marker-writing hook, never a real installer -
