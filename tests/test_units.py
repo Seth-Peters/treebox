@@ -1106,6 +1106,51 @@ def test_docker_setup_reuses_existing_container(tmp_path: Path, fake_common_dir)
     assert any("init-firewall.sh" in a for a in joined)
 
 
+def test_docker_prepare_entry_restarts_stopped_container_and_relocks_egress(
+    tmp_path: Path, fake_common_dir
+):
+    """iptables rules don't survive a restart: prepare_entry on a stopped
+    container must docker-start it and re-run the guarded firewall init, in
+    that order - a hand-run `docker start` would leave egress silently open."""
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=False)
+
+    DockerRunner(cfg, docker=fake).prepare_entry(wt)
+
+    start = fake.calls.index(["start", "abc123"])
+    firewall = next(i for i, c in enumerate(fake.calls) if "init-firewall.sh" in " ".join(c))
+    assert start < firewall
+
+
+def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fake_common_dir):
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=True)
+
+    DockerRunner(cfg, docker=fake).prepare_entry(wt)
+
+    assert not any(c[0] == "start" or "init-firewall.sh" in " ".join(c) for c in fake.calls)
+
+
+def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
+    fake = _FakeDocker(ids="")
+    runner = DockerRunner(Config(isolation="docker"), docker=fake)
+
+    with pytest.raises(RuntimeError, match="treebox teardown"):
+        runner.prepare_entry(_boxed_worktree(tmp_path))
+
+
+def test_host_prepare_entry_is_a_noop(tmp_path: Path):
+    """The host runner needs no entry readiness: an emitted entry_command
+    works whenever the worktree exists."""
+    from treebox.runners.host import HostRunner
+
+    assert HostRunner(Config()).prepare_entry(_boxed_worktree(tmp_path)) is None
+
+
 def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir):
     """A labeled container this runner didn't create is an explicit error
     pointing at teardown — not silently adopted with the wrong
@@ -3554,6 +3599,53 @@ def test_template_path_resolves_default_and_named(template_home: Path):
 
     # An unknown name is not-found (exit 3), not a silent fall back to default.
     assert _cli(["template", "path", "ghost"]).exit_code == 3
+
+
+def test_create_missing_template_is_not_found_and_leaves_no_debris(
+    repo: Path, tmp_path: Path, template_home: Path
+):
+    # A bad --template on the provisioning path is the same user error the
+    # template sub-app classifies as not-found: exit 3 + TEMPLATE_NOT_FOUND,
+    # never the generic catch-all (issue #20) - and it fails before any git
+    # state exists, so no worktree or branch is left behind.
+    from treebox import git as git_mod
+
+    root = tmp_path / "wts"
+    res = _cli(
+        [
+            "create",
+            "t1",
+            "--repo",
+            str(repo),
+            "--root",
+            str(root),
+            "--isolation",
+            "docker",
+            "--template",
+            "nope",
+            "--no-fetch",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 3
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEMPLATE_NOT_FOUND"
+    assert "treebox template init nope" in err["hint"]
+    assert not git_mod.local_branch_exists(str(repo), "t1")
+    assert not (root / "t1").exists()
+
+
+def test_classify_template_not_found_matches_template_subapp():
+    # The provisioning classifier and the template sub-app must agree on what
+    # a missing template means - enter with a deleted recorded template routes
+    # through _classify at container-render time.
+    import treebox.assets as assets
+    from treebox.cli import EXIT_NOTFOUND, _classify
+
+    info = _classify(assets.TemplateNotFoundError("nope", "No template named 'nope'."))
+    assert info.exit_code == EXIT_NOTFOUND
+    assert info.error_code == "TEMPLATE_NOT_FOUND"
+    assert info.hint is not None and "treebox template init nope" in info.hint
 
 
 def test_template_list_json_marks_default_and_flags_broken(template_home: Path):

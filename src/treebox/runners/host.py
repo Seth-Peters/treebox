@@ -108,6 +108,11 @@ class HostRunner:
         steps = ecosystems.setup_steps(ecos, self.config.caches, cold_cache_root=None)
         return [" ".join(s.argv) for s in steps]
 
+    def prepare_entry(self, wt: Worktree) -> None:
+        # Nothing to make ready: the agent runs directly on the host, so an
+        # emitted entry_command works whenever the worktree exists.
+        return
+
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
         # Self-contained, like the docker runner's `docker exec -w`: the command
         # --print/--json emit must carry the worktree directory, or pasting it

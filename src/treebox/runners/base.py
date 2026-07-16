@@ -131,6 +131,17 @@ class Runner(Protocol):
         need repository context read ``wt.repo``."""
         ...
 
+    def prepare_entry(self, wt: Worktree) -> None:
+        """Make the sandbox entry-ready before the agent (or an emitted
+        ``entry_command``) enters it: the docker runner restarts a stopped
+        container and re-establishes the firewall; a no-op on the host. The
+        CLI calls it before emitting ``--print``/``--json`` output, and
+        ``launch`` implementations needing the same guarantee call it
+        themselves (the docker runner's does) - so an emitted
+        ``entry_command`` is never dead on arrival and a treebox-owned
+        restart never leaves egress silently open."""
+        ...
+
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
         """The argv that launches the agent (for --print)."""
         ...

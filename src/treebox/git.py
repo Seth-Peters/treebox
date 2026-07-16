@@ -610,9 +610,8 @@ def registered_gitdir(repo: str | Path, path: str | Path) -> Path | None:
 
 
 def is_dirty(worktree: str | Path) -> bool:
-    # Submodules are copied without linkage (their gitlink points at a modules
-    # dir that doesn't exist in the worktree), so ignore submodule state — both
-    # to avoid a fatal status error and because their dirtiness isn't ours.
+    # Submodule trees are plain copies with no .git at all (copy_submodules
+    # strips it), so ignore submodule state: their dirtiness isn't ours.
     out = _run(["-C", str(worktree), "status", "--porcelain", "--ignore-submodules=all"])
     return bool(out.strip())
 

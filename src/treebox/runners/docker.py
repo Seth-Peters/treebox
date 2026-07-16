@@ -670,10 +670,10 @@ class DockerRunner:
         )
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
-        self._ensure_running(wt)
+        self.prepare_entry(wt)
         return subprocess.run(self.entry_command(wt, harness=harness, args=args)).returncode
 
-    def _ensure_running(self, wt: Worktree) -> None:
+    def prepare_entry(self, wt: Worktree) -> None:
         """Start the container if it stopped since setup (host reboot, manual
         stop) and re-establish the firewall — iptables rules don't survive a
         restart, and the guarded init is a no-op when no firewall was baked in."""

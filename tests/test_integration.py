@@ -59,8 +59,13 @@ def test_create_provisions_everything(repo: Path, root: str, hermetic_config):
     assert git.branch_for_path(str(repo), str(wt)) == "feature-auth"
     # Fresh secrets copied from canonical .env.
     assert (wt / ".env").read_text() == "SECRET=canonical\n"
-    # Submodule working tree copied (copy only).
+    # Submodule working tree copied (copy only), genuinely linkage-free: the
+    # .git pointer must not come along, or its relative gitdir path breaks
+    # every git command in the linked worktree (issue #16).
     assert (wt / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+    assert not (wt / "sub" / ".git").exists()
+    status = _git(wt, "status", "--porcelain")
+    assert status.returncode == 0, status.stderr
     # Setup hook ran exactly once.
     assert (wt / "setup.log").read_text().strip() == "ran"
     # Lockfile hash recorded.
@@ -1291,10 +1296,48 @@ def test_enter_prefers_recorded_runner(
     # a running daemon (e.g. macOS CI) — this test is about runner selection.
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    # No real container exists in this fixture; entry readiness has its own test.
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, wt: None)
 
     res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
     assert res.exit_code == 0, res.output
     assert res.stdout.split()[0] == "docker"  # not the host launch command
+
+
+def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """enter --print/--json with an unchanged lockfile must still make the
+    sandbox entry-ready (docker: restart a stopped container and re-lock
+    egress) before emitting entry_command - otherwise the emitted command is
+    dead on replay, and the natural `docker start` workaround silently drops
+    the firewall (issue #17). A readiness failure must block the payload."""
+    from treebox.runners import docker as dr
+
+    wt = Path(root) / "feature-auth"
+    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_state_runner(wt, "docker")
+
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    prepared: list[str] = []
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, w: prepared.append(w.name))
+
+    for flag in ("--print", "--json"):
+        prepared.clear()
+        res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, flag])
+        assert res.exit_code == 0, res.output
+        # Deps unchanged (setup skipped) - readiness still ran before the emit.
+        assert prepared == ["feature-auth"]
+
+    # When readiness fails (e.g. the container is gone), nothing is emitted.
+    def _boom(self: dr.DockerRunner, w: object) -> None:
+        raise RuntimeError("no container")
+
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", _boom)
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    assert res.exit_code == 1, res.output
+    assert res.stdout == ""
 
 
 def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, hermetic_config):
@@ -2439,8 +2482,10 @@ def test_template_flag_reaches_the_docker_runner(
             "--json",
         ]
     )
-    assert res.exit_code == 1
+    # Classified like the template sub-app: not-found, never the catch-all.
+    assert res.exit_code == 3
     err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEMPLATE_NOT_FOUND"
     assert "No template named 'ghost'" in err["message"]
     assert not (Path(root) / "tpl").exists()
 
