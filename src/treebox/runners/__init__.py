@@ -23,29 +23,35 @@ from .host import HostRunner
 if TYPE_CHECKING:
     from ..config import Config
 
-RUNNERS: Final[dict[str, Callable[[Config, bool], Runner]]] = {
-    HostRunner.name: lambda config, _remove_volumes: HostRunner(config),
-    DockerRunner.name: lambda config, remove_volumes: DockerRunner(
-        config, remove_volumes=remove_volumes
+RUNNERS: Final[dict[str, Callable[[Config, bool, list[str] | None], Runner]]] = {
+    HostRunner.name: lambda config, _remove_volumes, _recorded_volumes: HostRunner(config),
+    DockerRunner.name: lambda config, remove_volumes, recorded_volumes: DockerRunner(
+        config, remove_volumes=remove_volumes, recorded_volumes=recorded_volumes
     ),
 }
 
 VALID_ISOLATION: tuple[str, ...] = tuple(RUNNERS)
 
 
-def get_runner(config: Config, *, remove_volumes: bool = False) -> Runner:
+def get_runner(
+    config: Config,
+    *,
+    remove_volumes: bool = False,
+    recorded_volumes: list[str] | None = None,
+) -> Runner:
     """Resolve the configured isolation mode through the registry.
 
-    ``remove_volumes`` is the teardown flow's ``--remove-volumes`` choice;
-    each factory forwards it only when its runner owns per-worktree volumes.
-    An unknown mode is a loud error — defense-in-depth behind
-    ``validate_config``, never a silent default.
+    ``remove_volumes`` is the teardown flow's ``--remove-volumes`` choice and
+    ``recorded_volumes`` the per-workspace volume names recorded in the
+    worktree state at create time; each factory forwards them only when its
+    runner owns per-worktree volumes. An unknown mode is a loud error -
+    defense-in-depth behind ``validate_config``, never a silent default.
     """
     try:
         factory = RUNNERS[config.isolation]
     except KeyError:
         raise ValueError(f"Unknown isolation mode '{config.isolation}'.") from None
-    return factory(config, remove_volumes)
+    return factory(config, remove_volumes, recorded_volumes)
 
 
 __all__ = [

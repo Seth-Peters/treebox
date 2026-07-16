@@ -111,6 +111,13 @@ class Runner(Protocol):
         """Ensure dependencies are installed (cache-backed unless ``cold``)."""
         ...
 
+    def workspace_volumes(self, wt: Worktree) -> list[str] | None:
+        """The per-workspace volume names this runner's setup creates for
+        ``wt``, recorded in the worktree state at create time so teardown can
+        still remove them when the container and the template are both gone.
+        None means the runner has no per-workspace volumes concept."""
+        ...
+
     def refresh(self, wt: Worktree, *, reporter: Reporter) -> None:
         """Re-stage state that must never go stale between sessions (the docker
         runner's credential copies). Runs on EVERY ``enter``, independent of the

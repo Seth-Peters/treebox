@@ -1413,13 +1413,19 @@ def _teardown_runner(
     `--remove-volumes` (teardown has no `--template` flag; state is the only
     source) — and folds the recorded harness too, which nothing in a teardown
     reads today; only the firewall stays at the config default here (see
-    ``honor_firewall``). ``remove_volumes`` is handed to the factory: teardown
-    options are owned by the runner, so only runners with per-worktree volumes
-    see it."""
-    exists = Path(cand.path).is_dir()
-    st = state.load_registered(repo_path, cand.path) if exists else None
+    ``honor_firewall``). ``remove_volumes`` and the volume names recorded at
+    create time are handed to the factory: teardown options are owned by the
+    runner, so only runners with per-worktree volumes see them. The recorded
+    names are what let `--remove-volumes` still work when the container is
+    gone AND the recorded template was deleted (nothing left to derive from);
+    a pre-record state (volumes=None) falls back to template derivation."""
+    st = state.load_registered(repo_path, cand.path)
     cfg_run = _reconcile_with_state(reporter, cfg, st, isolation=explicit, json_out=json_out)
-    return get_runner(cfg_run, remove_volumes=remove_volumes)
+    return get_runner(
+        cfg_run,
+        remove_volumes=remove_volumes,
+        recorded_volumes=st.volumes if st else None,
+    )
 
 
 def _teardown_one(
@@ -1441,7 +1447,7 @@ def _teardown_one(
     ``--skip-container`` (no container work, so no runner was resolved)."""
     wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
     exists = wt.path.is_dir()
-    st = state.load_registered(repo_path, wt.path) if exists else None
+    st = state.load_registered(repo_path, wt.path)
 
     branch_name = (
         cand.branch
@@ -1455,8 +1461,9 @@ def _teardown_one(
         container = "skipped"
         reporter.note("container", "skipped")
     elif not exists and st is None and explicit_isolation is None:
-        # The directory is gone, so the recorded isolation mode is unreadable
-        # and the config default is only a guess we won't act on.
+        # The directory and its recorded state are both gone, so the isolation
+        # mode is unreadable and the config default is only a guess we won't
+        # act on.
         container = "skipped"
         reporter.warn(
             "worktree directory is gone — recorded isolation mode unreadable; "

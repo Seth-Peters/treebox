@@ -79,7 +79,9 @@ The same private state records the worktree's creation-time choices. For an
 existing worktree, `enter` and `teardown` recover the recorded isolation and
 template instead of drifting to today's config defaults; `enter` also reuses the
 recorded firewall, and it reuses the recorded harness unless a per-session
-harness override is passed.
+harness override is passed. For docker worktrees the state also records the
+per-workspace volume names, so `teardown --remove-volumes` can still remove
+them when the container and the template are both gone.
 `teardown` reads that record through the repo's own worktree registration
 rather than the worktree's `.git` pointer, so the recorded choices survive
 even a corrupt worktree whose pointer file is gone.

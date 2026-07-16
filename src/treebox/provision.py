@@ -331,7 +331,10 @@ def _record_runner(
     """Persist the runner *before* setup runs. Setup is what builds a docker
     image and starts its container, so if it fails we'd otherwise be left with a
     container and no record of which runner owns it — an un-tearable orphan. With
-    the runner on disk first, teardown always knows host vs. docker."""
+    the runner on disk first, teardown always knows host vs. docker. The
+    per-workspace volume names are recorded here for the same reason: setup's
+    ``docker run`` is what creates the volumes, and teardown must be able to
+    remove them even when the template they derive from is later deleted."""
     state.save(
         worktree.path,
         state.WorktreeState(
@@ -342,12 +345,18 @@ def _record_runner(
             provisioned=False,
             firewall=firewall,
             template=template,
+            volumes=runner.workspace_volumes(worktree),
         ),
     )
 
 
 def _record_hash(
-    worktree: Worktree, runner: Runner, harness: str, firewall: bool, template: str
+    worktree: Worktree,
+    runner: Runner,
+    harness: str,
+    firewall: bool,
+    template: str,
+    volumes: list[str] | None,
 ) -> None:
     state.save(
         worktree.path,
@@ -359,6 +368,7 @@ def _record_hash(
             provisioned=True,
             firewall=firewall,
             template=template,
+            volumes=volumes,
         ),
     )
 
@@ -382,7 +392,9 @@ def _finish_setup(
     # the config default.
     _record_runner(wt, runner, harness.name, config.firewall, config.template)
     runner.setup(wt, cold=cold, reporter=reporter)
-    _record_hash(wt, runner, harness.name, config.firewall, config.template)
+    _record_hash(
+        wt, runner, harness.name, config.firewall, config.template, runner.workspace_volumes(wt)
+    )
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=[]), created=True)
 
 
@@ -648,7 +660,10 @@ def enter(
         # never overwrite the created-time template with the config default.
         recorded = prior.harness if prior and prior.harness else harness.name
         recorded_template = prior.template if prior and prior.template else config.template
-        _record_hash(wt, runner, recorded, config.firewall, recorded_template)
+        volumes = runner.workspace_volumes(wt)
+        if prior and prior.volumes is not None:
+            volumes = sorted(set(prior.volumes) | set(volumes or []))
+        _record_hash(wt, runner, recorded, config.firewall, recorded_template, volumes)
     else:
         reporter.note("deps", "unchanged · skipping setup")
 

@@ -54,8 +54,10 @@ For an existing worktree, `enter` and `teardown` also read the worktree's
 recorded creation-time state. Recorded isolation wins over the config default,
 and a conflicting explicit `--isolation` exits `5`; `enter` always reuses the
 recorded firewall, while recorded harness and template beat config defaults
-unless `--harness` or `--template` is passed. `teardown` uses the recorded
-template for docker volume cleanup because it has no `--template` flag.
+unless `--harness` or `--template` is passed. `teardown` removes the docker
+volume names recorded at create time; worktrees created before that record
+existed fall back to the recorded template (teardown has no `--template`
+flag).
 
 | Key        | Default              | What it controls                                          |
 | ---------- | -------------------- | --------------------------------------------------------- |

@@ -77,8 +77,9 @@ Module map:
   git just works). `runners/__init__.py` holds the `RUNNERS` registry;
   `get_runner` and `VALID_ISOLATION` derive from it. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
-  not in the run methods; teardown options (docker's `remove_volumes`) arrive
-  at the runner's constructor, never through the protocol.
+  not in the run methods; teardown options (docker's `remove_volumes` and
+  `recorded_volumes`) arrive at the runner's constructor, never through the
+  protocol.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
   list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
@@ -111,7 +112,10 @@ Module map:
   `provisioned` flag makes `enter` finish an interrupted setup even when the
   hash matches); the recorded choices are what let `enter`/`teardown` recover
   the worktree's created-time isolation, firewall, harness, and template
-  defaults. `teardown` reads the record through the repo's own worktree
+  defaults, and the recorded per-workspace volume names are what let
+  `teardown --remove-volumes` still find docker volumes when the container
+  and the recorded template are both gone. `teardown` reads the record
+  through the repo's own worktree
   registration (`load_registered`) rather than the worktree's `.git` pointer,
   so a corrupt tree's recorded choices still drive container cleanup.
 - **`models.py`** holds the `Worktree` value object and the name-as-identity
