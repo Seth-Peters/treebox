@@ -124,8 +124,10 @@ class TemplateRow(TypedDict):
     path: str
     source: str  # where it resolves from: env | user | bundled
     default: bool  # matches the configured default template
-    valid: bool  # no required files missing
+    valid: bool  # no required files missing, JSON contents parse
     missing: list[str]
+    invalid: list[str]  # present JSON files that fail to parse
+    firewall: bool  # has firewall.json, so it can serve --firewall
 
 
 @dataclass(frozen=True)

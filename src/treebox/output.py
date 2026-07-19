@@ -482,6 +482,7 @@ class Reporter:
         )
         table.add_column("NAME", style="wt.name", no_wrap=True)
         table.add_column("SOURCE", style="wt.muted", no_wrap=True)
+        table.add_column("FIREWALL", no_wrap=True)
         table.add_column("STATUS", no_wrap=True)
 
         # A narrow terminal must cost the (rare, edge-case) missing-files detail,
@@ -489,26 +490,36 @@ class Reporter:
         # no_wrap columns proportionally and truncate NAME. So budget the fixed
         # columns and clip the STATUS text ourselves to whatever's left.
         suffix = "  (default)"
-        pad, indent, slack, cols = 3, 2, 2, 3
+        pad, indent, slack, cols = 3, 2, 2, 4
         name_w = max(
             len("NAME"), *(len(r["name"]) + (len(suffix) if r["default"] else 0) for r in rows)
         )
         source_w = max(len("SOURCE"), *(len(r["source"]) for r in rows))
-        status_w = console.width - indent - name_w - source_w - pad * cols - slack
+        firewall_w = len("FIREWALL")
+        status_w = console.width - indent - name_w - source_w - firewall_w - pad * cols - slack
         status_w = max(status_w, 12)
 
         for r in rows:
             name_cell = Text(r["name"], style="wt.name")
             if r["default"]:
                 name_cell.append(suffix, style="wt.accent")
+            if r["firewall"]:
+                firewall_cell = Text("yes", style="wt.detail")
+            else:
+                firewall_cell = Text("-", style="wt.muted")
             if r["valid"]:
                 status_cell = Text("● ok", style="wt.fresh")
             else:
-                detail = "○ missing: " + ", ".join(r["missing"])
+                problems = []
+                if r["missing"]:
+                    problems.append("missing: " + ", ".join(r["missing"]))
+                if r["invalid"]:
+                    problems.append("invalid: " + ", ".join(r["invalid"]))
+                detail = "○ " + "; ".join(problems)
                 if len(detail) > status_w:
                     detail = detail[: status_w - 1].rstrip() + "…"
                 status_cell = Text(detail, style="wt.fail")
-            table.add_row(name_cell, r["source"], status_cell)
+            table.add_row(name_cell, r["source"], firewall_cell, status_cell)
 
         console.print(Padding(table, (0, 0, 0, 2)))
 

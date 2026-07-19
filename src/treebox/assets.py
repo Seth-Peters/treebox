@@ -21,11 +21,13 @@ the stock box would defeat the point.
 from __future__ import annotations
 
 import atexit
+import json
 import os
 from contextlib import ExitStack
 from functools import cache
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from .config import treebox_home
 from .models import expand_user
@@ -38,6 +40,19 @@ class TemplateNotFoundError(RuntimeError):
 
     Typed so the CLI classifies it as not-found (exit 3, ``TEMPLATE_NOT_FOUND``)
     on every path - the template sub-app and provisioning alike."""
+
+    def __init__(self, name: str, message: str) -> None:
+        super().__init__(message)
+        self.name = name
+
+
+class TemplateInvalidError(RuntimeError):
+    """A template that resolves but whose contents cannot serve the run:
+    missing, unreadable, or malformed JSON (``container.json``, or
+    ``firewall.json`` when ``--firewall`` asks for the overlay).
+
+    Typed so the CLI classifies it (exit 1, ``TEMPLATE_INVALID``) instead of
+    leaking a raw traceback with no ``--json`` error object."""
 
     def __init__(self, name: str, message: str) -> None:
         super().__init__(message)
@@ -128,6 +143,50 @@ def missing_template_files(path: Path) -> list[str]:
     docker runner throws on the first missing file at provision time; this is
     the same check surfaced early, for ``template list`` and ``init``."""
     return [f for f in TEMPLATE_FILES if not (path / f).is_file()]
+
+
+def load_template_json(name: str, filename: str) -> dict[str, Any]:
+    """Read and parse one of a template's JSON files (``container.json`` /
+    ``firewall.json``), raising ``TemplateInvalidError`` naming the file and
+    template on any content problem. The docker runner and the pre-provision
+    check in ``create`` share this, so both classify identically."""
+    path = template_dir(name) / filename
+    if not path.is_file():
+        raise TemplateInvalidError(name, f"Template '{name}' has no {filename} ({path}).")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise TemplateInvalidError(
+            name, f"Cannot read {filename} of template '{name}' ({path}): {exc}"
+        ) from exc
+    except ValueError as exc:
+        raise TemplateInvalidError(
+            name, f"Invalid JSON in {filename} of template '{name}' ({path}): {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise TemplateInvalidError(
+            name,
+            f"{filename} of template '{name}' ({path}) must be a JSON object, "
+            f"not {type(data).__name__}.",
+        )
+    return data
+
+
+def invalid_template_json_files(path: Path) -> list[str]:
+    """Which of a template dir's *present* JSON files fail to parse as JSON
+    objects - the content half of what ``missing_template_files`` checks by
+    existence, surfaced by ``template list``."""
+    bad = []
+    for f in (CONFIG_FILE, FIREWALL_FILE):
+        p = path / f
+        if not p.is_file():
+            continue
+        try:
+            if not isinstance(json.loads(p.read_text(encoding="utf-8")), dict):
+                bad.append(f)
+        except (OSError, ValueError):
+            bad.append(f)
+    return bad
 
 
 def available_templates() -> list[str]:
