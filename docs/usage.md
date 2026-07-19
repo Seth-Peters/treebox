@@ -139,10 +139,11 @@ error - `BRANCH_EXISTS` for a name whose branch already exists,
 `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
 `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
 backing another worktree, `TEMPLATE_NOT_FOUND` for a docker `--template` that
-doesn't resolve - rather than printing a plan a real run would
-refuse. The one exception mirrors real `create`: a half-built worktree from an
-interrupted run previews finishing setup (no fetch, no `worktree add`) instead
-of conflicting. Dry-run verdicts reflect the refs already available locally;
+doesn't resolve, `TEMPLATE_INVALID` for one that resolves but whose
+`container.json` (or `firewall.json` with `--firewall`) is broken - rather
+than printing a plan a real run would refuse. The one exception mirrors real
+`create`: a half-built worktree from an interrupted run previews finishing
+setup (no fetch, no `worktree add`) instead of conflicting. Dry-run verdicts reflect the refs already available locally;
 run `git fetch origin` first when exact parity with create's normal fetch is
 required. Either way, nothing on disk or in git changes.
 
@@ -346,7 +347,7 @@ reaching into the package internals. Named templates live under
 ```bash
 treebox template init node                 # copy the built-in default → ~/.treebox/templates/node, then edit
 treebox template init node --from python   # fork one of your own instead
-treebox template list                      # names, source, required-file status, and the config default (ls works too)
+treebox template list                      # names, source, firewall support, content status, and the config default (ls works too)
 treebox template path node                 # print the resolved dir: cd "$(treebox template path node)"
 ```
 
