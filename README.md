@@ -218,7 +218,7 @@ one per stack:
 
 ```bash
 treebox template init node          # copies from the built-in default
-treebox template list               # names, source, status, default + what the default bundles (`ls` works too)
+treebox template list               # names, source, firewall, status, default + what the default bundles (`ls` works too)
 treebox template path node          # where it lives: cd "$(treebox template path node)"
 ```
 
