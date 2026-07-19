@@ -145,6 +145,25 @@ def missing_template_files(path: Path) -> list[str]:
     return [f for f in TEMPLATE_FILES if not (path / f).is_file()]
 
 
+class _NotAnObjectError(ValueError):
+    """Parsed fine, but the top-level JSON value is not an object."""
+
+    def __init__(self, type_name: str) -> None:
+        super().__init__(f"top-level JSON value is a {type_name}, not an object")
+        self.type_name = type_name
+
+
+def _parse_json_object(path: Path) -> dict[str, Any]:
+    """Read ``path`` and parse it as a JSON object, letting ``OSError`` /
+    ``ValueError`` propagate (``_NotAnObjectError`` for a non-object top
+    level). The one definition of template-JSON validity that
+    ``load_template_json`` and ``invalid_template_json_files`` share."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise _NotAnObjectError(type(data).__name__)
+    return data
+
+
 def load_template_json(name: str, filename: str) -> dict[str, Any]:
     """Read and parse one of a template's JSON files (``container.json`` /
     ``firewall.json``), raising ``TemplateInvalidError`` naming the file and
@@ -154,7 +173,12 @@ def load_template_json(name: str, filename: str) -> dict[str, Any]:
     if not path.is_file():
         raise TemplateInvalidError(name, f"Template '{name}' has no {filename} ({path}).")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return _parse_json_object(path)
+    except _NotAnObjectError as exc:
+        raise TemplateInvalidError(
+            name,
+            f"{filename} of template '{name}' ({path}) must be a JSON object, not {exc.type_name}.",
+        ) from exc
     except OSError as exc:
         raise TemplateInvalidError(
             name, f"Cannot read {filename} of template '{name}' ({path}): {exc}"
@@ -163,13 +187,6 @@ def load_template_json(name: str, filename: str) -> dict[str, Any]:
         raise TemplateInvalidError(
             name, f"Invalid JSON in {filename} of template '{name}' ({path}): {exc}"
         ) from exc
-    if not isinstance(data, dict):
-        raise TemplateInvalidError(
-            name,
-            f"{filename} of template '{name}' ({path}) must be a JSON object, "
-            f"not {type(data).__name__}.",
-        )
-    return data
 
 
 def invalid_template_json_files(path: Path) -> list[str]:
@@ -182,8 +199,7 @@ def invalid_template_json_files(path: Path) -> list[str]:
         if not p.is_file():
             continue
         try:
-            if not isinstance(json.loads(p.read_text(encoding="utf-8")), dict):
-                bad.append(f)
+            _parse_json_object(p)
         except (OSError, ValueError):
             bad.append(f)
     return bad
