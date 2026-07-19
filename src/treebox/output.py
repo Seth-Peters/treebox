@@ -23,7 +23,6 @@ from typing import IO
 from rich import box
 from rich.console import Console
 from rich.live import Live
-from rich.markup import escape
 from rich.padding import Padding
 from rich.spinner import Spinner
 from rich.table import Table
@@ -159,7 +158,7 @@ class Reporter:
         text = Text("    ")
         text.append(f"{label:<{_LABEL_W}}", style="wt.muted")
         text.append("  ")
-        text.append(escape(value), style="wt.detail")
+        text.append(value, style="wt.detail")
         self.console.print(text)
 
     def blank(self) -> None:
@@ -194,7 +193,7 @@ class Reporter:
         text.append(f"{label:<{_LABEL_W}}", style=label_style)
         if detail:
             text.append("  ")
-            text.append(escape(detail), style=detail_style)
+            text.append(detail, style=detail_style)
         self._append_timing(text, timing)
         return text
 
@@ -236,7 +235,7 @@ class Reporter:
             return
         text = Text("  ")
         text.append("! ", style="wt.warn")
-        text.append(escape(msg), style="wt.warn")
+        text.append(msg, style="wt.warn")
         self._print(text)
 
     def error(self, msg: str) -> None:
@@ -244,7 +243,7 @@ class Reporter:
             return
         text = Text("  ")
         text.append(f"{_FAIL} ", style="wt.fail")
-        text.append(escape(msg), style="wt.fail")
+        text.append(msg, style="wt.fail")
         self._print(text)
 
     def hint(self, msg: str) -> None:
@@ -253,7 +252,7 @@ class Reporter:
             return
         text = Text("    ")
         text.append("↳ ", style="wt.muted")
-        text.append(escape(msg), style="wt.muted")
+        text.append(msg, style="wt.muted")
         self._print(text)
 
     def command(self, cmd: str) -> None:
@@ -261,10 +260,10 @@ class Reporter:
         with a faint cyan prompt."""
         text = Text("    ")
         if cmd.startswith("#"):
-            text.append(escape(cmd), style="wt.muted")
+            text.append(cmd, style="wt.muted")
         else:
             text.append("$ ", style="wt.accent")
-            text.append(escape(cmd), style="wt.detail")
+            text.append(cmd, style="wt.detail")
         self._print(text)
 
     def restore_terminal(self) -> None:
