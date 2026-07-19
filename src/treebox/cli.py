@@ -377,6 +377,15 @@ def _classify(exc: Exception) -> _ErrorInfo:
             "Run 'treebox template list' to see available templates, or scaffold "
             f"this one: treebox template init {exc.name}",
         )
+    if isinstance(exc, assets.TemplateInvalidError):
+        # The template exists but its contents can't serve this run - a runtime
+        # error (exit 1) with a stable code, like PreflightError below; agents
+        # branch on error.code.
+        return _ErrorInfo(
+            EXIT_ERROR,
+            "TEMPLATE_INVALID",
+            f"Inspect the template dir: treebox template path {exc.name}",
+        )
     if isinstance(exc, PreflightError):
         # Runner dependency problems keep exit 1 (codes are stable; agents
         # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE).
@@ -590,14 +599,17 @@ def create(
 
     run = get_runner(cfg)
 
-    # Resolve the template before any git state exists: failing at container
-    # render time would strand a freshly provisioned worktree + branch (a
-    # retried create then hits BRANCH_EXISTS). create-only on purpose - enter
-    # must keep tolerating a deleted recorded template on an existing container.
+    # Resolve the template - and parse the JSON it would render - before any
+    # git state exists: failing at container render time would strand a freshly
+    # provisioned worktree + branch (a retried create then hits BRANCH_EXISTS).
+    # create-only on purpose - enter must keep tolerating a deleted recorded
+    # template on an existing container.
     if cfg.isolation == "docker":
         try:
-            assets.template_dir(cfg.template)
-        except assets.TemplateNotFoundError as exc:
+            assets.load_template_json(cfg.template, assets.CONFIG_FILE)
+            if cfg.firewall:
+                assets.load_template_json(cfg.template, assets.FIREWALL_FILE)
+        except (assets.TemplateNotFoundError, assets.TemplateInvalidError) as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
     if dry_run:
@@ -1881,14 +1893,17 @@ def template_list(
         except assets.TemplateNotFoundError:
             continue  # enumerated names resolve by construction; skip if racy
         missing = assets.missing_template_files(path)
+        invalid = assets.invalid_template_json_files(path)
         rows.append(
             TemplateRow(
                 name=name,
                 path=str(path),
                 source=_template_source(name),
                 default=name == cfg.template,
-                valid=not missing,
+                valid=not missing and not invalid,
                 missing=missing,
+                invalid=invalid,
+                firewall=(path / assets.FIREWALL_FILE).is_file(),
             )
         )
 

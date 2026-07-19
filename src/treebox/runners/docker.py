@@ -332,8 +332,10 @@ class DockerRunner:
     # --- config rendering ------------------------------------------------------
 
     def _template_config(self) -> ContainerConfig:
-        tpl = assets.template_dir(self.config.template)
-        config = json.loads((tpl / assets.CONFIG_FILE).read_text(encoding="utf-8"))
+        # load_template_json raises a typed TemplateInvalidError on unreadable
+        # or malformed contents, so every caller (setup, prepare_entry, the
+        # _user fallback) surfaces a classified error instead of a traceback.
+        config = assets.load_template_json(self.config.template, assets.CONFIG_FILE)
         return _require_known_keys(config, assets.CONFIG_FILE)
 
     def _user(self, wt: Worktree) -> str:
@@ -353,8 +355,7 @@ class DockerRunner:
         and a mount can be told apart as per-workspace vs. shared."""
         config = self._template_config()
         if self.config.firewall:
-            tpl = assets.template_dir(self.config.template)
-            fw = json.loads((tpl / assets.FIREWALL_FILE).read_text(encoding="utf-8"))
+            fw = assets.load_template_json(self.config.template, assets.FIREWALL_FILE)
             _require_known_keys(fw, assets.FIREWALL_FILE)
             # The merge is shape-agnostic (recursive JSON); both sides were
             # validated above, so the result is still a ContainerConfig.
