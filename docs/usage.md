@@ -139,10 +139,11 @@ error - `BRANCH_EXISTS` for a name whose branch already exists,
 `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
 `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
 backing another worktree, `TEMPLATE_NOT_FOUND` for a docker `--template` that
-doesn't resolve - rather than printing a plan a real run would
-refuse. The one exception mirrors real `create`: a half-built worktree from an
-interrupted run previews finishing setup (no fetch, no `worktree add`) instead
-of conflicting. Dry-run verdicts reflect the refs already available locally;
+doesn't resolve, `TEMPLATE_INVALID` for one that resolves but whose
+`container.json` (or `firewall.json` with `--firewall`) is broken - rather
+than printing a plan a real run would refuse. The one exception mirrors real
+`create`: a half-built worktree from an interrupted run previews finishing
+setup (no fetch, no `worktree add`) instead of conflicting. Dry-run verdicts reflect the refs already available locally;
 run `git fetch origin` first when exact parity with create's normal fetch is
 required. Either way, nothing on disk or in git changes.
 
@@ -346,7 +347,7 @@ reaching into the package internals. Named templates live under
 ```bash
 treebox template init node                 # copy the built-in default → ~/.treebox/templates/node, then edit
 treebox template init node --from python   # fork one of your own instead
-treebox template list                      # names, source, required-file status, and the config default (ls works too)
+treebox template list                      # names, source, firewall support, content status, and the config default (ls works too)
 treebox template path node                 # print the resolved dir: cd "$(treebox template path node)"
 ```
 
@@ -355,8 +356,9 @@ set**, so `create --template <name>` can't fail on a half-copied template; it
 refuses to clobber an existing template without `--force`. Then edit the
 `Dockerfile` and `container.json` and launch with
 `treebox create <name> --isolation docker --template <name>`. `template list`
-flags any template dir missing a required file before `create` does, and marks
-which one is your config default. `template path [<name>]` (default: `default`)
+flags any template dir missing a required file or carrying malformed JSON
+before `create` does, shows whether each template can serve `--firewall`
+(a `firewall.json` is optional), and marks which one is your config default. `template path [<name>]` (default: `default`)
 prints the resolved location — the install-agnostic answer to "where does this
 template live", including the bundled default. All three take `--json` for
 scripting.
@@ -469,5 +471,6 @@ failure.
 | `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (corrupt or hand-edited state). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
+| `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |

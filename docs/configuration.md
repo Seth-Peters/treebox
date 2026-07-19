@@ -107,7 +107,7 @@ It always writes the full required file set, so a later `create` never fails
 with "*file* not found in template dir". Inspect what you have any time:
 
 ```bash
-treebox template list               # names, source, status, default + what the default bundles (`ls` works too)
+treebox template list               # names, source, firewall, status, default + what the default bundles (`ls` works too)
 treebox template path node          # where it lives: cd "$(treebox template path node)"
 ```
 

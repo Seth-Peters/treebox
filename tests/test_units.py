@@ -1085,6 +1085,35 @@ def test_docker_setup_without_firewall_skips_the_lockdown_exec(tmp_path: Path, f
     assert any("post-create.sh" in " ".join(a) for a in rep.steps)
 
 
+def test_docker_setup_tolerates_missing_firewall_json_without_firewall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
+):
+    """firewall.json is optional: a template without it must still provision
+    when the firewall is off - it only becomes an error under --firewall."""
+    import shutil
+
+    from treebox import assets
+
+    tpl = tmp_path / "tpl"
+    shutil.copytree(assets.template_dir("default"), tpl)
+    (tpl / "firewall.json").unlink()
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tpl))
+
+    fake = _FakeDocker(ids="")
+    rep = _RecordingReporter()
+    DockerRunner(Config(isolation="docker"), docker=fake).setup(
+        _boxed_worktree(tmp_path), cold=True, reporter=rep
+    )
+    assert any("post-create.sh" in " ".join(a) for a in rep.steps)
+
+    # With the firewall on, the same template is a typed content error - never
+    # a raw FileNotFoundError traceback (issue #25).
+    with pytest.raises(assets.TemplateInvalidError, match=r"firewall\.json"):
+        DockerRunner(Config(isolation="docker", firewall=True), docker=fake).setup(
+            _boxed_worktree(tmp_path), cold=True, reporter=_RecordingReporter()
+        )
+
+
 def test_docker_setup_reuses_existing_container(tmp_path: Path, fake_common_dir):
     """An existing labeled container is reused — started if stopped, firewall
     re-established from its baked env — never rebuilt or re-run."""
@@ -3508,6 +3537,91 @@ def test_classify_template_not_found_matches_template_subapp():
     assert info.hint is not None and "treebox template init nope" in info.hint
 
 
+def test_classify_template_invalid_is_a_stable_runtime_error():
+    # Broken template *contents* are a runtime error (exit 1) with a stable
+    # machine code, like PreflightError - agents branch on error.code.
+    import treebox.assets as assets
+    from treebox.cli import EXIT_ERROR, _classify
+
+    info = _classify(assets.TemplateInvalidError("broken", "Invalid JSON in container.json."))
+    assert info.exit_code == EXIT_ERROR
+    assert info.error_code == "TEMPLATE_INVALID"
+    assert info.hint is not None and "treebox template path broken" in info.hint
+
+
+def test_create_malformed_container_json_is_template_invalid_and_leaves_no_debris(
+    repo: Path, tmp_path: Path, template_home: Path
+):
+    # Malformed container.json used to escape classification entirely: a raw
+    # JSONDecodeError traceback, exit 1 via the interpreter, and no --json
+    # error object (issue #25). It must be a clean TEMPLATE_INVALID - caught
+    # before any git state exists, so no worktree or branch is stranded.
+    from treebox import git as git_mod
+
+    assert _cli(["template", "init", "broken"]).exit_code == 0
+    cfg_file = template_home / "templates" / "broken" / "container.json"
+    cfg_file.write_text('{"user": "dev",}\n')  # trailing comma: the issue's repro
+
+    root = tmp_path / "wts"
+    res = _cli(
+        [
+            "create",
+            "t1",
+            "--repo",
+            str(repo),
+            "--root",
+            str(root),
+            "--isolation",
+            "docker",
+            "--template",
+            "broken",
+            "--no-fetch",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 1
+    assert "Traceback" not in res.stderr
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEMPLATE_INVALID"
+    assert "container.json" in err["message"] and "broken" in err["message"]
+    assert "treebox template path broken" in err["hint"]
+    assert not git_mod.local_branch_exists(str(repo), "t1")
+    assert not (root / "t1").exists()
+
+
+def test_create_firewall_without_firewall_json_is_template_invalid(
+    repo: Path, tmp_path: Path, template_home: Path
+):
+    # --firewall against a template with no firewall.json used to be a raw
+    # FileNotFoundError traceback (issue #25): same classification, and the
+    # message must name the missing file.
+    assert _cli(["template", "init", "nofw"]).exit_code == 0
+    (template_home / "templates" / "nofw" / "firewall.json").unlink()
+
+    res = _cli(
+        [
+            "create",
+            "t2",
+            "--repo",
+            str(repo),
+            "--root",
+            str(tmp_path / "wts"),
+            "--isolation",
+            "docker",
+            "--template",
+            "nofw",
+            "--firewall",
+            "--no-fetch",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 1
+    assert "Traceback" not in res.stderr
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEMPLATE_INVALID"
+    assert "firewall.json" in err["message"] and "nofw" in err["message"]
+
+
 def test_template_list_json_marks_default_and_flags_broken(template_home: Path):
     # A dir missing required files is surfaced as invalid, not hidden — so a
     # broken template is caught here rather than mid-`create`.
@@ -3523,6 +3637,33 @@ def test_template_list_json_marks_default_and_flags_broken(template_home: Path):
     assert by_name["default"]["valid"] is True
     assert by_name["broken"]["valid"] is False
     assert "Dockerfile" in by_name["broken"]["missing"]
+
+
+def test_template_list_flags_malformed_json_and_shows_firewall_capability(template_home: Path):
+    # Content-aware listing (issue #25): a template whose container.json does
+    # not parse is invalid even with every required file present, and firewall
+    # capability (has firewall.json) is its own field - a firewall-less
+    # template is still valid for non---firewall use.
+    assert _cli(["template", "init", "badjson"]).exit_code == 0
+    (template_home / "templates" / "badjson" / "container.json").write_text('{"user": "dev",}\n')
+    assert _cli(["template", "init", "nofw"]).exit_code == 0
+    (template_home / "templates" / "nofw" / "firewall.json").unlink()
+
+    res = _cli(["template", "list", "--json"])
+    assert res.exit_code == 0
+    by_name = {t["name"]: t for t in json.loads(res.stdout)["templates"]}
+    assert by_name["badjson"]["valid"] is False
+    assert by_name["badjson"]["missing"] == []
+    assert by_name["badjson"]["invalid"] == ["container.json"]
+    assert by_name["nofw"]["valid"] is True
+    assert by_name["nofw"]["firewall"] is False
+    assert by_name["default"]["firewall"] is True
+
+    # The human view surfaces the same facts.
+    human = _cli(["template", "list"])
+    assert human.exit_code == 0
+    assert "invalid: container.json" in human.stdout
+    assert "FIREWALL" in human.stdout
 
 
 def test_template_list_human_view_shows_default_highlights(template_home: Path):
