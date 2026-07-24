@@ -3707,20 +3707,29 @@ def test_template_list_json_marks_default_and_flags_broken(template_home: Path):
 def test_template_list_flags_malformed_json_and_shows_firewall_capability(template_home: Path):
     # Content-aware listing (issue #25): a template whose container.json does
     # not parse is invalid even with every required file present, and firewall
-    # capability (has firewall.json) is its own field - a firewall-less
-    # template is still valid for non---firewall use.
+    # capability is its own field. A firewall-less template is still valid for
+    # non-firewall use, while a malformed firewall.json cannot serve it.
     assert _cli(["template", "init", "badjson"]).exit_code == 0
     (template_home / "templates" / "badjson" / "container.json").write_text('{"user": "dev",}\n')
+    assert _cli(["template", "init", "badfw"]).exit_code == 0
+    (template_home / "templates" / "badfw" / "firewall.json").write_text('{"runArgs": [}\n')
     assert _cli(["template", "init", "nofw"]).exit_code == 0
     (template_home / "templates" / "nofw" / "firewall.json").unlink()
 
     res = _cli(["template", "list", "--json"])
     assert res.exit_code == 0
-    by_name = {t["name"]: t for t in json.loads(res.stdout)["templates"]}
+    payload = json.loads(res.stdout)
+    assert payload["schemaVersion"] == SCHEMA_VERSION
+    by_name = {t["name"]: t for t in payload["templates"]}
     assert by_name["badjson"]["valid"] is False
     assert by_name["badjson"]["missing"] == []
     assert by_name["badjson"]["invalid"] == ["container.json"]
+    assert by_name["badfw"]["valid"] is False
+    assert by_name["badfw"]["missing"] == []
+    assert by_name["badfw"]["invalid"] == ["firewall.json"]
+    assert by_name["badfw"]["firewall"] is False
     assert by_name["nofw"]["valid"] is True
+    assert by_name["nofw"]["invalid"] == []
     assert by_name["nofw"]["firewall"] is False
     assert by_name["default"]["firewall"] is True
 
@@ -3728,6 +3737,7 @@ def test_template_list_flags_malformed_json_and_shows_firewall_capability(templa
     human = _cli(["template", "list"])
     assert human.exit_code == 0
     assert "invalid: container.json" in human.stdout
+    assert "invalid: firewall.json" in human.stdout
     assert "FIREWALL" in human.stdout
 
 

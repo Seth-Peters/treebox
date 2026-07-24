@@ -1903,7 +1903,8 @@ def template_list(
                 valid=not missing and not invalid,
                 missing=missing,
                 invalid=invalid,
-                firewall=(path / assets.FIREWALL_FILE).is_file(),
+                firewall=(path / assets.FIREWALL_FILE).is_file()
+                and assets.FIREWALL_FILE not in invalid,
             )
         )
 

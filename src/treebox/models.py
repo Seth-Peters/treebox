@@ -127,7 +127,7 @@ class TemplateRow(TypedDict):
     valid: bool  # no required files missing, JSON contents parse
     missing: list[str]
     invalid: list[str]  # present JSON files that fail to parse
-    firewall: bool  # has firewall.json, so it can serve --firewall
+    firewall: bool  # has valid firewall.json, so it can serve --firewall
 
 
 @dataclass(frozen=True)
