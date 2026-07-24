@@ -38,6 +38,12 @@ uv  = "/mnt/fast/cache/uv"
 npm = "/mnt/fast/cache/npm"
 ```
 
+Every key is optional, but the vocabulary is closed: an unknown top-level key
+(a typo like `isolatoin`) is a loud error (exit `2`, with a did-you-mean
+suggestion), never silently ignored - a typo'd `isolation` or `firewall` would
+otherwise drop your security posture without warning. Only the subkeys inside
+`[caches]` are open-ended (ecosystem cache names).
+
 Path-valued keys understand a leading `~`: `root`, `env_file`, and every
 `caches` entry expand `~/…` to your home directory before use, as do quoted
 `--root '~/trees'` and `--repo '~/proj'` on the command line. Ordinary

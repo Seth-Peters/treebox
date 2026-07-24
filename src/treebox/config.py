@@ -12,9 +12,10 @@ Resolution order, highest priority first:
 
 from __future__ import annotations
 
+import difflib
 import os
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -162,6 +163,18 @@ def load_config(path: Path | None = None) -> Config:
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"Could not read config {path}: {exc}") from exc
 
+    # Reject unknown top-level keys loudly: a typo'd `isolatoin`/`firewal` is
+    # security posture silently not applied, the exact failure the module
+    # docstring's INVALID_CONFIG contract exists to prevent. The vocabulary
+    # is the Config fields themselves (they match the accepted TOML keys
+    # one-to-one), so it cannot drift from the dataclass.
+    known = sorted(f.name for f in fields(Config))
+    for key in data:
+        if key not in known:
+            close = difflib.get_close_matches(key, known, n=1)
+            hint = f" (did you mean '{close[0]}'?)" if close else ""
+            raise ValueError(f"Invalid config {path}: unknown key '{key}'{hint}")
+
     setup_hook: list[str] | None = None
     if "setup_hook" in data:
         hook = data["setup_hook"]
@@ -174,7 +187,12 @@ def load_config(path: Path | None = None) -> Config:
                 f"Invalid config {path}: setup_hook must be a string or a list of strings."
             )
     caches = dict(cfg.caches)
-    if isinstance(data.get("caches"), dict):
+    if "caches" in data:
+        if not isinstance(data["caches"], dict):
+            raise ValueError(
+                f"Invalid config {path}: caches must be a table ([caches]), "
+                f"got {type(data['caches']).__name__}."
+            )
         caches.update({str(k): str(expand_user(str(v))) for k, v in data["caches"].items()})
 
     cfg = cfg.with_overrides(

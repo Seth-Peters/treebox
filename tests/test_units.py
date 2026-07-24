@@ -2554,6 +2554,71 @@ def test_config_wrong_typed_scalars_are_value_errors(tmp_path: Path, bad: str, k
         load_config(cfg_file)
 
 
+def test_config_unknown_key_is_value_error_with_suggestion(tmp_path: Path):
+    # Unknown top-level keys must fail loudly (issue #26): a typo'd
+    # `isolatoin`/`firewal` is security posture silently not applied, running
+    # a host-native unfirewalled agent with exit 0.
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('isolatoin = "docker"\n')
+    with pytest.raises(ValueError, match=r"unknown key 'isolatoin' \(did you mean 'isolation'\?\)"):
+        load_config(cfg_file)
+
+
+def test_config_unknown_key_without_close_match_has_no_suggestion(tmp_path: Path):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text("zzqqxx = true\n")
+    with pytest.raises(ValueError, match=r"unknown key 'zzqqxx'$"):
+        load_config(cfg_file)
+
+
+def test_config_non_dict_caches_is_value_error(tmp_path: Path):
+    # `caches = "nope"` used to be silently skipped; it must be the same clean
+    # ValueError as any other wrong-typed config value.
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('caches = "nope"\n')
+    with pytest.raises(ValueError, match="caches must be a table"):
+        load_config(cfg_file)
+
+
+def test_config_all_known_keys_still_load(tmp_path: Path):
+    # The unknown-key check derives its vocabulary from Config's fields; a
+    # config using every accepted key (including arbitrary [caches] subkeys —
+    # that vocabulary is semi-open ecosystem cache names) must load untouched.
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        'isolation = "docker"\n'
+        'harness = "codex"\n'
+        'base = "develop"\n'
+        'root = "/tmp/wts"\n'
+        'env_file = ".env.local"\n'
+        "firewall = true\n"
+        'template = "default"\n'
+        'setup_hook = "echo hi"\n'
+        "[caches]\n"
+        'uv = "/custom/uv"\n'
+        'somefuturecache = "/custom/future"\n'
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.isolation == "docker" and cfg.firewall is True
+    assert cfg.caches["uv"] == "/custom/uv"
+    assert cfg.caches["somefuturecache"] == "/custom/future"
+
+
+def test_config_unknown_key_is_clean_invalid_config_in_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # End to end: the typo from issue #26 exits 2 with INVALID_CONFIG naming
+    # the key, instead of exit 0 and a host-native unfirewalled session.
+    bad = tmp_path / "config.toml"
+    bad.write_text('isolatoin = "docker"\nfirewal = true\n')
+    monkeypatch.setenv("TREEBOX_CONFIG", str(bad))
+    res = _cli(["list", "--json"])
+    assert res.exit_code == 2
+    err = json.loads(res.stderr)
+    assert err["error"]["code"] == "INVALID_CONFIG"
+    assert "isolatoin" in err["error"]["message"]
+
+
 def test_config_wrong_typed_value_is_clean_invalid_config_in_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
