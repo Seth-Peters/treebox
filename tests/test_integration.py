@@ -1573,6 +1573,36 @@ def test_create_refuses_registered_worktree_missing_git_pointer(
     assert not (repo / ".git" / "treebox-state.json").exists()
 
 
+def test_enter_refuses_registered_worktree_missing_git_pointer(
+    repo: Path, root: str, hermetic_config
+):
+    """enter on a worktree whose .git pointer file was removed (interrupted
+    teardown) must refuse like create's resume path does: without the pointer,
+    git commands and the state read/write inside the dir resolve to the MAIN
+    repo, and the launched agent would operate on the user's real checkout."""
+    from treebox import git
+
+    base = ["--repo", str(repo), "--root", root]
+    _run(["create", "victim", *base, "--print"])
+    wt = Path(root) / "victim"
+    assert git.branch_for_path(str(repo), str(wt)) == "victim"
+
+    # Simulate the interrupted teardown: pointer gone, registration remains.
+    (wt / ".git").unlink()
+
+    res = _run(["enter", "victim", *base, "--print", "--json"])
+    assert res.exit_code == 5, res.output
+    err = json.loads(res.stderr)
+    assert err["error"]["code"] == "SLUG_CONFLICT"
+    assert "not a healthy registered worktree" in err["error"]["hint"]
+    assert "treebox teardown victim" in err["error"]["hint"]
+
+    # No state leaked into the main repo's private git dir, and its config
+    # was never touched by a re-run setup against the wrong git context.
+    assert not (repo / ".git" / "treebox-state.json").exists()
+    assert _git(repo, "config", "core.hooksPath").returncode != 0
+
+
 def test_create_refuse_hint_points_to_teardown_and_prune(repo: Path, root: str, hermetic_config):
     """A bare rm -rf leaves git's registration behind, so the refuse hint must
     steer to a recovery that clears BOTH: `treebox teardown <name>`, or a manual

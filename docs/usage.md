@@ -303,8 +303,10 @@ or a non-TTY, pass refs explicitly.
 `teardown` is also the recovery path for a **corrupt** worktree - a registered
 directory whose `.git` pointer file is gone (say, after an interrupted removal
 by hand). Git commands inside such a directory silently answer for the *main*
-checkout, so treebox verifies the worktree's git linkage before asking whether
-it is dirty: a corrupt worktree is never blocked as "dirty" just because your
+checkout, so `create` and `enter` both refuse it loudly (exit `5`,
+`error.code: "SLUG_CONFLICT"`) with a hint pointing here rather than running
+setup or an agent against your real checkout. `teardown` instead verifies the
+worktree's git linkage before asking whether it is dirty: a corrupt worktree is never blocked as "dirty" just because your
 main checkout has uncommitted changes. It takes the normal confirmation path
 instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
@@ -460,7 +462,7 @@ failure.
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `ERROR` | `1` | Unclassified runtime or setup failure. |
-| `SLUG_CONFLICT` | `5` | The worktree name is already taken. |
+| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |

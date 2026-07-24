@@ -617,6 +617,13 @@ def enter(
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 
+    # Same guard as create's resume path: without a healthy .git pointer,
+    # every git command below (and the state read/write) silently resolves
+    # to the MAIN repo, and the launched agent would operate on the user's
+    # real checkout. Refuse loudly with the teardown recovery hint instead.
+    if not links_to_worktree_gitdir(repo, wt.path):
+        raise _slug_conflict_for_existing_path(repo, wt)
+
     prior = state.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
     wt = Worktree(
