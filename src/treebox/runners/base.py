@@ -107,15 +107,14 @@ class Runner(Protocol):
         """Doctor-facing facts about this runner (see ``RunnerFacts``)."""
         ...
 
-    def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
-        """Ensure dependencies are installed (cache-backed unless ``cold``)."""
+    def initialize(self, wt: Worktree) -> None:
+        """Persist runner-owned host metadata before this worktree's first
+        setup. Sandboxed runners keep security-sensitive ownership records
+        outside every sandbox-writable mount; host runners may no-op."""
         ...
 
-    def workspace_volumes(self, wt: Worktree) -> list[str] | None:
-        """The per-workspace volume names this runner's setup creates for
-        ``wt``, recorded in the worktree state at create time so teardown can
-        still remove them when the container and the template are both gone.
-        None means the runner has no per-workspace volumes concept."""
+    def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
+        """Ensure dependencies are installed (cache-backed unless ``cold``)."""
         ...
 
     def refresh(self, wt: Worktree, *, reporter: Reporter) -> None:

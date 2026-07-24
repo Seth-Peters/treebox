@@ -506,67 +506,6 @@ def test_enter_resync_preserves_recorded_harness(repo: Path, root: str, hermetic
     assert "codex" in res.stdout and "claude" not in res.stdout
 
 
-def test_enter_resync_preserves_recorded_volumes(repo: Path, root: str, hermetic_config):
-    """A dep re-sync on enter re-records state; like the harness and template,
-    the create-time volume record must survive it. The template may have been
-    edited since create while the container keeps its creation-time mounts, so
-    a fresh derivation is merged into the record, never substituted for it."""
-    from treebox import provision
-    from treebox.config import Config
-    from treebox.harnesses import get_harness
-    from treebox.output import Reporter
-
-    base = ["--repo", str(repo), "--root", root]
-    assert _run(["create", "voldrift", *base, "--print"]).exit_code == 0
-    wt = Path(root) / "voldrift"
-    prior = state.load(wt)
-    assert prior is not None
-    state.save(
-        wt,
-        state.WorktreeState(
-            base=prior.base,
-            isolation="docker",
-            harness=prior.harness,
-            lockfile_hash=prior.lockfile_hash,
-            provisioned=False,  # unfinished setup: enter must re-run it
-            firewall=prior.firewall,
-            template=prior.template,
-            volumes=["treebox-shellhistory-voldrift"],
-        ),
-    )
-
-    class _DriftedRunner:
-        name = "docker"
-
-        def setup(self, wt, *, cold, reporter):
-            return None
-
-        def refresh(self, wt, *, reporter):
-            return None
-
-        def workspace_volumes(self, wt):
-            # The template was edited since create: a fresh derivation no
-            # longer names the volume the existing container still mounts.
-            return ["treebox-scratch-voldrift"]
-
-        def entry_command(self, wt, *, harness, args):
-            return ["true"]
-
-    provision.enter(
-        Config(root=root, isolation="docker"),
-        _DriftedRunner(),
-        repo=str(repo),
-        name="voldrift",
-        harness=get_harness("claude"),
-        cold=False,
-        args=[],
-        reporter=Reporter(quiet=True),
-    )
-    st = state.load(wt)
-    assert st is not None and st.provisioned is True
-    assert st.volumes == ["treebox-scratch-voldrift", "treebox-shellhistory-voldrift"]
-
-
 def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_config):
     """provision.enter runs runner.refresh even when deps are unchanged: the
     docker runner's credential copies must not ride the lockfile-hash cache
@@ -2231,11 +2170,18 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
 ):
     """A failed volume rm after a successful container rm keeps the two
     outcomes separate: container stays "cleaned", volumes_removed is false."""
+    from treebox.config import Config
+    from treebox.models import Worktree
     from treebox.runners.docker import DockerRunner
 
     wt = Path(root) / "volfail"
     _run(["create", "volfail", "--repo", str(repo), "--root", root, "--print"])
     _rewrite_state_runner(wt, "docker")
+    st = state.load(wt)
+    assert st is not None
+    DockerRunner(Config(isolation="docker")).initialize(
+        Worktree(str(repo), "volfail", "volfail", st.base, wt)
+    )
     calls: list[list[str]] = []
 
     monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
@@ -2243,7 +2189,7 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
     monkeypatch.setattr(
         DockerRunner,
         "_container_volumes",
-        lambda self, ids: ["treebox-volfail"],
+        lambda self, ids: ["treebox-shellhistory-volfail"],
     )
     monkeypatch.setattr(
         DockerRunner,
@@ -2261,7 +2207,8 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
                 "",
                 "volume is in use",
             )
-        return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+        stdout = "treebox-shellhistory-volfail\n" if args[:2] == ["volume", "ls"] else ""
+        return subprocess.CompletedProcess(["docker", *args], 0, stdout, "")
 
     monkeypatch.setattr(DockerRunner, "_engine", fake_engine)
 
@@ -2285,33 +2232,35 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
     assert record["volumes_removed"] is False
     assert record["removed"] is True
     assert ["rm", "-f", "abc123"] in calls
-    assert ["volume", "rm", "treebox-volfail"] in calls
+    assert ["volume", "rm", "treebox-shellhistory-volfail"] in calls
     assert not wt.exists()
 
 
-def test_teardown_removes_recorded_volumes_when_container_and_template_gone(
+def test_teardown_removes_manifest_volumes_when_container_and_template_gone(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
     """The issue-21 leak, end to end: the container was removed manually AND
-    the recorded template no longer exists on disk, so nothing can be derived
-    at teardown time - the volume names recorded in state at create time must
-    still drive the removal (volumes_removed: true), instead of exiting 0 with
-    the volume orphaned forever."""
+    the user template no longer exists on disk. The host-owned generated
+    manifest must still drive removal instead of leaking the volume."""
     import dataclasses
 
+    from treebox.config import Config
+    from treebox.models import Worktree
     from treebox.runners.docker import DockerRunner
 
     wt = Path(root) / "volleak"
     _run(["create", "volleak", "--repo", str(repo), "--root", root, "--print"])
     st = state.load(wt)
     assert st is not None
+    DockerRunner(Config(isolation="docker")).initialize(
+        Worktree(str(repo), "volleak", "volleak", st.base, wt)
+    )
     state.save(
         wt,
         dataclasses.replace(
             st,
             isolation="docker",
             template="deleted-template",  # since removed from disk
-            volumes=["treebox-shellhistory-volleak"],
         ),
     )
     calls: list[list[str]] = []
@@ -2346,6 +2295,69 @@ def test_teardown_removes_recorded_volumes_when_container_and_template_gone(
     (record,) = json.loads(res.stdout)["worktrees"]
     assert record["volumes_removed"] is True
     assert ["volume", "rm", "treebox-shellhistory-volleak"] in calls
+    assert not wt.exists()
+
+
+def test_teardown_never_trusts_sandbox_writable_state_for_volume_removal(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A boxed agent can edit its private git-dir state through the writable
+    common-dir mount. Injecting an unrelated host volume there must never make
+    host-side teardown delete it; only the host-owned manifest may authorize
+    removal."""
+
+    from treebox import git
+    from treebox.config import Config
+    from treebox.models import Worktree
+    from treebox.runners.docker import DockerRunner
+
+    wt = Path(root) / "volinject"
+    _run(["create", "volinject", "--repo", str(repo), "--root", root, "--print"])
+    st = state.load(wt)
+    assert st is not None
+    DockerRunner(Config(isolation="docker")).initialize(
+        Worktree(str(repo), "volinject", "volinject", st.base, wt)
+    )
+    state_file = Path(git.git_dir(wt)) / "treebox-state.json"
+    injected = json.loads(state_file.read_text())
+    injected.update(isolation="docker", volumes=["production-database"])
+    state_file.write_text(json.dumps(injected))
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
+    monkeypatch.setattr(DockerRunner, "_container_ids", lambda self, worktree: [])
+
+    def fake_engine(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        stdout = (
+            "treebox-shellhistory-volinject\nproduction-database\n"
+            if args[:2] == ["volume", "ls"]
+            else ""
+        )
+        return subprocess.CompletedProcess(["docker", *args], 0, stdout, "")
+
+    monkeypatch.setattr(DockerRunner, "_engine", fake_engine)
+
+    res = _run(
+        [
+            "teardown",
+            "volinject",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert res.exit_code == 0, res.output
+    (record,) = json.loads(res.stdout)["worktrees"]
+    assert record["volumes_removed"] is True
+    assert [call for call in calls if call[:2] == ["volume", "rm"]] == [
+        ["volume", "rm", "treebox-shellhistory-volinject"]
+    ]
     assert not wt.exists()
 
 

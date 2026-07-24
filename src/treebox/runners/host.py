@@ -44,6 +44,10 @@ class HostRunner:
     def facts(self) -> RunnerFacts:
         return _FACTS
 
+    def initialize(self, wt: Worktree) -> None:
+        # The host runner owns no per-worktree resources outside the worktree.
+        return
+
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
         cold_root = tempfile.mkdtemp(prefix="treebox-cold-") if cold else None
         try:
@@ -59,9 +63,6 @@ class HostRunner:
         # Nothing staged per-worktree: the agent runs with the live host
         # ~/.claude / ~/.codex, so host logins/logouts apply immediately.
         return
-
-    def workspace_volumes(self, wt: Worktree) -> list[str] | None:
-        return None  # volumes are a container concept; nothing to record
 
     def _run_auto(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
         ecos = ecosystems.detect(wt.path)

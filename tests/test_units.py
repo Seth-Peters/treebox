@@ -541,6 +541,22 @@ def _boxed_worktree(tmp_path: Path, branch: str = "feature/x") -> Worktree:
     return Worktree("/repo", name, branch, "main", wt_path)
 
 
+def _write_resource_manifest(runner: DockerRunner, wt: Worktree, volumes: list[str]) -> Path:
+    manifest = runner._resource_manifest_file(wt)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "workspace": str(wt.path),
+                "image": runner._slug(wt),
+                "volumes": volumes,
+            }
+        )
+    )
+    return manifest
+
+
 def test_docker_cache_mount_expands_tilde_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
 ):
@@ -1044,6 +1060,9 @@ class _RecordingReporter:
     def note(self, label, detail=""):
         self.notes.append(label)
 
+    def ok(self, label, detail=""):
+        return None
+
     def warn(self, msg):
         self.warnings.append(msg)
 
@@ -1366,19 +1385,20 @@ def test_config_rejects_unknown_isolation(tmp_path: Path):
         load_config(cfg_file)
 
 
-def test_docker_teardown_removes_own_image_and_treebox_volumes(tmp_path: Path):
-    """The magic-prefix contracts: only images treebox built (treebox-*) and
-    treebox-named volumes are removed; foreign volumes are never touched."""
+def test_docker_teardown_removes_own_image_and_manifest_volumes(tmp_path: Path):
+    """Image and volume deletion both require exact host-owned authority."""
     from treebox.output import Reporter
 
-    image = "treebox-feature--x-deadbeef00"
+    wt = _boxed_worktree(tmp_path)
+    image = DockerRunner(Config(isolation="docker"))._slug(wt)
     fake = _FakeDocker(
         ids="abc123\n",
         image=f"{image}\n",
         volumes="treebox-claude-config\nunrelated-volume\n",
+        volume_ls="treebox-claude-config\nunrelated-volume\n",
     )
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
-    wt = _boxed_worktree(tmp_path)
+    _write_resource_manifest(runner, wt, ["treebox-claude-config"])
 
     result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
@@ -1424,16 +1444,16 @@ def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("failed_command", "expected_container", "expected_volumes_removed", "image_rm_attempted"),
+    ("failed_resource", "expected_container", "expected_volumes_removed", "image_rm_attempted"),
     [
-        (("rm", "-f", "abc123"), "failed", True, False),
-        (("image", "rm", "treebox-feature--x-deadbeef00"), "failed", True, True),
-        (("volume", "rm", "treebox-claude-config"), "cleaned", False, True),
+        ("container", "failed", True, False),
+        ("image", "failed", True, True),
+        ("volume", "cleaned", False, True),
     ],
 )
 def test_docker_teardown_continues_past_destructive_command_failure(
     tmp_path: Path,
-    failed_command: tuple[str, ...],
+    failed_resource: str,
     expected_container: str,
     expected_volumes_removed: bool,
     image_rm_attempted: bool,
@@ -1445,17 +1465,24 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     a failed volume rm alone leaves the container status accurate."""
     from treebox.output import Reporter
 
-    image = "treebox-feature--x-deadbeef00"
+    wt = _boxed_worktree(tmp_path)
+    image = DockerRunner(Config(isolation="docker"))._slug(wt)
+    failed_commands = {
+        "container": ("rm", "-f", "abc123"),
+        "image": ("image", "rm", image),
+        "volume": ("volume", "rm", "treebox-claude-config"),
+    }
+    failed_command = failed_commands[failed_resource]
     fake = _FakeDocker(
         ids="abc123\n",
         image=f"{image}\n",
         volumes="treebox-claude-config\n",
+        volume_ls="treebox-claude-config\n",
         failures={failed_command: "removal denied"},
     )
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
-    wt = _boxed_worktree(tmp_path)
     cfg_dir = runner._config_dir(wt)
-    cfg_dir.mkdir(parents=True)
+    _write_resource_manifest(runner, wt, ["treebox-claude-config"])
 
     result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
@@ -1467,27 +1494,49 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     assert not cfg_dir.exists()
 
 
-def test_docker_teardown_no_container_removes_config_dir(tmp_path: Path):
-    """With no matching container, teardown only queries docker (availability,
-    container and volume lookups; nothing removed) — and still removes the
-    host-side operator config dir."""
-    from treebox.output import Reporter
-
+@pytest.mark.parametrize("config_dir_exists", [True, False], ids=["legacy", "manually-deleted"])
+def test_docker_teardown_without_manifest_never_guesses_volumes(
+    tmp_path: Path, config_dir_exists: bool
+):
+    """A legacy worktree or manually deleted metadata dir is cleaned safely:
+    no volume lookup/removal guess, a warning, and any config dir is removed."""
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
     cfg_dir = runner._config_dir(wt)
-    cfg_dir.mkdir(parents=True)
+    if config_dir_exists:
+        cfg_dir.mkdir(parents=True)
 
-    runner.teardown(wt, reporter=Reporter(quiet=True))
+    reporter = _RecordingReporter()
+    runner.teardown(wt, reporter=reporter)
 
     assert fake.calls[:2] == [
         ["info"],
         ["ps", "-aq", "--filter", f"label=treebox.workspace={wt.path}"],
     ]
-    assert all(c[0] in ("info", "ps", "volume") for c in fake.calls)
+    assert all(c[0] in ("info", "ps") for c in fake.calls)
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
+    assert any("manifest unavailable" in warning for warning in reporter.warnings)
     assert not cfg_dir.exists()
+
+
+def test_docker_teardown_rejects_manifest_for_another_workspace(tmp_path: Path):
+    """Even host-owned metadata must match the exact worktree identity before
+    it can authorize deletion."""
+    fake = _FakeDocker(ids="", volume_ls="production-database\n")
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
+    wt = _boxed_worktree(tmp_path)
+    manifest = _write_resource_manifest(runner, wt, ["production-database"])
+    data = json.loads(manifest.read_text())
+    data["workspace"] = "/different/worktree"
+    manifest.write_text(json.dumps(data))
+    reporter = _RecordingReporter()
+
+    result = runner.teardown(wt, reporter=reporter)
+
+    assert result.volumes_removed is False
+    assert not any(call[0] == "volume" for call in fake.calls)
+    assert any("belongs to workspace" in warning for warning in reporter.warnings)
 
 
 def test_docker_teardown_finds_volumes_when_container_already_gone(tmp_path: Path, fake_common_dir):
@@ -1502,6 +1551,7 @@ def test_docker_teardown_finds_volumes_when_container_already_gone(tmp_path: Pat
     fake = _FakeDocker(ids="", volume_ls=f"{vol}\nunrelated-volume\n")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
+    runner.initialize(wt)
 
     runner.teardown(wt, reporter=Reporter(quiet=True))
 
@@ -1534,6 +1584,7 @@ def test_docker_teardown_leaves_shared_template_volume_when_container_gone(
     fake = _FakeDocker(ids="", volume_ls=f"{per_ws}\n{shared}\n")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
+    runner.initialize(wt)
 
     runner.teardown(wt, reporter=Reporter(quiet=True))
 
@@ -1541,30 +1592,24 @@ def test_docker_teardown_leaves_shared_template_volume_when_container_gone(
     assert volume_rms == [["volume", "rm", per_ws]]  # shared volume untouched
 
 
-def test_docker_teardown_removes_recorded_volumes_when_container_and_template_gone(
+def test_docker_teardown_removes_manifest_volumes_when_container_and_template_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The issue-21 leak: with the container already gone AND the recorded
-    template deleted from disk, template derivation yields nothing - the names
-    recorded in state at create time are the only remaining source, and they
-    must still be filtered against the live volume list (a recorded name whose
-    volume was already removed is never rm'd)."""
+    """The issue-21 leak: with the container and user template both gone, the
+    host-owned manifest remains authoritative. Already-removed entries are
+    filtered against the live engine list."""
     from treebox.output import Reporter
     from treebox.runners.docker import _sanitize
 
     def deleted_template(self):
         raise RuntimeError("Template not found: mine")
 
-    monkeypatch.setattr(DockerRunner, "_overlaid_config", deleted_template)
     vol = f"treebox-shellhistory-{_sanitize('feature--x')}"
     fake = _FakeDocker(ids="", volume_ls=f"{vol}\nunrelated-volume\n")
-    runner = DockerRunner(
-        Config(isolation="docker"),
-        remove_volumes=True,
-        recorded_volumes=[vol, "treebox-scratch-feature--x"],  # second one already gone
-        docker=fake,
-    )
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
+    _write_resource_manifest(runner, wt, [vol, "treebox-scratch-feature--x"])
+    monkeypatch.setattr(DockerRunner, "_overlaid_config", deleted_template)
 
     result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
@@ -1573,8 +1618,8 @@ def test_docker_teardown_removes_recorded_volumes_when_container_and_template_go
     assert volume_rms == [["volume", "rm", vol]]  # existing recorded volume only
 
 
-def test_docker_teardown_recorded_empty_volumes_do_not_rederive(tmp_path: Path, fake_common_dir):
-    """A recorded empty list means the create-time template defined no
+def test_docker_teardown_empty_manifest_does_not_rederive(tmp_path: Path, fake_common_dir):
+    """An empty manifest means the create-time template defined no
     per-workspace volumes, so no volume was ever created for this worktree -
     teardown must not re-derive from today's template (which may have gained a
     volume since) and remove one belonging to nothing."""
@@ -1583,10 +1628,9 @@ def test_docker_teardown_recorded_empty_volumes_do_not_rederive(tmp_path: Path, 
 
     vol = f"treebox-shellhistory-{_sanitize('feature--x')}"
     fake = _FakeDocker(ids="", volume_ls=f"{vol}\n")
-    runner = DockerRunner(
-        Config(isolation="docker"), remove_volumes=True, recorded_volumes=[], docker=fake
-    )
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
     wt = _boxed_worktree(tmp_path)
+    _write_resource_manifest(runner, wt, [])
 
     result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
@@ -1594,12 +1638,11 @@ def test_docker_teardown_recorded_empty_volumes_do_not_rederive(tmp_path: Path, 
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
 
 
-def test_docker_create_records_workspace_volumes_in_state(
+def test_docker_create_records_workspace_volumes_in_host_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
 ):
-    """create persists the derived per-workspace volume names in the worktree
-    state (before setup, alongside the runner record), so teardown can remove
-    them even after the template they derive from is deleted."""
+    """Create persists derived per-workspace volume names outside every
+    sandbox mount before setup, and worktree state carries no ownership data."""
     from treebox import git, provision, state
     from treebox.runners.docker import _sanitize
 
@@ -1609,16 +1652,33 @@ def test_docker_create_records_workspace_volumes_in_state(
 
     provision._record_runner(wt, runner, "claude", False, "default")
 
+    manifest = json.loads(runner._resource_manifest_file(wt).read_text())
+    assert manifest == {
+        "schemaVersion": 1,
+        "workspace": str(wt.path),
+        "image": runner._slug(wt),
+        "volumes": [f"treebox-shellhistory-{_sanitize('feature--x')}"],
+    }
     st = state.load(wt.path)
     assert st is not None
-    assert st.volumes == [f"treebox-shellhistory-{_sanitize('feature--x')}"]
+    assert "volumes" not in json.loads((tmp_path / "gitdir" / "treebox-state.json").read_text())
+
+
+def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, fake_common_dir):
+    """Template/config drift on enter must not rewrite create-time ownership."""
+    runner = DockerRunner(Config(isolation="docker"))
+    wt = _boxed_worktree(tmp_path)
+    runner.initialize(wt)
+    before = runner._resource_manifest_file(wt).read_text()
+
+    runner._write_config(wt, cold=True)
+
+    assert runner._resource_manifest_file(wt).read_text() == before
 
 
 def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     """teardown has no --template flag, so its runner must recover the created-time
-    template from state: otherwise `_template_volumes` derives the config-default
-    template's volume names and the custom template's ${workspaceName} volume
-    leaks (the residual gap #109's fix couldn't close without the recorded name)."""
+    template from state for the non-destructive runner configuration."""
     from treebox import git, state
     from treebox.cli import _teardown_runner
     from treebox.config import Config
@@ -1644,46 +1704,6 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     )
     assert run is not None
     assert run.config.template == "hardened"  # recovered from state, not the config default
-
-
-def test_teardown_runner_passes_recorded_volumes_to_docker(tmp_path, monkeypatch):
-    """The volume names recorded at create time reach the docker runner as a
-    construction-time teardown option (like remove_volumes itself), read through
-    the repo's worktree registration so a corrupt tree's record still works;
-    a pre-record state (no volumes key) passes None so the runner falls back
-    to template derivation."""
-    from treebox import git, state
-    from treebox.cli import _teardown_runner
-    from treebox.config import Config
-    from treebox.output import Reporter
-    from treebox.resolve import Candidate
-
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-    monkeypatch.setattr(git, "registered_gitdir", lambda repo, p: tmp_path)
-    state.save(
-        tmp_path,
-        state.WorktreeState(
-            base="main",
-            isolation="docker",
-            harness="claude",
-            volumes=["treebox-shellhistory-work"],
-        ),
-    )
-    # The worktree dir itself is gone (rm -rf'd tree): the record must still
-    # be readable through the surviving registration.
-    cand = Candidate(name="work", branch="treebox/work", path=str(tmp_path / "gone"))
-
-    run = _teardown_runner(
-        Reporter(quiet=True),
-        Config(isolation="docker"),
-        cand,
-        str(tmp_path),
-        explicit=None,
-        remove_volumes=True,
-        json_out=False,
-    )
-    assert isinstance(run, DockerRunner)
-    assert run._recorded_volumes == ["treebox-shellhistory-work"]
 
 
 def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
@@ -1921,32 +1941,6 @@ def test_state_template_roundtrips(tmp_path, monkeypatch):
         json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
     )
     assert state.load(tmp_path).template is None
-
-
-def test_state_volumes_roundtrip(tmp_path, monkeypatch):
-    """The recorded per-workspace volume names round-trip so teardown can
-    remove them when the container and template are both gone; unrecorded
-    (pre-field file or fresh object) reads as None so teardown falls back to
-    container/template derivation, while a recorded empty list stays []."""
-    import json
-
-    from treebox import git, state
-
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-
-    for vols in (["treebox-shellhistory-w1"], []):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", volumes=vols),
-        )
-        assert state.load(tmp_path).volumes == vols
-
-    # Fresh objects and files missing the "volumes" key both read as None.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").volumes is None
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).volumes is None
 
 
 def test_host_git_pins_exec_shaped_config(monkeypatch: pytest.MonkeyPatch):

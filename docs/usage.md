@@ -230,10 +230,12 @@ Takes one or more refs (name, branch, or unique substring). Every ref is
 resolved before anything is removed — a typo among three targets removes
 nothing. Refuses to remove a worktree with uncommitted changes unless you pass
 `--force`. For docker-sandboxed worktrees, `--remove-volumes` also removes
-treebox volumes - found via the volume names recorded at create time, so they
-are still removed when the container was already deleted by hand (a note says
-so when none is found) - and `--skip-container` leaves containers/images
-untouched.
+per-workspace volumes authorized by the runner-owned manifest written outside
+the sandbox mount at create time, so they are still removed when the container
+and user template were already deleted. If that manifest is missing or
+invalid, including on older worktrees or after manual deletion of the
+`<worktree-root>/.containers/<worktree>` directory, treebox warns and skips volume removal
+instead of guessing. `--skip-container` leaves containers/images untouched.
 `--json` prints a structured record of what was removed (and never blocks on
 a prompt).
 
@@ -315,10 +317,11 @@ main checkout has uncommitted changes. It takes the normal confirmation path
 instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
 touching the main checkout's files. Container cleanup survives the corruption
-too: teardown reads the worktree's recorded isolation, template, and volume
-names through git's own registration rather than the missing pointer, so a
-corrupt docker worktree is still torn down with the runner it was created
-with.
+too: teardown reads the worktree's recorded isolation and template through
+git's own registration rather than the missing pointer, so a corrupt docker
+worktree is still torn down with the runner it was created with. Volume
+ownership comes separately from the host-owned resource manifest and is never
+read from that sandbox-writable state.
 
 If a worktree's recorded isolation mode is unknown (corrupt or hand-edited
 state), teardown refuses it as a conflict rather than guessing how to drive its
