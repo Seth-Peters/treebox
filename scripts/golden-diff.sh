@@ -139,7 +139,6 @@ normalize() {
     s/\btreebox-([a-z0-9._-]+)-[0-9a-f]{10}\b/treebox-$1-__HASH__/g;
     s/(\s)\d+s(\s+● (?:fresh|stale|unknown)\b)/$1Xs$2/g;
     s{(__ROOT__/repo-no-env/\.env · )\noptional}{$1optional}g;
-    s/[ \t]+$//mg;
   '
 }
 

@@ -216,8 +216,10 @@ legacy worktrees or registrations whose state is unavailable show `unknown`
 instead of being mislabeled with the current config default. The muted
 **Root** footer combines with each stable name to identify its directory
 without repeating long paths in every row; `list --json` carries each full
-`path`. On a narrow terminal, only the commit-subject column is omitted so
+`path`. On a narrow terminal, the commit-subject column is omitted first so
 identity, isolation, age, dependency freshness, and `.env` state stay legible.
+If name and branch still cannot fit side by side, the branch moves below its
+stable name instead of either value being truncated.
 A placeholder branch is always `treebox/<name>`, so its row just shows
 `⚠ unnamed` — work that can't be pushed yet is visible at a glance. `stale`
 means the lockfile changed since the last dependency sync — the next `enter`

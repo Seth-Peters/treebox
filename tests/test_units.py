@@ -154,8 +154,10 @@ def test_render_list_multi_worktree_summary_is_separated():
     assert "Rename unnamed: git branch -m <type>/<short-name>" in output
 
 
-def test_render_list_narrow_width_preserves_identity_and_state():
+@pytest.mark.parametrize("width", [60, 80])
+def test_render_list_narrow_width_preserves_identity_and_state(width: int):
     import io
+    import time
 
     from rich.console import Console
 
@@ -165,7 +167,7 @@ def test_render_list_narrow_width_preserves_identity_and_state():
     reporter = Reporter()
     reporter.data_console = Console(
         file=buf,
-        width=80,
+        width=width,
         theme=THEME,
         highlight=False,
         color_system=None,
@@ -174,25 +176,81 @@ def test_render_list_narrow_width_preserves_identity_and_state():
     reporter.render_list(
         [
             {
-                "name": "golden-docker-json",
-                "branch": "golden-docker-json",
+                "name": "fix-auth",
+                "branch": "fix/ci-caching",
                 "unnamed": False,
-                "last_commit": "a commit subject that gives up its space",
-                "commit_epoch": 1,
+                "last_commit": "cache uv wheels in CI",
+                "commit_epoch": int(time.time() - 8),
                 "isolation": "docker",
                 "deps": "fresh",
                 "env": "present",
-            }
+            },
+            {
+                "name": "brave-otter",
+                "branch": "feature/brave-otter",
+                "unnamed": False,
+                "last_commit": "initial provision",
+                "commit_epoch": int(time.time() - 65),
+                "isolation": "host",
+                "deps": "stale",
+                "env": "present",
+            },
         ],
         "/repo/.treebox/worktrees",
     )
 
     output = buf.getvalue()
-    assert "golden-docker-json" in output
+    assert all(
+        value in output
+        for value in ("fix-auth", "fix/ci-caching", "brave-otter", "feature/brave-otter")
+    )
     assert all(column in output for column in ("ISOLATION", "AGE", "DEPS", "ENV"))
-    assert "docker" in output and "● fresh" in output and "● present" in output
-    assert "LAST COMMIT" not in output
-    assert "…" not in output
+    assert "docker" in output and "host" in output
+    assert "● fresh" in output and "● stale" in output
+    assert output.count("● present") == 2
+    assert all(line == line.rstrip() for line in output.splitlines())
+
+
+def test_golden_snapshot_gate_preserves_and_detects_trailing_spaces(tmp_path: Path):
+    import os
+    import subprocess
+
+    script = Path("scripts/golden-diff.sh").read_text()
+    match = re.search(r"(?ms)^normalize\(\) \{\n(?P<body>.*?)^\}\n", script)
+    assert match is not None
+    normalize_command = f"normalize() {{\n{match.group('body')}}}\nnormalize"
+    sample = "meaningful trailing spaces   \nnext\n"
+    env = {
+        **os.environ,
+        "GD_PRIVROOT": "/private/normalizer-sentinel",
+        "GD_ROOT": "/normalizer-sentinel",
+        "GD_GITVER_PARSED": "99.98.97",
+        "GD_GITVER": "99.98.97.vendor",
+        "GD_UID": "98765",
+        "GD_GID": "98766",
+    }
+    normalized = subprocess.run(
+        ["bash", "-c", normalize_command],
+        input=sample,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout
+    assert normalized == sample
+
+    expected = tmp_path / "expected.txt"
+    actual = tmp_path / "actual.txt"
+    expected.write_text("meaningful trailing spaces\nnext\n")
+    actual.write_text(normalized)
+    compared = subprocess.run(
+        ["diff", "-u", str(expected), str(actual)],
+        capture_output=True,
+        text=True,
+    )
+    assert compared.returncode == 1
+    assert "-meaningful trailing spaces" in compared.stdout
+    assert "+meaningful trailing spaces   " in compared.stdout
 
 
 def test_flatten_branch():
