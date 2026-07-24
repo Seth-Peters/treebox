@@ -162,8 +162,10 @@ Prereq: `fix-auth` worktree from B1 exists.
 
 - [ ] **D1 human table** — `tb list --repo "$REPO" --root "$ROOT"`
       Expect: exit 0; one row per worktree with name, live branch, isolation,
-      deps freshness, `.env` presence; renamed branches (C4) show the new
-      branch under the stable name.
+      deps freshness, `.env` presence, plus one worktree-root footer; renamed
+      branches (C4) show the new branch under the stable name. A registration
+      without readable Treebox state shows isolation as `unknown`, never the
+      current config default.
 - [ ] **D2 json shape** — `tb list --repo "$REPO" --root "$ROOT" --json`
       Expect: exit 0; `worktrees[]` where each entry has `name`, `branch`,
       `unnamed`, `missing`, `path`, `base`, `isolation`, `harness`, `deps`

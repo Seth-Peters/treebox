@@ -76,6 +76,7 @@ def test_render_list_single_worktree_keeps_table_divider_without_summary():
                 "unnamed": True,
                 "last_commit": "docs: clarify README wording",
                 "commit_epoch": 0,
+                "isolation": "host",
                 "deps": "fresh",
                 "env": "absent",
             }
@@ -86,12 +87,15 @@ def test_render_list_single_worktree_keeps_table_divider_without_summary():
     output = buf.getvalue()
     assert "NAME" in output
     assert "BRANCH" in output
+    assert "ISOLATION" in output
     assert "LAST COMMIT" in output
     assert "trusty-crane" in output
     assert "─" in output
     assert "⚠ unnamed" in output
     assert "● fresh" in output
     assert "○ absent" in output
+    assert "host" in output
+    assert "Root: /repo" in output
     assert "unnamed:" not in output
     assert "1 worktree" not in output
 
@@ -121,6 +125,7 @@ def test_render_list_multi_worktree_summary_is_separated():
                 "unnamed": True,
                 "last_commit": "first",
                 "commit_epoch": 1,
+                "isolation": "",
                 "deps": "fresh",
                 "env": "absent",
             },
@@ -130,6 +135,7 @@ def test_render_list_multi_worktree_summary_is_separated():
                 "unnamed": False,
                 "last_commit": "second",
                 "commit_epoch": 1,
+                "isolation": "docker",
                 "deps": "stale",
                 "env": "present",
             },
@@ -142,7 +148,109 @@ def test_render_list_multi_worktree_summary_is_separated():
     assert "\n\n  Summary: 2 worktrees" in output
     assert "1 unnamed" in output
     assert "1 stale" in output
+    assert "unknown" in output
+    assert "docker" in output
+    assert "Root: /repo" in output
     assert "Rename unnamed: git branch -m <type>/<short-name>" in output
+
+
+@pytest.mark.parametrize("width", [60, 80])
+def test_render_list_narrow_width_preserves_identity_and_state(width: int):
+    import io
+    import time
+
+    from rich.console import Console
+
+    from treebox.output import THEME, Reporter
+
+    buf = io.StringIO()
+    reporter = Reporter()
+    reporter.data_console = Console(
+        file=buf,
+        width=width,
+        theme=THEME,
+        highlight=False,
+        color_system=None,
+    )
+
+    reporter.render_list(
+        [
+            {
+                "name": "fix-auth",
+                "branch": "fix/ci-caching",
+                "unnamed": False,
+                "last_commit": "cache uv wheels in CI",
+                "commit_epoch": int(time.time() - 8),
+                "isolation": "docker",
+                "deps": "fresh",
+                "env": "present",
+            },
+            {
+                "name": "brave-otter",
+                "branch": "feature/brave-otter",
+                "unnamed": False,
+                "last_commit": "initial provision",
+                "commit_epoch": int(time.time() - 65),
+                "isolation": "host",
+                "deps": "stale",
+                "env": "present",
+            },
+        ],
+        "/repo/.treebox/worktrees",
+    )
+
+    output = buf.getvalue()
+    assert all(
+        value in output
+        for value in ("fix-auth", "fix/ci-caching", "brave-otter", "feature/brave-otter")
+    )
+    assert all(column in output for column in ("ISOLATION", "AGE", "DEPS", "ENV"))
+    assert "docker" in output and "host" in output
+    assert "● fresh" in output and "● stale" in output
+    assert output.count("● present") == 2
+    assert all(line == line.rstrip() for line in output.splitlines())
+
+
+def test_golden_snapshot_gate_preserves_and_detects_trailing_spaces(tmp_path: Path):
+    import os
+    import subprocess
+
+    script = Path("scripts/golden-diff.sh").read_text()
+    match = re.search(r"(?ms)^normalize\(\) \{\n(?P<body>.*?)^\}\n", script)
+    assert match is not None
+    normalize_command = f"normalize() {{\n{match.group('body')}}}\nnormalize"
+    sample = "meaningful trailing spaces   \nnext\n"
+    env = {
+        **os.environ,
+        "GD_PRIVROOT": "/private/normalizer-sentinel",
+        "GD_ROOT": "/normalizer-sentinel",
+        "GD_GITVER_PARSED": "99.98.97",
+        "GD_GITVER": "99.98.97.vendor",
+        "GD_UID": "98765",
+        "GD_GID": "98766",
+    }
+    normalized = subprocess.run(
+        ["bash", "-c", normalize_command],
+        input=sample,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout
+    assert normalized == sample
+
+    expected = tmp_path / "expected.txt"
+    actual = tmp_path / "actual.txt"
+    expected.write_text("meaningful trailing spaces\nnext\n")
+    actual.write_text(normalized)
+    compared = subprocess.run(
+        ["diff", "-u", str(expected), str(actual)],
+        capture_output=True,
+        text=True,
+    )
+    assert compared.returncode == 1
+    assert "-meaningful trailing spaces" in compared.stdout
+    assert "+meaningful trailing spaces   " in compared.stdout
 
 
 def test_flatten_branch():
@@ -320,8 +428,8 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     monkeypatch.setattr(ecosystems, "lockfile_hash", lambda path: "lock")
     monkeypatch.setattr(
         state,
-        "load",
-        lambda path: state.WorktreeState(
+        "load_registered",
+        lambda repo, path: state.WorktreeState(
             base="main",
             isolation="host",
             harness="claude",

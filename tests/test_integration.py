@@ -2413,12 +2413,35 @@ def test_enter_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
 
 def test_list_human_table_through_the_cli(repo: Path, root: str, hermetic_config):
     """The human list path end-to-end: the table renders on stdout with the
-    live rows (render_list itself is unit-tested; this pins the CLI wiring)."""
+    live rows and recorded isolation (render_list itself is unit-tested; this
+    pins the CLI wiring)."""
     _run(["create", "tabley", "--repo", str(repo), "--root", root, "--print"])
     res = _run(["list", "--repo", str(repo), "--root", root])
     assert res.exit_code == 0, res.output
     assert "tabley" in res.stdout
-    assert "NAME" in res.stdout and "BRANCH" in res.stdout
+    assert all(column in res.stdout for column in ("NAME", "BRANCH", "ISOLATION"))
+    assert "host" in res.stdout
+    assert f"Root:{root}" in "".join(res.stdout.split())
+
+
+def test_list_human_table_marks_unavailable_isolation_unknown(
+    repo: Path, root: str, hermetic_config
+):
+    """A pre-state-file worktree must not be mislabeled with the current
+    config default. The human table says unknown while JSON v1 keeps its
+    established empty-string fallback."""
+    wt = Path(root) / "legacy"
+    wt.parent.mkdir(parents=True)
+    added = _git(repo, "worktree", "add", "-b", "legacy", str(wt), "main")
+    assert added.returncode == 0, added.stderr
+
+    human = _run(["list", "--repo", str(repo), "--root", root])
+    assert human.exit_code == 0, human.output
+    assert "legacy" in human.stdout and "unknown" in human.stdout
+
+    payload = json.loads(_run(["list", "--repo", str(repo), "--root", root, "--json"]).stdout)
+    row = next(r for r in payload["worktrees"] if r["name"] == "legacy")
+    assert row["isolation"] == ""
 
 
 def test_teardown_chooser_with_no_worktrees_says_so(
@@ -2470,6 +2493,7 @@ def test_stale_worktree_does_not_crash_and_teardown_prunes(repo: Path, root: str
     assert res.exit_code == 0, res.output
     rows = {w["name"]: w for w in json.loads(res.stdout)["worktrees"]}
     assert rows["gone"]["missing"] is True
+    assert rows["gone"]["isolation"] == "host"
 
     # teardown prunes the dangling registration (already gone -> still exit 0).
     res = _run(["teardown", "gone", "--repo", str(repo), "--root", root, "--force"])
