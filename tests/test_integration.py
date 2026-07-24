@@ -2444,9 +2444,11 @@ def test_doctor_surfaces_runner_preflight_hint_as_advisory(
     res = _run(["doctor", "--repo", str(repo), "--isolation", "docker", "--json"])
     assert res.exit_code == 1
     payload = json.loads(res.stdout)
+    assert payload["ok"] is False
     check = next(c for c in payload["checks"] if c["name"] == "isolation: docker")
     assert check["ok"] is False and "daemon" in check["detail"]
     assert any("docker info" in a for a in payload["advisories"])
+    assert res.stderr == ""
 
 
 def test_stale_worktree_does_not_crash_and_teardown_prunes(repo: Path, root: str, hermetic_config):

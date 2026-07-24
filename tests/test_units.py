@@ -3172,6 +3172,25 @@ def test_render_doctor_marks_missing_optional_env_as_note():
     assert "✗ .env" not in out
 
 
+def test_render_doctor_optional_env_row_is_stable_at_narrow_output_width():
+    """Off-TTY doctor output must not let Rich hard-wrap a long path into an
+    unindented continuation whose lone ``optional`` marker looks like a new row."""
+    import io
+
+    from rich.console import Console
+
+    from treebox.output import THEME, DoctorCheck, Reporter
+
+    path = "/private/var/folders/long/generated/path/to/repo-no-env/.env"
+    buf = io.StringIO()
+    r = Reporter()
+    r.data_console = Console(file=buf, width=40, theme=THEME, highlight=False, color_system=None)
+
+    r.render_doctor([DoctorCheck(".env", False, path, required=False)], [], "host", width=4)
+
+    assert f"    · .env   {path} · optional" in buf.getvalue().splitlines()
+
+
 def test_render_doctor_verdict_branches():
     import io
 

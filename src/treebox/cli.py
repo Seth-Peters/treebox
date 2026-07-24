@@ -1631,9 +1631,10 @@ def doctor(
                 advisories.append(result.advisory)
         # Credentials are the only hard gate for the host runner: at least one login.
         has_login = any(c.ok for c in checks if c.name.startswith("login:"))
+        problems = _doctor_problems(checks)
         payload = {
             "schemaVersion": SCHEMA_VERSION,
-            "ok": git_ok and bool(repo_path) and (has_login or not run.facts().login_required),
+            "ok": not problems and (has_login or not run.facts().login_required),
             "isolation": cfg.isolation,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
             "advisories": advisories,
@@ -1642,7 +1643,7 @@ def doctor(
         # Same exit-code contract as the human path: hard checks (git, repo,
         # runner) failing mean exit 1, so `doctor --json && create` in CI can
         # branch on $? instead of parsing `ok`.
-        if _doctor_problems(checks):
+        if problems:
             raise typer.Exit(1)
         return
 

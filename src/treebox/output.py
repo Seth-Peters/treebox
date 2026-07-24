@@ -550,7 +550,10 @@ class Reporter:
         row.append(f"{check.name:<{width}}", style=label_style)
         row.append("   ")
         row.append(detail, style=detail_style)
-        self.data_console.print(row)
+        # Doctor rows can contain absolute paths. Keep redirected output
+        # byte-stable instead of letting Rich insert width-dependent newlines
+        # with unindented continuation text.
+        self.data_console.print(row, soft_wrap=True)
 
     def render_doctor(
         self,
