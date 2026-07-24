@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Golden output snapshots for the CLI's observable surface.
 #
-# Runs a fixed matrix of commands — doctor, create --print/--dry-run,
-# enter --print, and their --json forms, for both isolations — against a
+# Runs a fixed matrix of commands: doctor, create --print/--dry-run,
+# enter --print, list, and their --json forms, for both isolations, against a
 # hermetic throwaway repo, normalizes the machine-specific bits (paths,
 # uid/gid, git version, container-name digests), and diffs the result against
 # the committed snapshots in tests/golden/. Behavior-preserving changes must
@@ -128,7 +128,7 @@ GD_GID="$(id -g)"
 export GD_UID GD_GID
 
 normalize() {
-  perl -pe '
+  perl -0pe '
     s/\Q$ENV{GD_PRIVROOT}\E/__ROOT__/g;
     s/\Q$ENV{GD_ROOT}\E/__ROOT__/g;
     s/\Q$ENV{GD_GITVER_PARSED}\E/__GITVER__/g;
@@ -137,6 +137,9 @@ normalize() {
     s/\bUSER_GID=\Q$ENV{GD_GID}\E\b/USER_GID=__GID__/g;
     s/\b\Q$ENV{GD_UID}\E:\Q$ENV{GD_GID}\E\b/__UID__:__GID__/g;
     s/\btreebox-([a-z0-9._-]+)-[0-9a-f]{10}\b/treebox-$1-__HASH__/g;
+    s/(\s)\d+s(\s+● (?:fresh|stale|unknown)\b)/$1Xs$2/g;
+    s{(__ROOT__/repo-no-env/\.env · )\noptional}{$1optional}g;
+    s/[ \t]+$//mg;
   '
 }
 
@@ -207,6 +210,7 @@ run_case create-docker-print  "$HOME_FAKE" create golden-docker "${RW[@]}" --iso
 run_case create-docker-json   "$HOME_FAKE" create golden-docker-json "${RW[@]}" --isolation docker --json
 run_case enter-docker-print   "$HOME_FAKE" enter golden-docker "${RW[@]}" --print
 run_case enter-docker-json    "$HOME_FAKE" enter golden-docker "${RW[@]}" --json
+run_case list                 "$HOME_FAKE" list "${RW[@]}"
 
 if [[ "$MODE" == "diff" && "$FAILED" -ne 0 ]]; then
   echo >&2

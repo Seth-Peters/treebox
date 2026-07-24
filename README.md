@@ -123,9 +123,10 @@ treebox enter fix-auth --harness claude
 treebox enter fix-auth --harness codex -- --resume   # args after -- go to the agent
 ```
 
-**List.** See what exists, what each worktree was last doing, and what has
-gone stale — sorted by recency, with `treebox/*` placeholders flagged
-`⚠ unnamed`:
+**List.** See what exists, each worktree's recorded isolation, what it was
+last doing, and what has gone stale. Results are sorted by recency, with
+`treebox/*` placeholders flagged `⚠ unnamed`; the root footer plus each stable
+name identifies the directory without a wide path column:
 
 ```bash
 treebox list

@@ -199,17 +199,25 @@ emitted - so a treebox-owned restart never leaves egress silently open.
 ```console
 $ treebox list
 
-  NAME           BRANCH                 LAST COMMIT              AGE    DEPS       ENV
-  ─────────────────────────────────────────────────────────────────────────────────────────
-  fix-auth       fix/ci-caching         cache uv wheels in CI     2h    ● fresh    ● present
-  brave-otter    ⚠ unnamed              initial provision         3d    ● stale    ● present
+  NAME         BRANCH          ISOLATION  LAST COMMIT            AGE  DEPS     ENV
+  ──────────────────────────────────────────────────────────────────────────────────────
+  fix-auth     fix/ci-caching  docker     cache uv wheels in CI   2h  ● fresh  ● present
+  brave-otter  ⚠ unnamed       host       initial provision       3d  ● stale  ● present
 
-  2 worktrees · 1 unnamed · 1 stale
-  ↳ unnamed: rename before push — git branch -m <type>/<short-name>
+  Summary: 2 worktrees · 1 unnamed · 1 stale
+  Root: /home/me/project/.treebox/worktrees
+  Rename unnamed: git branch -m <type>/<short-name>
 ```
 
 Sorted by recency — the worktree you want is almost always the one that just
 committed. The **name** is the stable handle; the **branch** is read live.
+A worktree's **isolation** is read from its recorded creation-time state;
+legacy worktrees or registrations whose state is unavailable show `unknown`
+instead of being mislabeled with the current config default. The muted
+**Root** footer combines with each stable name to identify its directory
+without repeating long paths in every row; `list --json` carries each full
+`path`. On a narrow terminal, only the commit-subject column is omitted so
+identity, isolation, age, dependency freshness, and `.env` state stay legible.
 A placeholder branch is always `treebox/<name>`, so its row just shows
 `⚠ unnamed` — work that can't be pushed yet is visible at a glance. `stale`
 means the lockfile changed since the last dependency sync — the next `enter`

@@ -1,9 +1,10 @@
 # Golden CLI-output snapshots
 
 Reference outputs for the CLI's observable surface: `doctor`,
-`create --print` / `--dry-run`, `enter --print`, and their `--json` forms, for
-both isolations. Machine-specific bits (paths, uid/gid, git version, container
-name digests) are normalized to `__…__` placeholders.
+`create --print` / `--dry-run`, `enter --print`, `list`, and their `--json`
+forms, for both isolations. Machine-specific bits (paths, uid/gid, git version,
+and container name digests) are normalized to `__…__` placeholders; live
+worktree ages are normalized to `Xs` without changing their display width.
 
 Every behavior-preserving change must leave these byte-identical:
 

@@ -76,6 +76,7 @@ def test_render_list_single_worktree_keeps_table_divider_without_summary():
                 "unnamed": True,
                 "last_commit": "docs: clarify README wording",
                 "commit_epoch": 0,
+                "isolation": "host",
                 "deps": "fresh",
                 "env": "absent",
             }
@@ -86,12 +87,15 @@ def test_render_list_single_worktree_keeps_table_divider_without_summary():
     output = buf.getvalue()
     assert "NAME" in output
     assert "BRANCH" in output
+    assert "ISOLATION" in output
     assert "LAST COMMIT" in output
     assert "trusty-crane" in output
     assert "─" in output
     assert "⚠ unnamed" in output
     assert "● fresh" in output
     assert "○ absent" in output
+    assert "host" in output
+    assert "Root: /repo" in output
     assert "unnamed:" not in output
     assert "1 worktree" not in output
 
@@ -121,6 +125,7 @@ def test_render_list_multi_worktree_summary_is_separated():
                 "unnamed": True,
                 "last_commit": "first",
                 "commit_epoch": 1,
+                "isolation": "",
                 "deps": "fresh",
                 "env": "absent",
             },
@@ -130,6 +135,7 @@ def test_render_list_multi_worktree_summary_is_separated():
                 "unnamed": False,
                 "last_commit": "second",
                 "commit_epoch": 1,
+                "isolation": "docker",
                 "deps": "stale",
                 "env": "present",
             },
@@ -142,7 +148,51 @@ def test_render_list_multi_worktree_summary_is_separated():
     assert "\n\n  Summary: 2 worktrees" in output
     assert "1 unnamed" in output
     assert "1 stale" in output
+    assert "unknown" in output
+    assert "docker" in output
+    assert "Root: /repo" in output
     assert "Rename unnamed: git branch -m <type>/<short-name>" in output
+
+
+def test_render_list_narrow_width_preserves_identity_and_state():
+    import io
+
+    from rich.console import Console
+
+    from treebox.output import THEME, Reporter
+
+    buf = io.StringIO()
+    reporter = Reporter()
+    reporter.data_console = Console(
+        file=buf,
+        width=80,
+        theme=THEME,
+        highlight=False,
+        color_system=None,
+    )
+
+    reporter.render_list(
+        [
+            {
+                "name": "golden-docker-json",
+                "branch": "golden-docker-json",
+                "unnamed": False,
+                "last_commit": "a commit subject that gives up its space",
+                "commit_epoch": 1,
+                "isolation": "docker",
+                "deps": "fresh",
+                "env": "present",
+            }
+        ],
+        "/repo/.treebox/worktrees",
+    )
+
+    output = buf.getvalue()
+    assert "golden-docker-json" in output
+    assert all(column in output for column in ("ISOLATION", "AGE", "DEPS", "ENV"))
+    assert "docker" in output and "● fresh" in output and "● present" in output
+    assert "LAST COMMIT" not in output
+    assert "…" not in output
 
 
 def test_flatten_branch():
@@ -320,8 +370,8 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     monkeypatch.setattr(ecosystems, "lockfile_hash", lambda path: "lock")
     monkeypatch.setattr(
         state,
-        "load",
-        lambda path: state.WorktreeState(
+        "load_registered",
+        lambda repo, path: state.WorktreeState(
             base="main",
             isolation="host",
             harness="claude",

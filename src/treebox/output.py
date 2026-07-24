@@ -359,15 +359,17 @@ class Reporter:
     # stdout data console and don't gate on ``quiet`` — --json callers emit
     # their own payload and never call them.
 
-    def render_list(self, rows: list[WorktreeRow], repo_path: str) -> None:
+    def render_list(self, rows: list[WorktreeRow], root_path: str) -> None:
         """Render the worktree list as a clean, aligned, color-coded view.
 
         Recognition lives here, not in directory names: NAME is the permanent
         identity, BRANCH is read live (the agent renames it as work takes
-        shape), and LAST COMMIT + AGE carry the "which worktree was doing
-        what" load. A placeholder (``treebox/*``) branch is always
-        ``treebox/<name>``, so repeating it would be noise: the cell renders
-        just ``⚠ unnamed`` so unpushable work is visible at a glance.
+        shape), ISOLATION comes from the worktree's recorded state, and LAST
+        COMMIT + AGE carry the "which worktree was doing what" load. A
+        placeholder (``treebox/*``) branch is always ``treebox/<name>``, so
+        repeating it would be noise: the cell renders just ``⚠ unnamed`` so
+        unpushable work is visible at a glance. ROOT plus NAME identifies the
+        directory without spending a wide table column on repeated paths.
         """
         console = self.data_console
         console.print()
@@ -382,7 +384,24 @@ class Reporter:
         deps_style = {"fresh": "wt.fresh", "stale": "wt.stale", "unknown": "wt.unknown"}
         now = time.time()
         branches = ["⚠ unnamed" if r["unnamed"] else r["branch"] for r in rows]
+        isolations = [r["isolation"] or "unknown" for r in rows]
         ages = [format_age(now - r["commit_epoch"]) if r["commit_epoch"] else "-" for r in rows]
+
+        # Preserve identity and state at narrow widths. The commit subject is
+        # useful context but is the only expendable column; AGE still carries
+        # recency when the subject cannot fit without truncating core fields.
+        pad, indent, slack = 1, 2, 2
+        fixed = (
+            max(len("NAME"), *(len(r["name"]) for r in rows)),
+            max(len("BRANCH"), *(len(b) for b in branches)),
+            max(len("ISOLATION"), *(len(i) for i in isolations)),
+            max(len("AGE"), *(len(a) for a in ages)),
+            max(len("DEPS"), *(len(r["deps"]) + 2 for r in rows)),
+            max(len("ENV"), *(len(r["env"]) + 2 for r in rows)),
+        )
+        commit_width = console.width - indent - sum(fixed) - pad * 7 - slack
+        show_commit = commit_width >= 10
+        commit_width = min(commit_width, 40)
 
         compact = len(rows) == 1
         table = Table(
@@ -391,32 +410,24 @@ class Reporter:
             border_style="wt.muted",
             show_edge=False,
             pad_edge=False,
-            padding=(0, 3, 0, 0),
+            padding=(0, pad, 0, 0),
             expand=False,
         )
         table.add_column("NAME", style="wt.name", no_wrap=True)
         table.add_column("BRANCH", no_wrap=True)
-        table.add_column("LAST COMMIT", style="wt.muted", no_wrap=True)
+        table.add_column("ISOLATION", no_wrap=True)
+        if show_commit:
+            table.add_column("LAST COMMIT", style="wt.muted", no_wrap=True)
         table.add_column("AGE", style="wt.muted", no_wrap=True, justify="right")
         table.add_column("DEPS", no_wrap=True)
         table.add_column("ENV", no_wrap=True)
 
-        # A narrow terminal must cost the commit subject, never the identity or
-        # status columns — Rich shrinks all no_wrap columns proportionally, so
-        # truncate the subject ourselves to whatever the fixed columns leave.
-        pad, indent, slack = 3, 2, 2
-        fixed = (
-            max(len("NAME"), *(len(r["name"]) for r in rows)),
-            max(len("BRANCH"), *(len(b) for b in branches)),
-            max(len("AGE"), *(len(a) for a in ages)),
-            max(len("DEPS"), *(len(r["deps"]) + 2 for r in rows)),
-            max(len("ENV"), *(len(r["env"]) + 2 for r in rows)),
-        )
-        commit_width = console.width - indent - sum(fixed) - pad * 6 - slack
-        commit_width = max(min(commit_width, 40), 10)
-
-        for r, branch, age in zip(rows, branches, ages, strict=True):
+        for r, branch, isolation, age in zip(rows, branches, isolations, ages, strict=True):
             branch_cell = Text(branch, style="wt.warn" if r["unnamed"] else "wt.name")
+            isolation_cell = Text(
+                isolation,
+                style="wt.unknown" if isolation == "unknown" else "wt.detail",
+            )
             deps = r["deps"]
             deps_cell = Text(f"● {deps}", style=deps_style[deps])
             env_ok = r["env"] == "present"
@@ -425,12 +436,34 @@ class Reporter:
                 style="wt.fresh" if env_ok else "wt.unknown",
             )
             subject = r["last_commit"] or "-"
-            if len(subject) > commit_width:
+            if show_commit and len(subject) > commit_width:
                 subject = subject[: commit_width - 1].rstrip() + "…"
-            table.add_row(r["name"], branch_cell, subject, age, deps_cell, env_cell)
+            cells: list[str | Text] = [
+                r["name"],
+                branch_cell,
+                isolation_cell,
+            ]
+            if show_commit:
+                cells.append(subject)
+            cells.extend((age, deps_cell, env_cell))
+            table.add_row(*cells)
+
+        def render_root() -> None:
+            first_prefix = "  Root: "
+            next_prefix = " " * len(first_prefix)
+            lines = Text(root_path, style="wt.muted").wrap(
+                console,
+                max(console.width - len(first_prefix), 1),
+                overflow="fold",
+            )
+            for index, line in enumerate(lines):
+                prefix = first_prefix if index == 0 else next_prefix
+                console.print(Text(prefix, style="wt.muted") + line, soft_wrap=True)
 
         console.print(Padding(table, (0, 0, 0, 2)))
         if compact:
+            console.print()
+            render_root()
             console.print()
             return
 
@@ -443,6 +476,7 @@ class Reporter:
             caption += f" · {stale} stale"
         console.print()
         console.print(Text("  Summary: " + caption, style="wt.muted"))
+        render_root()
         if unnamed:
             console.print(
                 Text(

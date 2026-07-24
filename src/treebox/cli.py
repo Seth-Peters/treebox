@@ -855,7 +855,10 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         # must never be shelled into — that would crash list/teardown on a path
         # that isn't there. Surface it as `missing` so teardown can prune it.
         missing = rec.prunable or not wt_path.is_dir()
-        st = state.load(rec.path)
+        # Read through the main repo's registration so a missing worktree can
+        # still report its recorded creation-time choices. An absent, legacy,
+        # or unreadable state file remains honestly unknown.
+        st = state.load_registered(repo_path, rec.path)
         deps: DepsFreshness
         if missing:
             subject, epoch, deps, env_present = "", 0, "unknown", False
@@ -895,7 +898,7 @@ def list_cmd(
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """List worktrees by name with live branch, last commit, age, and dep/.env freshness."""
+    """List worktrees with live branch, isolation, activity, and freshness."""
     reporter = Reporter(silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -915,7 +918,7 @@ def list_cmd(
         _emit_json(payload)
         return
 
-    reporter.render_list(rows, repo_path)
+    reporter.render_list(rows, str(worktree_root(repo_path, cfg.root)))
 
 
 # --- teardown ----------------------------------------------------------------
