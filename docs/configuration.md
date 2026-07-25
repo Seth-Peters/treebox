@@ -60,8 +60,13 @@ For an existing worktree, `enter` and `teardown` also read the worktree's
 recorded creation-time state. Recorded isolation wins over the config default,
 and a conflicting explicit `--isolation` exits `5`; `enter` always reuses the
 recorded firewall, while recorded harness and template beat config defaults
-unless `--harness` or `--template` is passed. `teardown` uses the recorded
-template for docker volume cleanup because it has no `--template` flag.
+unless `--harness` or `--template` is passed. `teardown` removes the docker
+volumes recorded in the runner-owned
+`<worktree-root>/.containers/<worktree>/treebox-resources.json` manifest at create time.
+Worktree state under `.git` is sandbox-writable and never authorizes volume
+deletion. Older worktrees without a manifest, or worktrees whose
+`<worktree-root>/.containers/<worktree>` directory was manually deleted, skip volume removal
+with a warning instead of guessing.
 
 | Key        | Default              | What it controls                                          |
 | ---------- | -------------------- | --------------------------------------------------------- |

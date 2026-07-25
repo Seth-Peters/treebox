@@ -79,12 +79,25 @@ The same private state records the worktree's creation-time choices. For an
 existing worktree, `enter` and `teardown` recover the recorded isolation and
 template instead of drifting to today's config defaults; `enter` also reuses the
 recorded firewall, and it reuses the recorded harness unless a per-session
-harness override is passed.
+harness override is passed. That state is sandbox-writable because the Docker
+runner mounts the git common directory, so it never authorizes destructive
+host cleanup. Before first Docker setup, the runner writes exact per-workspace
+image and volume ownership to
+`<worktree-root>/.containers/<worktree>/treebox-resources.json`, outside every
+sandbox mount. `teardown --remove-volumes` validates and trusts only that
+manifest, so it can still remove volumes when the container and user template
+are both gone.
 `teardown` reads that record through the repo's own worktree registration
 rather than the worktree's `.git` pointer, so the recorded choices survive
 even a corrupt worktree whose pointer file is gone.
 An explicit `--isolation` that disagrees with the recorded mode is a conflict,
 not an override.
+
+Older worktrees without a resource manifest remain tear-downable, but volume
+removal is skipped with a warning. The same safe behavior applies if an
+operator manually deletes the `.containers/<worktree>` directory: treebox
+does not guess ownership from volume names, current templates, container
+mounts, or sandbox-writable state.
 
 ## Warmth lives in the cache, not the tree
 

@@ -44,6 +44,10 @@ class HostRunner:
     def facts(self) -> RunnerFacts:
         return _FACTS
 
+    def initialize(self, wt: Worktree) -> None:
+        # The host runner owns no per-worktree resources outside the worktree.
+        return
+
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
         cold_root = tempfile.mkdtemp(prefix="treebox-cold-") if cold else None
         try:

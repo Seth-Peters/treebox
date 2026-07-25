@@ -330,8 +330,10 @@ def _record_runner(
 ) -> None:
     """Persist the runner *before* setup runs. Setup is what builds a docker
     image and starts its container, so if it fails we'd otherwise be left with a
-    container and no record of which runner owns it — an un-tearable orphan. With
-    the runner on disk first, teardown always knows host vs. docker."""
+    container and no record of which runner owns it — an un-tearable orphan.
+    Runner-owned metadata is initialized first so destructive host cleanup
+    never needs to trust the sandbox-writable worktree state."""
+    runner.initialize(worktree)
     state.save(
         worktree.path,
         state.WorktreeState(
@@ -347,7 +349,11 @@ def _record_runner(
 
 
 def _record_hash(
-    worktree: Worktree, runner: Runner, harness: str, firewall: bool, template: str
+    worktree: Worktree,
+    runner: Runner,
+    harness: str,
+    firewall: bool,
+    template: str,
 ) -> None:
     state.save(
         worktree.path,

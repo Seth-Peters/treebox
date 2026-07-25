@@ -107,6 +107,12 @@ class Runner(Protocol):
         """Doctor-facing facts about this runner (see ``RunnerFacts``)."""
         ...
 
+    def initialize(self, wt: Worktree) -> None:
+        """Persist runner-owned host metadata before this worktree's first
+        setup. Sandboxed runners keep security-sensitive ownership records
+        outside every sandbox-writable mount; host runners may no-op."""
+        ...
+
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
         """Ensure dependencies are installed (cache-backed unless ``cold``)."""
         ...

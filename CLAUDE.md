@@ -78,7 +78,10 @@ Module map:
   `get_runner` and `VALID_ISOLATION` derive from it. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
   not in the run methods; teardown options (docker's `remove_volumes`) arrive
-  at the runner's constructor, never through the protocol.
+  at the runner's constructor, never through the protocol. Docker image and
+  volume ownership lives in the runner-owned
+  `.containers/<worktree>/treebox-resources.json` manifest outside the
+  sandbox mount, never in sandbox-writable worktree state.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
   list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
@@ -111,7 +114,9 @@ Module map:
   `provisioned` flag makes `enter` finish an interrupted setup even when the
   hash matches); the recorded choices are what let `enter`/`teardown` recover
   the worktree's created-time isolation, firewall, harness, and template
-  defaults. `teardown` reads the record through the repo's own worktree
+  defaults. This state is sandbox-writable and therefore never authorizes
+  destructive host cleanup. `teardown` reads the non-destructive choices
+  through the repo's own worktree
   registration (`load_registered`) rather than the worktree's `.git` pointer,
   so a corrupt tree's recorded choices still drive container cleanup.
 - **`models.py`** holds the `Worktree` value object and the name-as-identity
@@ -178,6 +183,8 @@ What a sandboxed backend must **guarantee** (the security invariants):
   never exposed to the sandbox (they hold host-executed config).
 - The sandbox-defining config is rendered outside the mount, so a boxed
   agent cannot edit the definition of its own box.
+- Destructive cleanup trusts only runner-owned metadata outside the mount;
+  sandbox-writable worktree state never records Docker volume ownership.
 - The shared `.git/hooks` is presented read-only (host git executes it).
 - Egress lockdown, when enabled, exists before any workspace-derived code
   runs (firewall-before-post-create), and is re-established when

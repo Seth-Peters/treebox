@@ -94,6 +94,13 @@ _CONFIG_ROOT = ".containers"
 # container's bind mounts stay valid.
 _CREDS_SUBDIR = "credentials"
 
+# Authoritative record of the Docker image and volumes for one worktree. It
+# lives beside the generated container config, outside every sandbox mount.
+# Worktree state under .git is intentionally excluded: the git common dir is
+# sandbox-writable, so it cannot authorize destructive host cleanup.
+_RESOURCE_MANIFEST = "treebox-resources.json"
+_RESOURCE_SCHEMA_VERSION = 1
+
 # In-container user the agent runs as when the template doesn't set one.
 _DEFAULT_USER = "agent"
 
@@ -117,6 +124,13 @@ class ContainerConfig(TypedDict, total=False):
     env: dict[str, str]
     runArgs: list[str]
     postCreate: str
+
+
+class ResourceManifest(TypedDict):
+    schemaVersion: int
+    workspace: str
+    image: str
+    volumes: list[str]
 
 
 _KNOWN_KEYS = frozenset({"build", "user", "mounts", "env", "runArgs", "postCreate"})
@@ -198,9 +212,9 @@ class DockerRunner:
         docker: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         """``remove_volumes`` is this runner's teardown option (volumes are a
-        docker concept — see ``teardown``). ``docker`` injects a canned engine
+        docker concept - see ``teardown``). ``docker`` injects a canned engine
         CLI for tests; it defaults to the real subprocess seam and is invisible
-        to ``get_runner`` callers — an internal constructor detail, not API."""
+        to ``get_runner`` callers - an internal constructor detail, not API."""
         self.config = config
         self._remove_volumes = remove_volumes
         self._docker_cli = docker
@@ -311,6 +325,9 @@ class DockerRunner:
     def _config_file(self, wt: Worktree) -> Path:
         return self._config_dir(wt) / assets.CONFIG_FILE
 
+    def _resource_manifest_file(self, wt: Worktree) -> Path:
+        return self._config_dir(wt) / _RESOURCE_MANIFEST
+
     def _creds_dir(self, wt: Worktree) -> Path:
         """Per-worktree dir of scoped login-file copies (one subdir per harness).
         This — never the operator's live ``~/.claude`` / ``~/.codex`` — is what
@@ -328,6 +345,70 @@ class DockerRunner:
         ``run``, ``exec``, and ``--print`` all address the same container."""
         digest = hashlib.sha256(str(wt.path).encode()).hexdigest()[:10]
         return f"treebox-{_sanitize(wt.name)[:40]}-{digest}"
+
+    def initialize(self, wt: Worktree) -> None:
+        """Create the host-owned resource manifest before Docker setup.
+
+        An existing valid manifest is merged, keeping resources discoverable
+        across an interrupted create retry. Provisioning calls this only for a
+        first-time create, never for ``enter``: legacy worktrees cannot be
+        safely migrated from sandbox-writable state.
+        """
+        volumes = set(self._template_volumes(wt))
+        manifest_file = self._resource_manifest_file(wt)
+        if manifest_file.exists():
+            volumes.update(self._read_resource_manifest(wt)["volumes"])
+
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schemaVersion": _RESOURCE_SCHEMA_VERSION,
+            "workspace": str(wt.path),
+            "image": self._slug(wt),
+            "volumes": sorted(volumes),
+        }
+        temporary = manifest_file.with_name(f".{manifest_file.name}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(manifest_file)
+
+    def _read_resource_manifest(self, wt: Worktree) -> ResourceManifest:
+        """Read and validate the host-owned deletion authority."""
+        manifest_file = self._resource_manifest_file(wt)
+        try:
+            data = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"{manifest_file} is missing (legacy worktree or manually deleted metadata)"
+            ) from None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read {manifest_file}: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{manifest_file} must contain a JSON object")
+        if data.get("schemaVersion") != _RESOURCE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{manifest_file} has unsupported schemaVersion {data.get('schemaVersion')!r}"
+            )
+        if data.get("workspace") != str(wt.path):
+            raise RuntimeError(
+                f"{manifest_file} belongs to workspace {data.get('workspace')!r}, "
+                f"not {str(wt.path)!r}"
+            )
+        image = data.get("image")
+        if image != self._slug(wt):
+            raise RuntimeError(
+                f"{manifest_file} records image {image!r}, expected {self._slug(wt)!r}"
+            )
+        volumes = data.get("volumes")
+        if not isinstance(volumes, list) or any(
+            not isinstance(volume, str) or not volume for volume in volumes
+        ):
+            raise RuntimeError(f"{manifest_file} has an invalid volumes list")
+        return {
+            "schemaVersion": _RESOURCE_SCHEMA_VERSION,
+            "workspace": str(wt.path),
+            "image": image,
+            "volumes": sorted(set(volumes)),
+        }
 
     # --- config rendering ------------------------------------------------------
 
@@ -456,12 +537,13 @@ class DockerRunner:
         tpl = assets.template_dir(self.config.template)
         dc = self._config_dir(wt)
         # Regenerate cleanly: the operator template is the single source of
-        # truth; never trust leftovers from a previous run. The credentials
-        # subdir is spared (an existing container's bind mounts point at it);
-        # its *contents* are refreshed from the host by _refresh_credentials.
+        # truth; never trust leftovers from a previous run. Credentials are
+        # spared because an existing container's bind mounts point at them.
+        # The host-owned resource manifest is also preserved: config/template
+        # drift must never rewrite the ownership record used by teardown.
         if dc.exists():
             for child in dc.iterdir():
-                if child.name == _CREDS_SUBDIR:
+                if child.name in {_CREDS_SUBDIR, _RESOURCE_MANIFEST}:
                     continue
                 if child.is_dir() and not child.is_symlink():
                     shutil.rmtree(child)
@@ -685,23 +767,17 @@ class DockerRunner:
             self._run_engine(self._firewall_command(wt))
 
     def _template_volumes(self, wt: Worktree) -> list[str]:
-        """The treebox volume names the template's ``${workspaceName}``
-        substitution produces for this worktree — the same deterministic
-        naming used at creation, so the volumes stay discoverable even when
-        the container that mounted them is already gone. Only *per-workspace*
-        volumes (whose source template contains ``${workspaceName}``, so the
-        rendered name is unique to this worktree) qualify: a shared volume with
-        a static name is owned by no single worktree, so one worktree's teardown
-        must never reclaim it."""
-        try:
-            config = self._overlaid_config()
-        except Exception:
-            return []  # template unreadable: nothing to derive, best-effort
+        """The volumes this operator template explicitly makes per-workspace.
+
+        Static sources are excluded because they may be shared. The result is
+        recorded before Docker setup and never re-derived during teardown.
+        """
+        config = self._overlaid_config()
         volumes = []
         for spec in config.get("mounts", []):
             fields = dict(f.split("=", 1) for f in str(spec).split(",") if "=" in f)
             source = fields.get("source", "")
-            if fields.get("type") != "volume" or not source.startswith("treebox-"):
+            if fields.get("type") != "volume":
                 continue
             if "${workspaceName}" not in source:
                 continue  # shared/static volume: not this worktree's to remove
@@ -718,29 +794,39 @@ class DockerRunner:
             reporter.note("container", "skipped; Docker unavailable")
             return RunnerTeardownResult.skipped()
         ids = self._container_ids(wt)
-        # Read the container's mounts BEFORE rm; and never rely on them alone —
-        # when the container is already gone (manual docker rm, or a prior
-        # teardown without --remove-volumes) the template-derived names are the
-        # only way to find the volumes, or they leak forever.
+        manifest: ResourceManifest | None = None
+        if ids or self._remove_volumes:
+            try:
+                manifest = self._read_resource_manifest(wt)
+            except RuntimeError as exc:
+                reporter.warn(
+                    "destructive Docker cleanup limited: authoritative host-owned "
+                    f"resource manifest unavailable: {exc}"
+                )
+        # Read mounts only for the non-destructive "kept" note. Deletion
+        # authority comes exclusively from the host-owned manifest.
         container_volumes = self._container_volumes(ids) if ids else []
         volumes: list[str] = []
-        if self._remove_volumes:
-            # Container-derived names exist by definition; template-derived
-            # ones are only candidates — filter them against the live volume
-            # list so we never try to rm (or report) a volume that isn't there.
+        if self._remove_volumes and manifest is not None:
+            # Manifest names are authoritative but may already be gone.
+            # Intersect with the live engine list to keep retries quiet.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
-            volumes = sorted(set(container_volumes) | (set(self._template_volumes(wt)) & existing))
+            volumes = sorted(set(manifest["volumes"]) & existing)
         container_failed = False
         if ids:
             image = self._container_image(ids)
             if self._engine_attempt(["rm", "-f", *ids], reporter=reporter):
                 reporter.ok("container", f"removed {' '.join(ids)}")
-                # Only images we know we built: this runner's treebox-* tags.
-                # An image whose container still exists is unremovable, so a
-                # failed container rm skips the image (nothing to retry-leak).
-                if image and image.startswith("treebox-"):
+                # A failed container rm skips image removal because it remains
+                # in use. Otherwise only the exact host-recorded image is ours.
+                if image and manifest is not None and image == manifest["image"]:
                     container_failed = not self._engine_attempt(
                         ["image", "rm", image], reporter=reporter
+                    )
+                elif image:
+                    reporter.warn(
+                        f"image removal skipped: {image!r} is not authorized by "
+                        "the host-owned resource manifest"
                     )
             else:
                 container_failed = True
@@ -751,6 +837,10 @@ class DockerRunner:
             if volumes and self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
                 reporter.ok("volumes", f"removed {' '.join(volumes)}")
                 volumes_removed = True
+            elif not volumes:
+                # Never silent: the operator asked for volume removal, so say
+                # when no removable volume could be found from any source.
+                reporter.note("volumes", "none found")
         elif container_volumes:
             reporter.note("volumes", f"kept {' '.join(container_volumes)}")
 
