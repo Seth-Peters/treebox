@@ -2309,6 +2309,67 @@ def test_doctor_json_exits_nonzero_on_hard_check_failure(tmp_path: Path, no_user
     assert repo_check["ok"] is False
 
 
+@pytest.fixture
+def no_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty PATH, so spawning git (and everything else) fails exactly as it
+    does on a machine without git installed."""
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+
+def test_git_spawn_failure_becomes_typed_giterror(monkeypatch: pytest.MonkeyPatch):
+    # A spawn OSError (git binary absent) must surface as GitMissingError - a
+    # GitError subclass every existing handler already catches - never as a raw
+    # FileNotFoundError traceback.
+    from treebox import git
+
+    def boom(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(git.subprocess, "run", boom)
+    with pytest.raises(git.GitMissingError):
+        git.version()
+    with pytest.raises(git.GitError):
+        git.main_worktree("/r")
+    # Raw-spawn sites (bypassing _run) are covered too.
+    with pytest.raises(git.GitError):
+        git.has_origin("/r")
+
+
+def test_doctor_missing_git_renders_checklist(no_user_config, no_git):
+    res = _cli(["doctor"])
+    assert res.exit_code == 1
+    assert "Traceback" not in res.output
+    assert "git" in res.output and "missing" in res.output
+
+
+def test_doctor_missing_git_json_keeps_contract(no_user_config, no_git):
+    res = _cli(["doctor", "--json"])
+    assert res.exit_code == 1
+    payload = json.loads(res.stdout)  # structured payload, not a traceback
+    assert payload["schemaVersion"] == SCHEMA_VERSION
+    git_check = next(c for c in payload["checks"] if c["name"] == "git")
+    assert git_check["ok"] is False
+    assert git_check["detail"] == "missing"
+    repo_check = next(c for c in payload["checks"] if c["name"] == "repo")
+    assert repo_check["ok"] is False
+
+
+def test_list_missing_git_json_error_is_classified(no_user_config, no_git):
+    res = _cli(["list", "--json"])
+    assert res.exit_code == 1
+    err = json.loads(res.stderr)
+    assert err["error"]["code"] == "GIT_MISSING"
+    assert "hint" in err["error"]
+
+
+def test_create_missing_git_json_error_is_classified(no_user_config, no_git):
+    res = _cli(["create", "x", "--json"])
+    assert res.exit_code == 1
+    assert json.loads(res.stderr)["error"]["code"] == "GIT_MISSING"
+
+
 def test_json_error_payload_is_pretty_printed_like_success(no_user_config):
     # Error payloads use the same serialization as success payloads (indent=2).
     res = _cli(["create", "bad name", "--json"])
