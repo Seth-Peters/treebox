@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import git
-from .models import path_is_under, worktree_root
+from .models import path_is_under, same_path, worktree_root
 from .provision import NotFoundError, ProvisionError
 
 
@@ -41,6 +41,11 @@ def candidates(repo: str, root: str) -> list[Candidate]:
     for rec in git.worktree_list(repo):
         path = Path(rec.path)
         if not path_is_under(path, base):
+            continue
+        # A root containing the repo (e.g. root = "..") makes the main checkout
+        # pass the filter above; it is never a treebox worktree, so resolving it
+        # here would let enter/teardown act on the repo itself.
+        if same_path(path, repo):
             continue
         found.append(Candidate(name=path.name, branch=rec.branch, path=rec.path))
     return found

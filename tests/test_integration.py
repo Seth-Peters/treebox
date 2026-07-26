@@ -1016,6 +1016,52 @@ def test_teardown_corrupt_worktree_uses_recorded_runner(
     assert not wt.exists()
 
 
+def test_sibling_root_never_exposes_main_checkout(repo: Path, hermetic_config):
+    """With a root containing the repo (root = "..", the sibling-worktrees
+    layout) the main checkout must not be enumerated or resolvable: list
+    excludes it, and teardown/enter by its dir leaf are a clean NOT_FOUND -
+    never a path to deleting the repo itself (issue #34)."""
+    base = ["--repo", str(repo), "--root", ".."]
+    _run(["create", "sibling-x", *base, "--print"])
+    uncommitted = repo / "precious-uncommitted.txt"
+    uncommitted.write_text("do not lose me\n")
+
+    payload = json.loads(_run(["list", *base, "--json"]).stdout)
+    names = [row["name"] for row in payload["worktrees"]]
+    assert "sibling-x" in names
+    assert repo.name not in names
+
+    res = _run(["teardown", repo.name, *base, "--force", "--json"])
+    assert res.exit_code == 3, res.output  # EXIT_NOTFOUND
+    assert json.loads(res.stderr)["error"]["code"] == "NOT_FOUND"
+
+    res = _run(["enter", repo.name, *base, "--json"])
+    assert res.exit_code == 3, res.output
+
+    assert (repo / ".git").is_dir()
+    assert uncommitted.is_file()
+
+
+def test_teardown_branch_fallback_never_targets_main_checkout(repo: Path, hermetic_config):
+    """The lingering-branch fallback constructs a path under the root from the
+    ref; with root = ".." and a local branch named like the repo's dir leaf
+    that path IS the repo. Teardown must refuse (MAIN_WORKTREE, exit 5) and
+    leave the repo untouched (issue #34)."""
+    base = ["--repo", str(repo), "--root", ".."]
+    _git(repo, "branch", repo.name)
+    uncommitted = repo / "precious-uncommitted.txt"
+    uncommitted.write_text("do not lose me\n")
+
+    res = _run(["teardown", repo.name, *base, "--force", "--json"])
+    assert res.exit_code == 5, res.output  # EXIT_CONFLICT
+    err = json.loads(res.stderr)
+    assert err["error"]["code"] == "MAIN_WORKTREE"
+    assert Path(err["error"]["path"]).resolve() == repo.resolve()
+
+    assert (repo / ".git").is_dir()
+    assert uncommitted.is_file()
+
+
 def test_teardown_clean_needs_confirmation_non_interactively(
     repo: Path, root: str, hermetic_config
 ):
