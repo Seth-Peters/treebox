@@ -478,6 +478,7 @@ failure.
 | `AMBIGUOUS_REF` | `2` | A ref matches more than one worktree. |
 | `NOT_FOUND` | `3` | The requested worktree, checkout branch, or base branch does not exist. |
 | `FETCH_FAILED` | `4` | Required fetch/auth failed. |
+| `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `ERROR` | `1` | Unclassified runtime or setup failure. |
