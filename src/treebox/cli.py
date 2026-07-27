@@ -53,6 +53,7 @@ from .models import (
     is_valid_name,
     path_is_under,
     placeholder_branch,
+    same_path,
     worktree_path,
     worktree_root,
 )
@@ -869,6 +870,11 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         wt_path = Path(rec.path)
         if not path_is_under(wt_path, base_dir):
             continue
+        # A root containing the repo (e.g. root = "..") makes the main checkout
+        # pass the filter above; it is not a treebox worktree and must never be
+        # listed (or offered by the teardown chooser).
+        if same_path(wt_path, repo_path):
+            continue
         # A registration whose dir is gone (git-prunable, or removed under us)
         # must never be shelled into — that would crash list/teardown on a path
         # that isn't there. Surface it as `missing` so teardown can prune it.
@@ -1265,6 +1271,23 @@ def teardown(
         if delete_branch:
             branch_delete = {c.path for c in targets}
 
+    # Defense in depth: no resolved target may be the main working tree.
+    # Enumeration already excludes it, but the branch-lingering fallback above
+    # can still construct the repo's own path when the root contains the repo
+    # and a local branch is named like its directory leaf. Removing the main
+    # checkout is unrecoverable data loss, so refuse before touching anything.
+    for cand in targets:
+        if same_path(cand.path, repo_path):
+            raise _die(
+                reporter,
+                f"Refusing to remove the main working tree '{cand.name}'.",
+                code=EXIT_CONFLICT,
+                error_code="MAIN_WORKTREE",
+                hint="treebox only manages linked worktrees; the repo itself is never a target.",
+                path=cand.path,
+                json_out=json_out,
+            )
+
     # The dirty gate, unified. A worktree with uncommitted changes is unsafe to
     # remove without --force. In the chooser a mixed selection is the norm, so we
     # skip the dirty ones and still remove the clean ones the user picked (and say
@@ -1514,6 +1537,20 @@ def _teardown_one(
         try:
             git.worktree_remove(repo_path, wt.path, force=force)
         except git.GitError:
+            # Last-resort cleanup for corrupt *linked* worktrees git refuses to
+            # remove. It must never run against the main working tree (git's
+            # refusal is also a GitError): that would delete the whole repo.
+            if same_path(wt.path, repo_path):
+                raise _die(
+                    reporter,
+                    f"Refusing to remove the main working tree '{cand.name}'.",
+                    code=EXIT_CONFLICT,
+                    error_code="MAIN_WORKTREE",
+                    hint="treebox only manages linked worktrees; "
+                    "the repo itself is never a target.",
+                    path=str(wt.path),
+                    json_out=json_out,
+                ) from None
             import shutil as _sh
 
             _sh.rmtree(wt.path, ignore_errors=True)

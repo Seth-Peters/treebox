@@ -486,6 +486,7 @@ failure.
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |
+| `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. |
 | `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (corrupt or hand-edited state). |
