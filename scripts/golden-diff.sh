@@ -137,7 +137,10 @@ normalize() {
     s/\bUSER_GID=\Q$ENV{GD_GID}\E\b/USER_GID=__GID__/g;
     s/\b\Q$ENV{GD_UID}\E:\Q$ENV{GD_GID}\E\b/__UID__:__GID__/g;
     s/\btreebox-([a-z0-9._-]+)-[0-9a-f]{10}\b/treebox-$1-__HASH__/g;
-    s/(\s)\d+s(\s+● (?:fresh|stale|unknown)\b)/$1Xs$2/g;
+    # Canonicalize the whole 3-wide AGE cell, not just its digits: a 2-digit
+    # age ("10s") fills the column while a 1-digit one right-aligns to " 3s",
+    # so replacing only the digits leaves a timing-dependent byte of padding.
+    s/(\s\s)(?:\s\d|\d\d)s(\s+● (?:fresh|stale|unknown)\b)/$1 Xs$2/g;
     s{(__ROOT__/repo-no-env/\.env · )\noptional}{$1optional}g;
   '
 }

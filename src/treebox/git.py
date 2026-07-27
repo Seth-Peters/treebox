@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from .models import same_path
 
@@ -46,10 +46,30 @@ class FetchError(GitError):
     """A required ``git fetch`` could not complete (usually auth/network)."""
 
 
+class GitMissingError(GitError):
+    """The git binary itself could not be spawned (not installed / not on PATH)."""
+
+
+def _spawn(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """``subprocess.run`` for git argvs, with spawn failure translated.
+
+    Every git invocation routes through here so a missing git binary surfaces
+    as a typed ``GitMissingError`` (classified by the CLI) instead of a raw
+    ``FileNotFoundError`` traceback. kwargs pass through untouched: call sites
+    variously need captured output, DEVNULL, or inherited stdio (the
+    interactive fetch must keep the terminal attached). No timeouts: git
+    operations (fetches, interactive SSH prompts) are legitimately slow.
+    """
+    try:
+        return subprocess.run(argv, **kwargs)
+    except OSError as exc:
+        raise GitMissingError("git is not installed or not on PATH") from exc
+
+
 def _run(
     args: list[str], *, cwd: str | Path | None = None, env: dict[str, str] | None = None
 ) -> str:
-    proc = subprocess.run(
+    proc = _spawn(
         _git(args),
         cwd=str(cwd) if cwd else None,
         env=env,
@@ -58,7 +78,8 @@ def _run(
     )
     if proc.returncode != 0:
         raise GitError((proc.stderr or proc.stdout or "").strip() or f"git {' '.join(args)} failed")
-    return proc.stdout
+    out: str = proc.stdout
+    return out
 
 
 def have_git() -> bool:
@@ -184,7 +205,7 @@ def remote_branch_exists(repo: str | Path, name: str) -> bool:
 
 
 def _ref_exists(repo: str | Path, ref: str) -> bool:
-    proc = subprocess.run(
+    proc = _spawn(
         _git(["-C", str(repo), "show-ref", "--verify", "--quiet", ref]),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -230,7 +251,7 @@ def _origin_https(repo: str | Path) -> HttpsRemote | None:
     Returns None when there is no origin or its URL can't be rewritten to HTTPS
     (e.g. a local path remote).
     """
-    proc = subprocess.run(
+    proc = _spawn(
         _git(["-C", str(repo), "remote", "get-url", "origin"]),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -345,7 +366,7 @@ def _silent_attempts(repo: str | Path) -> Iterator[_SilentAttempt]:
 
 def _silent_fetch(repo: str | Path, attempt: _SilentAttempt) -> tuple[int, str]:
     """Strictly non-interactive ``git fetch`` over one cascade attempt."""
-    proc = subprocess.run(
+    proc = _spawn(
         _git(
             [
                 "-C",
@@ -372,7 +393,7 @@ def _fetch_prompt(repo: str | Path) -> int:
     Inherits stdio so an SSH key passphrase or HTTPS credential prompt reaches
     the user, then continues — exactly like a manual ``git pull``.
     """
-    return subprocess.run(
+    return _spawn(
         _git(["-C", str(repo), "fetch", "origin", "--quiet"]), env=dict(os.environ)
     ).returncode
 
@@ -423,7 +444,7 @@ def origin_reachable(repo: str | Path) -> bool | None:
     if not has_origin(repo):
         return None
     for attempt in _silent_attempts(repo):
-        proc = subprocess.run(
+        proc = _spawn(
             _git(
                 [
                     "-C",
@@ -457,7 +478,7 @@ def upstream_of(worktree: str | Path) -> str | None:
     """The upstream tracking ref for HEAD (e.g. ``origin/feat/x``), or None when
     the branch has no configured upstream (never pushed / detached). Local, no
     network — forge- and auth-agnostic."""
-    proc = subprocess.run(
+    proc = _spawn(
         _git(
             [
                 "-C",
@@ -487,7 +508,7 @@ class AheadBehind(NamedTuple):
 def ahead_behind(worktree: str | Path) -> AheadBehind | None:
     """Ahead/behind commit counts of HEAD versus its upstream, or None when
     there is no upstream to compare against. Local, no network."""
-    proc = subprocess.run(
+    proc = _spawn(
         _git(["-C", str(worktree), "rev-list", "--left-right", "--count", "@{upstream}...HEAD"]),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -512,7 +533,7 @@ def is_merged_into(repo: str | Path, branch: str, base: str) -> bool:
     rewrites history and is NOT detected here — the forge PR/MR state is the
     authority for that."""
     target = f"origin/{base}" if remote_branch_exists(repo, base) else base
-    proc = subprocess.run(
+    proc = _spawn(
         _git(["-C", str(repo), "merge-base", "--is-ancestor", branch, target]),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -521,7 +542,7 @@ def is_merged_into(repo: str | Path, branch: str, base: str) -> bool:
 
 
 def has_origin(repo: str | Path) -> bool:
-    proc = subprocess.run(
+    proc = _spawn(
         _git(["-C", str(repo), "remote", "get-url", "origin"]),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

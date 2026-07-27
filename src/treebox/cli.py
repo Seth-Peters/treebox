@@ -261,6 +261,17 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
         # set and root whether invoked from the repo, from .treebox/, or from
         # inside a linked worktree (where --show-toplevel would mislead us).
         return git.main_worktree(expand_user(repo))
+    except git.GitMissingError as exc:
+        # Not a repo problem: git itself can't run. Distinct stable code so
+        # agents don't chase the misleading "run inside a git repo" hint.
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_ERROR,
+            error_code="GIT_MISSING",
+            hint=_GIT_MISSING_HINT,
+            json_out=json_out,
+        ) from exc
     except git.GitError as exc:
         raise _die(
             reporter,
@@ -336,8 +347,15 @@ class _ErrorInfo(NamedTuple):
     hint: str | None
 
 
+_GIT_MISSING_HINT = "Install git and ensure it is on PATH."
+
+
 def _classify(exc: Exception) -> _ErrorInfo:
     """Map a provisioning exception to its exit code / error code / hint."""
+    if isinstance(exc, git.GitMissingError):
+        # Before FetchError/GitError branches: the binary itself is absent, so
+        # auth/repo hints would mislead.
+        return _ErrorInfo(EXIT_ERROR, "GIT_MISSING", _GIT_MISSING_HINT)
     if isinstance(exc, locking.LockError):
         return _ErrorInfo(
             EXIT_CONFLICT,
