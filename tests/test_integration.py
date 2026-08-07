@@ -36,6 +36,51 @@ def _git(wt: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True)
 
 
+def _push_branch_with_directory(repo: Path, branch: str, entry: str) -> None:
+    """Push a branch that changes a root file into a non-empty directory."""
+    assert _git(repo, "checkout", "-b", branch).returncode == 0
+    path = repo / entry
+    path.unlink()
+    path.mkdir()
+    (path / "keep.txt").write_text("must survive\n")
+    assert _git(repo, "add", "-A").returncode == 0
+    commit = _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@e",
+        "commit",
+        "-m",
+        f"commit {entry} directory",
+    )
+    assert commit.returncode == 0, commit.stderr
+    assert _git(repo, "push", "-u", "origin", branch).returncode == 0
+    assert _git(repo, "checkout", "main").returncode == 0
+
+
+def _push_branch_with_symlink(repo: Path, branch: str, entry: str, target: Path) -> None:
+    """Push a branch that changes a root file into an absolute symlink."""
+    assert _git(repo, "checkout", "-b", branch).returncode == 0
+    path = repo / entry
+    path.unlink()
+    path.symlink_to(target)
+    assert _git(repo, "add", "-A").returncode == 0
+    commit = _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@e",
+        "commit",
+        "-m",
+        f"commit {entry} symlink",
+    )
+    assert commit.returncode == 0, commit.stderr
+    assert _git(repo, "push", "-u", "origin", branch).returncode == 0
+    assert _git(repo, "checkout", "main").returncode == 0
+
+
 def test_create_provisions_everything(repo: Path, root: str, hermetic_config):
     from treebox import git
 
@@ -319,6 +364,99 @@ def test_create_b_remote_only_branch_is_tracked(repo: Path, root: str, hermetic_
         text=True,
     ).stdout.strip()
     assert upstream == "origin/teammate/topic"
+
+
+def test_env_directory_collision_is_classified_on_create_retry_and_enter(
+    repo: Path, root: str, hermetic_config
+):
+    """A branch-owned .env directory must survive every failed copy attempt.
+
+    Create, its resume path, and enter must give the same stable conflict. JSON
+    mode writes only the error object to stderr. Forced teardown remains the
+    explicit way to discard the half-built worktree.
+    """
+    _push_branch_with_directory(repo, "envdir", ".env")
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "envdir"
+    collision = wt / ".env"
+
+    first = _run(["create", "--checkout", "envdir", *base, "--print"])
+    assert first.exit_code == 5
+    assert "Traceback" not in first.output
+    assert str(collision) in first.stderr
+    assert "treebox teardown envdir --force" in first.stderr
+    assert (collision / "keep.txt").read_text() == "must survive\n"
+
+    retry = _run(["create", "--checkout", "envdir", *base, "--json"])
+    assert retry.exit_code == 5
+    assert retry.stdout == ""
+    retry_error = json.loads(retry.stderr)["error"]
+    assert retry_error["code"] == "DESTINATION_CONFLICT"
+    assert retry_error["path"] == str(collision)
+    assert "treebox teardown envdir --force" in retry_error["hint"]
+    assert "Traceback" not in retry.stderr
+    assert (collision / "keep.txt").read_text() == "must survive\n"
+
+    entered = _run(["enter", "envdir", *base, "--json"])
+    assert entered.exit_code == 5
+    assert entered.stdout == ""
+    enter_error = json.loads(entered.stderr)["error"]
+    assert enter_error == retry_error
+    assert (collision / "keep.txt").read_text() == "must survive\n"
+
+    torn_down = _run(["teardown", "envdir", *base, "--force", "--json"])
+    assert torn_down.exit_code == 0, torn_down.output
+    assert json.loads(torn_down.stdout)["worktrees"][0]["removed"] is True
+    assert not wt.exists()
+    assert (repo / ".env").read_text() == "SECRET=canonical\n"
+
+
+def test_gitmodules_directory_collision_is_classified_on_create_retry_and_enter(
+    repo: Path, root: str, hermetic_config
+):
+    """The shared safe-copy path also protects a .gitmodules directory."""
+    _push_branch_with_directory(repo, "gitmodules-dir", ".gitmodules")
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "gitmodules-dir"
+    collision = wt / ".gitmodules"
+
+    first = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    retry = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    entered = _run(["enter", "gitmodules-dir", *base, "--json"])
+    retry_after_enter = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+
+    results = (first, retry, entered, retry_after_enter)
+    errors = [json.loads(result.stderr)["error"] for result in results]
+    for result, error in zip(results, errors, strict=True):
+        assert result.exit_code == 5
+        assert result.stdout == ""
+        assert error["code"] == "DESTINATION_CONFLICT"
+        assert error["path"] == str(collision)
+        assert "treebox teardown gitmodules-dir --force" in error["hint"]
+        assert "Traceback" not in result.stderr
+    assert errors == [errors[0]] * len(errors)
+    assert (collision / "keep.txt").read_text() == "must survive\n"
+
+
+def test_create_replaces_destination_symlink_without_write_through(
+    repo: Path, root: str, hermetic_config
+):
+    """A branch symlink is replaced with the source file, never followed."""
+    entry = ".env"
+    expected = (repo / entry).read_text()
+    outside = repo.parent / f"outside-{entry.removeprefix('.')}"
+    outside.write_text("outside must survive\n")
+    branch = f"symlink-{entry.removeprefix('.')}"
+    _push_branch_with_symlink(repo, branch, entry, outside)
+
+    result = _run(["create", "--checkout", branch, "--repo", str(repo), "--root", root, "--print"])
+
+    assert result.exit_code == 0, result.output
+    destination = Path(root) / branch / entry
+    assert not destination.is_symlink()
+    assert destination.is_file()
+    assert destination.read_text() == expected
+    assert outside.read_text() == "outside must survive\n"
 
 
 def test_create_b_collision_on_derived_name_is_conflict(repo: Path, root: str, hermetic_config):

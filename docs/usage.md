@@ -394,7 +394,7 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 | `2`  | usage — invalid name/branch, ambiguous ref, bad option |
 | `3`  | not found — the worktree/branch/template doesn't exist |
 | `4`  | auth — fetch or credential problem                     |
-| `5`  | conflict — name taken, dirty tree, or lock held        |
+| `5`  | conflict - name taken, managed-file destination is a directory, dirty tree, or lock held |
 
 The worktree commands and `doctor` take `--json`; payloads carry a
 `schemaVersion` — fields are only ever added within a version, and a breaking
@@ -483,6 +483,7 @@ failure.
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `ERROR` | `1` | Unclassified runtime or setup failure. |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
+| `DESTINATION_CONFLICT` | `5` | `.env` or `.gitmodules` must replace a directory in the worktree. Treebox keeps the directory and its contents. Rename or remove it on the branch and retry, or discard the worktree with `treebox teardown <name> --force`. |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |
