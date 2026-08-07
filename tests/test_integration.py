@@ -1799,6 +1799,29 @@ def test_teardown_stray_directory_requires_safe_exact_leaf(
     assert marker.read_text() == "must stay\n"
 
 
+def test_teardown_exact_stray_takes_precedence_over_registered_substring(
+    repo: Path,
+    root: str,
+    hermetic_config,
+):
+    """An exact stray name never selects a registered substring match."""
+    base = ["--repo", str(repo), "--root", root]
+    registered = Path(root) / "foobar"
+    created = _run(["create", "foobar", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    stray = Path(root) / "foo"
+    stray.mkdir()
+
+    removed = _run(["teardown", "foo", *base, "--force", "--json"])
+
+    assert removed.exit_code == 0, removed.output
+    (record,) = json.loads(removed.stdout)["worktrees"]
+    assert record["name"] == "foo"
+    assert record["worktree_path"] == str(stray)
+    assert not stray.exists()
+    assert registered.is_dir()
+
+
 def test_teardown_stray_directory_never_inspects_git_dirtiness(
     repo: Path,
     root: str,
@@ -1877,6 +1900,56 @@ def test_teardown_stray_directory_keeps_confirmed_root_identity(
     assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
     assert (moved_root / stray.name / original_marker.name).read_text() == "keep original\n"
     assert outside_marker.read_text() == "keep outside\n"
+
+
+def test_teardown_stray_directory_pins_root_before_lock_write(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """A changed root is rejected before a stray lock writes outside it."""
+    from contextlib import contextmanager
+
+    from treebox import locking
+
+    root_path = Path(root)
+    stray = root_path / "lock-root-race"
+    stray.mkdir(parents=True)
+    moved_root = tmp_path / "moved-lock-root"
+    outside_root = tmp_path / "outside-lock-root"
+    outside_root.mkdir()
+    outside_stray = outside_root / stray.name
+    outside_stray.mkdir()
+    original_lock = locking.worktree_lock_at
+
+    @contextmanager
+    def replace_root_before_lock(root_arg, identity, name):
+        root_path.rename(moved_root)
+        root_path.symlink_to(outside_root, target_is_directory=True)
+        with original_lock(root_arg, identity, name):
+            yield
+
+    monkeypatch.setattr(locking, "worktree_lock_at", replace_root_before_lock)
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert (moved_root / stray.name).is_dir()
+    assert outside_stray.is_dir()
+    assert not (outside_root / ".locks").exists()
 
 
 @pytest.mark.parametrize("claim", ["branch", "registration"])

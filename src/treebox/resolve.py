@@ -73,11 +73,9 @@ def resolve_ref(repo: str, root: str, ref: str) -> Candidate:
         exc.hint = "Pass a worktree name or branch (treebox list shows them)."
         raise exc
     cands = candidates(repo, root)
-    for exact in ([c for c in cands if c.name == ref], [c for c in cands if c.branch == ref]):
-        if len(exact) == 1:
-            return exact[0]
-        if exact:  # two worktrees can't share a branch, but never guess
-            raise AmbiguousRefError(ref, exact)
+    exact = _exact_ref(ref, cands)
+    if exact is not None:
+        return exact
     partial = [c for c in cands if ref in c.name or (c.branch and ref in c.branch)]
     if len(partial) == 1:
         return partial[0]
@@ -86,6 +84,26 @@ def resolve_ref(repo: str, root: str, ref: str) -> Candidate:
     exc = NotFoundError(f"No worktree matches '{ref}'.")
     exc.hint = "treebox list shows what exists; treebox create starts new work."
     raise exc
+
+
+def resolve_exact_ref(repo: str, root: str, ref: str) -> Candidate | None:
+    """Resolve only an exact registered name or branch.
+
+    Teardown uses this before its exact stray-directory recovery. General
+    substring matching stays in ``resolve_ref`` for all other cases.
+    """
+    if not ref.strip():
+        return None
+    return _exact_ref(ref, candidates(repo, root))
+
+
+def _exact_ref(ref: str, cands: list[Candidate]) -> Candidate | None:
+    for exact in ([c for c in cands if c.name == ref], [c for c in cands if c.branch == ref]):
+        if len(exact) == 1:
+            return exact[0]
+        if exact:  # two worktrees can't share a branch, but never guess
+            raise AmbiguousRefError(ref, exact)
+    return None
 
 
 def exact_stray(repo: str, root: str, ref: str) -> Candidate | None:

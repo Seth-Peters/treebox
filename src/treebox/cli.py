@@ -1254,7 +1254,11 @@ def teardown(
         seen: set[str] = set()
         for ref in refs:
             try:
-                cand = resolve.resolve_ref(repo_path, cfg.root, ref)
+                cand = resolve.resolve_exact_ref(repo_path, cfg.root, ref)
+                if cand is None:
+                    cand = resolve.exact_stray(repo_path, cfg.root, ref)
+                if cand is None:
+                    cand = resolve.resolve_ref(repo_path, cfg.root, ref)
             except resolve.AmbiguousRefError as exc:
                 raise _handle(reporter, exc, json_out=json_out) from exc
             except provision.NotFoundError as exc:
@@ -1263,11 +1267,6 @@ def teardown(
                 if git.local_branch_exists(repo_path, ref):
                     gone = worktree_path(repo_path, cfg.root, derive_name(ref))
                     cand = resolve.Candidate(name=derive_name(ref), branch=ref, path=str(gone))
-                elif stray := resolve.exact_stray(repo_path, cfg.root, ref):
-                    # Complete the recovery named by SLUG_CONFLICT. This is an
-                    # exact directory-leaf match only. It carries no trusted
-                    # Git or runner state, so later teardown skips both.
-                    cand = stray
                 else:
                     raise _handle(reporter, exc, json_out=json_out) from exc
             if cand.path not in seen:
@@ -1356,7 +1355,16 @@ def teardown(
                 # removal starts, so a held lock aborts the whole batch cleanly
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
-                    stack.enter_context(locking.worktree_lock(repo_path, cfg.root, cand.name))
+                    if cand.stray:
+                        stack.enter_context(
+                            locking.worktree_lock_at(
+                                cand.stray.root,
+                                cand.stray.root_identity,
+                                cand.name,
+                            )
+                        )
+                    else:
+                        stack.enter_context(locking.worktree_lock(repo_path, cfg.root, cand.name))
                 # Validate the isolation mode for EVERY target before removing
                 # anything: a mismatch or unknown recorded mode firing mid-batch
                 # would leave the earlier targets removed but unreported in the
@@ -1395,6 +1403,15 @@ def teardown(
                     )
                     for cand, run in zip(targets, runners, strict=True)
                 ]
+        except locking.LockRootChangedError as exc:
+            raise _die(
+                reporter,
+                str(exc),
+                code=EXIT_NOTFOUND,
+                error_code="NOT_FOUND",
+                hint="Check the exact directory under the configured root and retry.",
+                json_out=json_out,
+            ) from exc
         except locking.LockError as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 

@@ -10,14 +10,20 @@ error so a second caller fails fast instead of corrupting a half-built tree.
 from __future__ import annotations
 
 import errno
+import os
+import stat
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 from .models import worktree_root
 
 
 class LockError(RuntimeError):
     pass
+
+
+class LockRootChangedError(RuntimeError):
+    """The pinned root for a stray-directory lock is no longer safe."""
 
 
 @contextmanager
@@ -48,3 +54,63 @@ def worktree_lock(repo: str, root: str, name: str) -> Iterator[None]:
         yield
     finally:
         fd.close()
+
+
+@contextmanager
+def worktree_lock_at(root: str, root_identity: tuple[int, int], name: str) -> Iterator[None]:
+    """Lock ``name`` through a pinned physical root without following links.
+
+    Stray-directory teardown calls this after confirmation. No path-derived
+    write occurs until the opened root identity matches the recorded device and
+    inode. The root and lock directory descriptors then pin every later write.
+    """
+    try:
+        import fcntl
+    except ImportError:  # non-POSIX: locking unsupported, proceed unguarded
+        yield
+        return
+
+    root_fd = -1
+    lock_dir_fd = -1
+    lock_fd = -1
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(root, flags)
+        root_stat = os.fstat(root_fd)
+        if (root_stat.st_dev, root_stat.st_ino) != root_identity:
+            raise LockRootChangedError("The configured worktree root changed before locking.")
+        with suppress(FileExistsError):
+            os.mkdir(".locks", dir_fd=root_fd)
+        lock_dir_fd = os.open(".locks", flags, dir_fd=root_fd)
+        lock_dir_stat = os.fstat(lock_dir_fd)
+        if not stat.S_ISDIR(lock_dir_stat.st_mode):
+            raise LockRootChangedError("The worktree lock directory is not safe.")
+        lock_fd = os.open(
+            f"{name}.lock",
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+            0o666,
+            dir_fd=lock_dir_fd,
+        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                raise LockError(
+                    f"Another treebox is already working on '{name}'. "
+                    "Wait for it to finish or use a different worktree."
+                ) from exc
+            raise
+        yield
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+            raise LockRootChangedError(
+                "The configured worktree root changed before locking."
+            ) from exc
+        raise
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if lock_dir_fd >= 0:
+            os.close(lock_dir_fd)
+        if root_fd >= 0:
+            os.close(root_fd)

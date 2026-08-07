@@ -89,10 +89,10 @@ Module map:
   scaffolds and inspects operator-owned sandbox templates via `assets.py`'s
   resolver, so customizing a docker sandbox never needs a `python -c` reach
   into the package. `enter` resolves a ref as name → live branch → unique
-  substring; `teardown` uses the same resolver, then calls
-  `resolve.exact_stray` only for its guarded recovery of an unregistered exact
-  directory leaf. Ambiguity exits 2. `create` and `enter` share `_run_session`
-  for runner preflight, the
+  substring. `teardown` checks an exact registered name or branch first, then
+  its guarded recovery of an unregistered exact directory leaf, then normal
+  unique-substring matching. Ambiguity exits 2. `create` and `enter` share
+  `_run_session` for runner preflight, the
   per-name lock, provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
   so the printed `entry_command` is never dead on replay).
