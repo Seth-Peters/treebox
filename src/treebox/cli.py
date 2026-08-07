@@ -1263,6 +1263,11 @@ def teardown(
                 if git.local_branch_exists(repo_path, ref):
                     gone = worktree_path(repo_path, cfg.root, derive_name(ref))
                     cand = resolve.Candidate(name=derive_name(ref), branch=ref, path=str(gone))
+                elif stray := resolve.exact_stray(repo_path, cfg.root, ref):
+                    # Complete the recovery named by SLUG_CONFLICT. This is an
+                    # exact directory-leaf match only. It carries no trusted
+                    # Git or runner state, so later teardown skips both.
+                    cand = stray
                 else:
                     raise _handle(reporter, exc, json_out=json_out) from exc
             if cand.path not in seen:
@@ -1357,22 +1362,20 @@ def teardown(
                 # applies to this per-target check too. --skip-container touches
                 # no containers, so it skips resolution entirely — the escape
                 # hatch for a tree whose recorded mode treebox can't drive.
-                runners: list[Runner | None] = (
-                    [None] * len(targets)
-                    if skip_container
-                    else [
-                        _teardown_runner(
-                            reporter,
-                            cfg,
-                            cand,
-                            repo_path,
-                            explicit=isolation,
-                            remove_volumes=remove_volumes,
-                            json_out=json_out,
-                        )
-                        for cand in targets
-                    ]
-                )
+                runners: list[Runner | None] = [
+                    None
+                    if skip_container or cand.stray
+                    else _teardown_runner(
+                        reporter,
+                        cfg,
+                        cand,
+                        repo_path,
+                        explicit=isolation,
+                        remove_volumes=remove_volumes,
+                        json_out=json_out,
+                    )
+                    for cand in targets
+                ]
                 reporter.heading("teardown", ", ".join(c.name for c in targets))
                 records = [
                     _teardown_one(
@@ -1506,7 +1509,12 @@ def _teardown_one(
 
     container: ContainerOutcome
     volumes_removed = False
-    if skip_container:
+    if cand.stray:
+        # An unregistered directory has no trusted creation-time state or
+        # runner-owned resource record. Never guess which cleanup to run.
+        container = "skipped"
+        reporter.note("container", "skipped · unregistered directory")
+    elif skip_container:
         container = "skipped"
         reporter.note("container", "skipped")
     elif not exists and st is None and explicit_isolation is None:
@@ -1534,27 +1542,52 @@ def _teardown_one(
             reporter.warn(f"isolation teardown: {exc}")
 
     if exists:
-        try:
-            git.worktree_remove(repo_path, wt.path, force=force)
-        except git.GitError:
-            # Last-resort cleanup for corrupt *linked* worktrees git refuses to
-            # remove. It must never run against the main working tree (git's
-            # refusal is also a GitError): that would delete the whole repo.
-            if same_path(wt.path, repo_path):
+        if cand.stray:
+            # Recheck the narrow path rule after confirmation and lock
+            # acquisition. A replaced symlink must not turn this recovery into
+            # deletion outside the configured root.
+            current = resolve.exact_stray(repo_path, cfg.root, cand.name)
+            if current is None or not same_path(current.path, wt.path):
                 raise _die(
                     reporter,
-                    f"Refusing to remove the main working tree '{cand.name}'.",
-                    code=EXIT_CONFLICT,
-                    error_code="MAIN_WORKTREE",
-                    hint="treebox only manages linked worktrees; "
-                    "the repo itself is never a target.",
+                    f"Unregistered directory '{cand.name}' is no longer a safe teardown target.",
+                    code=EXIT_NOTFOUND,
+                    error_code="NOT_FOUND",
+                    hint="Check the exact directory under the configured root and retry.",
                     path=str(wt.path),
                     json_out=json_out,
-                ) from None
-            import shutil as _sh
-
-            _sh.rmtree(wt.path, ignore_errors=True)
-            git.worktree_prune(repo_path)
+                )
+            try:
+                shutil.rmtree(wt.path)
+            except OSError as exc:
+                raise _die(
+                    reporter,
+                    f"Could not remove unregistered directory '{cand.name}': {exc}",
+                    code=EXIT_ERROR,
+                    error_code="REMOVE_FAILED",
+                    path=str(wt.path),
+                    json_out=json_out,
+                ) from exc
+        else:
+            try:
+                git.worktree_remove(repo_path, wt.path, force=force)
+            except git.GitError:
+                # Last-resort cleanup for corrupt linked worktrees that git
+                # refuses to remove. It must never run against the main working
+                # tree because that would delete the whole repository.
+                if same_path(wt.path, repo_path):
+                    raise _die(
+                        reporter,
+                        f"Refusing to remove the main working tree '{cand.name}'.",
+                        code=EXIT_CONFLICT,
+                        error_code="MAIN_WORKTREE",
+                        hint="treebox only manages linked worktrees; "
+                        "the repo itself is never a target.",
+                        path=str(wt.path),
+                        json_out=json_out,
+                    ) from None
+                shutil.rmtree(wt.path, ignore_errors=True)
+                git.worktree_prune(repo_path)
         reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
     else:
         git.worktree_prune(repo_path)

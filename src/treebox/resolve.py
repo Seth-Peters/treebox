@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import git
-from .models import path_is_under, same_path, worktree_root
+from .models import is_slug, path_is_under, same_path, worktree_path, worktree_root
 from .provision import NotFoundError, ProvisionError
 
 
@@ -28,11 +28,14 @@ class AmbiguousRefError(ProvisionError):
 @dataclass(frozen=True)
 class Candidate:
     """One live worktree under the treebox root: its permanent name (the
-    directory leaf) and its current branch, straight from git."""
+    directory leaf) and its current branch, straight from git. ``stray`` marks
+    the narrow teardown recovery case: an exact, safe directory with no Git
+    registration and no matching branch."""
 
     name: str
     branch: str | None
     path: str
+    stray: bool = False
 
 
 def candidates(repo: str, root: str) -> list[Candidate]:
@@ -72,3 +75,26 @@ def resolve_ref(repo: str, root: str, ref: str) -> Candidate:
     exc = NotFoundError(f"No worktree matches '{ref}'.")
     exc.hint = "treebox list shows what exists; treebox create starts new work."
     raise exc
+
+
+def exact_stray(repo: str, root: str, ref: str) -> Candidate | None:
+    """Return an exact unregistered-directory teardown target, if it is safe.
+
+    This is not general discovery. The ref must be one directory-leaf slug,
+    and only ``<root>/<ref>`` is checked. Symlinks are not targets because they
+    can point outside the configured root. Call this only after registered
+    worktree and branch resolution fails, so those trusted cases keep their
+    normal teardown behavior.
+    """
+    if not is_slug(ref):
+        return None
+    path = worktree_path(repo, root, ref)
+    base = worktree_root(repo, root)
+    if (
+        path.is_symlink()
+        or not path.is_dir()
+        or not path_is_under(path, base)
+        or same_path(path, repo)
+    ):
+        return None
+    return Candidate(name=ref, branch=None, path=str(path), stray=True)

@@ -984,14 +984,15 @@ def test_teardown_corrupt_worktree_force_removes_without_touching_main(repo: Pat
     assert not any(Path(item.path).name == "corrupt-force" for item in git.worktree_list(str(repo)))
 
 
-def test_teardown_corrupt_worktree_uses_recorded_runner(
+def test_teardown_registered_corrupt_worktree_uses_recorded_runner(
     repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """The recorded isolation mode survives a corrupt .git pointer: teardown
-    recovers it from git's own registration and drives the recorded runner,
-    instead of resolving state through the missing pointer, reading none, and
-    silently tearing a docker worktree down with the config-default runner -
-    leaking the container while reporting it cleaned."""
+    """A registered corrupt worktree is not an untrusted stray directory.
+
+    Its recorded isolation mode survives a missing .git pointer. Teardown gets
+    it from Git's registration and uses the recorded runner. It must not use the
+    exact-directory recovery path, which always skips runner cleanup.
+    """
     from treebox.runners import RunnerTeardownResult
     from treebox.runners.docker import DockerRunner
 
@@ -1013,6 +1014,7 @@ def test_teardown_corrupt_worktree_uses_recorded_runner(
     assert calls == ["corrupt-docker"]  # DockerRunner.teardown was invoked
     (record,) = json.loads(res.stdout)["worktrees"]
     assert record["container"] == "cleaned"
+    assert record["branch"] == "corrupt-docker"
     assert not wt.exists()
 
 
@@ -1662,6 +1664,139 @@ def test_create_refuse_hint_points_to_teardown_and_prune(repo: Path, root: str, 
     hint = json.loads(res.stderr)["error"]["hint"]
     assert "treebox teardown leftover" in hint
     assert "worktree prune" in hint
+
+
+def test_teardown_stray_directory_json_completes_create_recovery(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The SLUG_CONFLICT hint gives a complete create-teardown-create path."""
+    from treebox import git
+    from treebox.runners.host import HostRunner
+
+    base = ["--repo", str(repo), "--root", root]
+    stray = Path(root) / "stray-recovery"
+    stray.mkdir(parents=True)
+    (stray / "unfinished.txt").write_text("left by an interrupted operation\n")
+    _git(repo, "branch", "unrelated-keep")
+    branches_before = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout
+
+    conflict = _run(["create", "stray-recovery", *base, "--print", "--json"])
+    assert conflict.exit_code == 5
+    assert json.loads(conflict.stderr)["error"]["code"] == "SLUG_CONFLICT"
+
+    def fail_runner_cleanup(*args, **kwargs):
+        pytest.fail("stray-directory teardown must not run isolation cleanup")
+
+    monkeypatch.setattr(HostRunner, "teardown", fail_runner_cleanup)
+    removed = _run(
+        [
+            "teardown",
+            "stray-recovery",
+            *base,
+            "--force",
+            "--delete-branch",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+    assert removed.exit_code == 0, removed.output
+    payload = json.loads(removed.stdout)
+    assert payload["schemaVersion"] == SCHEMA_VERSION == 1
+    assert payload["worktrees"] == [
+        {
+            "name": "stray-recovery",
+            "branch": None,
+            "worktree_path": str(stray),
+            "removed": True,
+            "branch_deleted": False,
+            "container": "skipped",
+            "volumes_removed": False,
+        }
+    ]
+    assert not stray.exists()
+    assert _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout == (
+        branches_before
+    )
+
+    recreated = _run(["create", "stray-recovery", *base, "--print"])
+    assert recreated.exit_code == 0, recreated.output
+    assert git.branch_for_path(str(repo), str(stray)) == "stray-recovery"
+
+
+def test_teardown_stray_directory_needs_confirmation(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A stray directory stays until the user confirms or passes --force."""
+    from treebox import cli
+
+    base = ["--repo", str(repo), "--root", root]
+    stray = Path(root) / "confirm-stray"
+    stray.mkdir(parents=True)
+
+    noninteractive = _run(["teardown", "confirm-stray", *base, "--json"])
+    assert noninteractive.exit_code == 5
+    assert json.loads(noninteractive.stderr)["error"]["code"] == "NEEDS_CONFIRMATION"
+    assert stray.is_dir()
+
+    monkeypatch.setattr(cli, "_stdin_isatty", lambda: True)
+    declined = runner.invoke(
+        app,
+        ["teardown", "confirm-stray", *base],
+        input="n\n",
+        catch_exceptions=False,
+    )
+    assert declined.exit_code == 1
+    assert "Remove worktree confirm-stray?" in declined.output
+    assert stray.is_dir()
+
+    confirmed = runner.invoke(
+        app,
+        ["teardown", "confirm-stray", *base],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert confirmed.exit_code == 0, confirmed.output
+    assert "unregistered directory" in confirmed.stderr
+    assert not stray.exists()
+
+
+def test_teardown_stray_directory_requires_safe_exact_leaf(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    tmp_path: Path,
+):
+    """Stray recovery does not use substrings, nested refs, or symlinks."""
+    base = ["--repo", str(repo), "--root", root, "--force", "--json"]
+    exact = Path(root) / "exact-target"
+    nested = Path(root) / "nested" / "child"
+    outside = tmp_path / "outside-target"
+    exact.mkdir(parents=True)
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("must stay\n")
+    linked = Path(root) / "linked-target"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    for ref in ("exact", "nested/child", "../outside-target", "linked-target"):
+        result = _run(["teardown", ref, *base])
+        assert result.exit_code == 3, (ref, result.output)
+        assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+
+    assert exact.is_dir()
+    assert nested.is_dir()
+    assert linked.is_symlink()
+    assert marker.read_text() == "must stay\n"
 
 
 def test_create_self_heals_stale_registration_from_interrupted_teardown(
