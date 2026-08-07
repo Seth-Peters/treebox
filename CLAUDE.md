@@ -88,9 +88,11 @@ Module map:
   `template list`). The `template` sub-app
   scaffolds and inspects operator-owned sandbox templates via `assets.py`'s
   resolver, so customizing a docker sandbox never needs a `python -c` reach
-  into the package. `enter`/`teardown` resolve a ref as
-  name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
-  `create` and `enter` share `_run_session` for runner preflight, the
+  into the package. `enter` resolves a ref as name → live branch → unique
+  substring; `teardown` uses the same resolver, then calls
+  `resolve.exact_stray` only for its guarded recovery of an unregistered exact
+  directory leaf. Ambiguity exits 2. `create` and `enter` share `_run_session`
+  for runner preflight, the
   per-name lock, provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
   so the printed `entry_command` is never dead on replay).

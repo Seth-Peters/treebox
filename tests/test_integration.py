@@ -1896,6 +1896,7 @@ def test_teardown_stray_directory_rechecks_git_state_after_lock(
     registration_checks = 0
 
     if claim == "registration":
+
         def registered_after_resolution(repo_path, path):
             nonlocal registration_checks
             registration_checks += 1
