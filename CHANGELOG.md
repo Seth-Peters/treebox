@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `create`, a retried `create`, and `enter` now report a stable
+  `DESTINATION_CONFLICT` (exit 5) when a branch contains `.env` or
+  `.gitmodules` as a directory. Treebox keeps the directory and its contents,
+  reports its path without a traceback, and provides safe retry or forced
+  teardown guidance. JSON mode writes the structured error to stderr and
+  keeps stdout empty (#37).
+
 ## [1.0.1] - 2026-07-10
 
 ### Fixed
