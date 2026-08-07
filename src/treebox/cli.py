@@ -1265,7 +1265,9 @@ def teardown(
                 # The worktree may be gone while its branch lingers (manual rm):
                 # an exact local-branch match still gets pruned/cleaned up.
                 gone = worktree_path(repo_path, cfg.root, derive_name(ref))
-                if git.local_branch_exists(repo_path, ref) and not os.path.lexists(gone):
+                if git.local_branch_exists(repo_path, ref) and (
+                    not os.path.lexists(gone) or same_path(gone, repo_path)
+                ):
                     cand = resolve.Candidate(name=derive_name(ref), branch=ref, path=str(gone))
                 else:
                     raise _handle(reporter, exc, json_out=json_out) from exc
