@@ -85,12 +85,21 @@ def worktree_lock_at(root: str, root_identity: tuple[int, int], name: str) -> It
         lock_dir_stat = os.fstat(lock_dir_fd)
         if not stat.S_ISDIR(lock_dir_stat.st_mode):
             raise LockRootChangedError("The worktree lock directory is not safe.")
+        lock_name = f"{name}.lock"
+        try:
+            existing_lock = os.stat(lock_name, dir_fd=lock_dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing_lock = None
+        if existing_lock is not None and not _safe_lock_file(existing_lock):
+            raise LockRootChangedError("The worktree lock file is not safe.")
         lock_fd = os.open(
-            f"{name}.lock",
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+            lock_name,
+            os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW,
             0o666,
             dir_fd=lock_dir_fd,
         )
+        if not _safe_lock_file(os.fstat(lock_fd)):
+            raise LockRootChangedError("The worktree lock file is not safe.")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
@@ -114,3 +123,7 @@ def worktree_lock_at(root: str, root_identity: tuple[int, int], name: str) -> It
             os.close(lock_dir_fd)
         if root_fd >= 0:
             os.close(root_fd)
+
+
+def _safe_lock_file(value: os.stat_result) -> bool:
+    return stat.S_ISREG(value.st_mode) and value.st_nlink == 1

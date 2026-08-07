@@ -11,6 +11,7 @@ for enter/teardown.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -1797,6 +1798,192 @@ def test_teardown_stray_directory_requires_safe_exact_leaf(
     assert nested.is_dir()
     assert linked.is_symlink()
     assert marker.read_text() == "must stay\n"
+
+
+def test_teardown_stray_directory_requires_exact_entry_spelling(
+    repo: Path,
+    root: str,
+    hermetic_config,
+):
+    actual = Path(root) / "Case-Target"
+    actual.mkdir(parents=True)
+
+    result = _run(
+        [
+            "teardown",
+            "case-target",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert actual.is_dir()
+
+
+def test_teardown_stray_directory_rechecks_exact_entry_spelling(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from treebox import resolve
+
+    stray = Path(root) / "case-race"
+    renamed = Path(root) / "Case-Race"
+    stray.mkdir(parents=True)
+    original_remove = resolve.remove_exact_stray
+
+    def change_spelling(repo_path, cand):
+        stray.rename(renamed)
+        return original_remove(repo_path, cand)
+
+    monkeypatch.setattr(resolve, "remove_exact_stray", change_spelling)
+    result = _run(
+        [
+            "teardown",
+            "case-race",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert renamed.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("branch", "name", "remote_only"),
+    [
+        ("owned-exact", "owned-exact", False),
+        ("treebox/owned-placeholder", "owned-placeholder", False),
+        ("feature/owned-slash", "feature--owned-slash", False),
+        ("owned-remote", "owned-remote", True),
+    ],
+)
+def test_teardown_stray_directory_refuses_related_branch(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    name: str,
+    remote_only: bool,
+):
+    from treebox import git
+    from treebox.runners.host import HostRunner
+
+    created = _git(repo, "branch", branch)
+    assert created.returncode == 0, created.stderr
+    if remote_only:
+        pushed = _git(repo, "push", "origin", branch)
+        assert pushed.returncode == 0, pushed.stderr
+        deleted = _git(repo, "branch", "-D", branch)
+        assert deleted.returncode == 0, deleted.stderr
+        assert git.remote_branch_exists(str(repo), branch)
+
+    stray = Path(root) / name
+    stray.mkdir(parents=True)
+
+    def fail_runner_cleanup(*args, **kwargs):
+        pytest.fail("branch-owned directories must not run isolation cleanup")
+
+    monkeypatch.setattr(HostRunner, "teardown", fail_runner_cleanup)
+    result = _run(
+        [
+            "teardown",
+            name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--delete-branch",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert stray.is_dir()
+    exists = git.remote_branch_exists if remote_only else git.local_branch_exists
+    assert exists(str(repo), branch)
+
+
+def test_teardown_stray_directory_rejects_hard_link_lock(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    tmp_path: Path,
+):
+    stray = Path(root) / "hard-link-lock"
+    lock_dir = Path(root) / ".locks"
+    stray.mkdir(parents=True)
+    lock_dir.mkdir()
+    outside_lock = tmp_path / "outside.lock"
+    outside_lock.write_text("keep outside lock contents\n")
+    try:
+        os.link(outside_lock, lock_dir / f"{stray.name}.lock")
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert outside_lock.read_text() == "keep outside lock contents\n"
+    assert stray.is_dir()
+
+
+def test_teardown_stray_directory_rejects_fifo_lock(
+    repo: Path,
+    root: str,
+    hermetic_config,
+):
+    stray = Path(root) / "fifo-lock"
+    lock_dir = Path(root) / ".locks"
+    stray.mkdir(parents=True)
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / f"{stray.name}.lock")
+
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert stray.is_dir()
 
 
 def test_teardown_exact_stray_takes_precedence_over_registered_substring(

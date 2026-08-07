@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import git
-from .models import is_slug, path_is_under, same_path, worktree_path, worktree_root
+from .models import derive_name, is_slug, path_is_under, same_path, worktree_path, worktree_root
 from .provision import NotFoundError, ProvisionError
 
 
@@ -140,9 +140,8 @@ def remove_exact_stray(repo: str, cand: Candidate) -> bool:
     try:
         if _identity(os.fstat(root_fd)) != stray.root_identity:
             return False
-        try:
-            current = os.stat(cand.name, dir_fd=root_fd, follow_symlinks=False)
-        except (FileNotFoundError, NotADirectoryError):
+        current = _exact_entry_stat(root_fd, cand.name)
+        if current is None:
             return False
         if not stat.S_ISDIR(current.st_mode) or _identity(current) != stray.target_identity:
             return False
@@ -150,14 +149,16 @@ def remove_exact_stray(repo: str, cand: Candidate) -> bool:
             return False
         if not shutil.rmtree.avoids_symlink_attacks:
             raise OSError("safe directory-relative removal is unavailable")
+        current = _exact_entry_stat(root_fd, cand.name)
+        if current is None or _identity(current) != stray.target_identity:
+            return False
         try:
             shutil.rmtree(cand.name, dir_fd=root_fd)
         except FileNotFoundError:
             return False
         except OSError:
-            try:
-                changed = os.stat(cand.name, dir_fd=root_fd, follow_symlinks=False)
-            except (FileNotFoundError, NotADirectoryError):
+            changed = _exact_entry_stat(root_fd, cand.name)
+            if changed is None:
                 return False
             if not stat.S_ISDIR(changed.st_mode) or _identity(changed) != stray.target_identity:
                 return False
@@ -175,12 +176,16 @@ def _stray_directory(root: Path, name: str) -> StrayDirectory | None:
         return None
     try:
         root_stat = os.fstat(root_fd)
-        target_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        target_stat = _exact_entry_stat(root_fd, name)
     except OSError:
         return None
     finally:
         os.close(root_fd)
-    if not stat.S_ISDIR(root_stat.st_mode) or not stat.S_ISDIR(target_stat.st_mode):
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or target_stat is None
+        or not stat.S_ISDIR(target_stat.st_mode)
+    ):
         return None
     return StrayDirectory(
         root=str(physical_root),
@@ -191,7 +196,20 @@ def _stray_directory(root: Path, name: str) -> StrayDirectory | None:
 
 def _stray_has_git_state(repo: str, stray: StrayDirectory, name: str) -> bool:
     target = Path(stray.root) / name
-    return git.local_branch_exists(repo, name) or git.worktree_registered(repo, str(target))
+    return git.worktree_registered(repo, str(target)) or any(
+        derive_name(branch) == name for branch in git.branch_names(repo)
+    )
+
+
+def _exact_entry_stat(directory_fd: int, name: str) -> os.stat_result | None:
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            if entry.name == name:
+                try:
+                    return entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    return None
+    return None
 
 
 def _open_directory(path: Path) -> int:
