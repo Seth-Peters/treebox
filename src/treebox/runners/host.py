@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 # globally) and the agent CLI (verified at launch) there is nothing
 # container-specific to check.
 _FACTS = RunnerFacts(preflight_detail="no container dependencies", login_required=True)
+_DRY_RUN_COLD_DIR = "treebox-cold-XXXXXXXX"
 
 
 class HostRunner:
@@ -99,14 +100,20 @@ class HostRunner:
             except StepError:
                 reporter.warn(f"setup hook step {i + 1} failed; continuing")
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
+    def dry_run_setup(self, wt: Worktree, *, cold: bool) -> list[str]:
         if self.config.setup_hook is not None:
             return [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
         # The worktree doesn't exist yet; detect from the source repo's manifests.
         ecos = ecosystems.detect(wt.repo)
         if not ecos:
             return ["# no package manifests — setup is a no-op"]
-        steps = ecosystems.setup_steps(ecos, self.config.caches, cold_cache_root=None)
+        cold_root = os.path.join(tempfile.gettempdir(), _DRY_RUN_COLD_DIR) if cold else None
+        steps = ecosystems.setup_steps(
+            ecos,
+            self.config.caches,
+            cold_cache_root=cold_root,
+            create_cache_dirs=False,
+        )
         return [" ".join(s.argv) for s in steps]
 
     def prepare_entry(self, wt: Worktree) -> None:

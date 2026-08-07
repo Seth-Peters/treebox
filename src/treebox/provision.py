@@ -137,6 +137,7 @@ def dry_run_plan(
     branch: str,
     base: str,
     fetch: bool,
+    cold: bool,
     existing_branch: bool = False,
 ) -> tuple[Worktree, list[str]]:
     """The exact git/runner commands ``create`` would run, without side effects.
@@ -173,7 +174,7 @@ def dry_run_plan(
     if git.has_gitmodules(repo):
         cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
-    cmds.extend(runner.dry_run_setup(wt))
+    cmds.extend(runner.dry_run_setup(wt, cold=cold))
     return wt, cmds
 
 

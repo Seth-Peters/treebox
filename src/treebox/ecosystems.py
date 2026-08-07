@@ -142,7 +142,11 @@ class SetupStep:
 
 
 def _cache_dir_for(
-    eco: Ecosystem, caches: dict[str, str], cold_cache_root: str | None
+    eco: Ecosystem,
+    caches: dict[str, str],
+    cold_cache_root: str | None,
+    *,
+    create: bool = True,
 ) -> str | None:
     """Resolve (and create) the cache dir feeding ``eco``'s setup.
 
@@ -160,7 +164,8 @@ def _cache_dir_for(
     if not cache_dir:
         return None
     cache_path = expand_user(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
+    if create:
+        cache_path.mkdir(parents=True, exist_ok=True)
     return str(cache_path)
 
 
@@ -169,6 +174,7 @@ def setup_steps(
     caches: dict[str, str],
     *,
     cold_cache_root: str | None,
+    create_cache_dirs: bool = True,
 ) -> list[SetupStep]:
     """Build cache-backed setup commands.
 
@@ -180,7 +186,12 @@ def setup_steps(
     for eco in ecosystems:
         argv = list(eco.command)
         env: dict[str, str] = {}
-        cache_dir = _cache_dir_for(eco, caches, cold_cache_root)
+        cache_dir = _cache_dir_for(
+            eco,
+            caches,
+            cold_cache_root,
+            create=create_cache_dirs,
+        )
         if cache_dir:
             if eco.cache_env_var:
                 env[eco.cache_env_var] = cache_dir

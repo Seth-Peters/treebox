@@ -718,8 +718,8 @@ class DockerRunner:
 
     # --- launch / teardown ---------------------------------------------------
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
-        config = self._merged_config(wt, cold=False)
+    def dry_run_setup(self, wt: Worktree, *, cold: bool) -> list[str]:
+        config = self._merged_config(wt, cold=cold)
         cmds = [
             f"# render {self.config.template} template into {self._config_dir(wt)} "
             "(operator-owned, outside the worktree)",

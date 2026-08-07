@@ -1458,14 +1458,15 @@ def test_docker_rejects_unknown_template_keys(
         runner._merged_config(_boxed_worktree(tmp_path), cold=True)
 
 
-def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir):
+@pytest.mark.parametrize("cold", [False, True])
+def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, cold: bool):
     """--dry-run must change nothing: rendering the plan may not create the
     configured cache directories (that happens in setup, before docker run)."""
     cache = tmp_path / "not-yet" / "uv"
     runner = DockerRunner(Config(isolation="docker", caches={"uv": str(cache)}))
     wt = _boxed_worktree(tmp_path)
 
-    cmds = runner.dry_run_setup(wt)
+    cmds = runner.dry_run_setup(wt, cold=cold)
 
     assert not cache.exists()
     assert any(c.startswith("docker build") for c in cmds)
@@ -2787,6 +2788,19 @@ def test_registry_vocabularies_cannot_drift():
     assert set(VALID_HARNESSES) == set(get_args(config.Harness))
 
 
+def test_runner_dry_run_setup_protocol_cannot_drift():
+    """Every runner must accept the cold choice as a required keyword."""
+    from inspect import Parameter, signature
+
+    from treebox.runners import DockerRunner, HostRunner, Runner
+
+    for owner in (Runner, HostRunner, DockerRunner):
+        params = signature(owner.dry_run_setup).parameters
+        assert tuple(params) == ("self", "wt", "cold")
+        assert params["cold"].kind is Parameter.KEYWORD_ONLY
+        assert params["cold"].default is Parameter.empty
+
+
 def test_runner_facts_pin_doctor_vocabulary():
     """Doctor's per-runner strings and login gate come from RunnerFacts: the
     host runner hard-requires a subscription login (the agent runs with the
@@ -3661,16 +3675,40 @@ def test_host_dry_run_setup_lists_ecosystem_commands(tmp_path: Path):
     repo.mkdir()
     (repo / "uv.lock").write_text("")
     wt = Worktree(str(repo), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    assert HostRunner(Config()).dry_run_setup(wt) == ["uv sync"]
+    assert HostRunner(Config()).dry_run_setup(wt, cold=False) == ["uv sync"]
 
     empty = tmp_path / "bare"
     empty.mkdir()
     bare_wt = Worktree(str(empty), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt)
+    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt, cold=False)
     assert plan.startswith("#") and "no-op" in plan
 
     hooked = HostRunner(Config(setup_hook=["echo hi"]))
-    assert hooked.dry_run_setup(wt) == ["sh -c 'echo hi'"]
+    assert hooked.dry_run_setup(wt, cold=False) == ["sh -c 'echo hi'"]
+
+
+def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(tmp_path: Path):
+    """Cold planning shows its isolated store, stays stable, and writes nothing."""
+    import tempfile
+
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    shared = tmp_path / "shared" / "pnpm"
+    wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
+    runner = HostRunner(Config(caches={"pnpm": str(shared)}))
+
+    warm = runner.dry_run_setup(wt, cold=False)
+    cold = runner.dry_run_setup(wt, cold=True)
+
+    expected_cold = str(Path(tempfile.gettempdir()) / "treebox-cold-XXXXXXXX" / "pnpm")
+    assert warm == [f"pnpm install --frozen-lockfile --store-dir {shared}"]
+    assert cold == [f"pnpm install --frozen-lockfile --store-dir {expected_cold}"]
+    assert cold == runner.dry_run_setup(wt, cold=True)
+    assert not shared.exists()
+    assert not Path(expected_cold).exists()
 
 
 def test_worktree_status_missing_row_never_shells_out():
