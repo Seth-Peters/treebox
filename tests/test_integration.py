@@ -2731,6 +2731,8 @@ def test_host_dry_run_detects_manifests_from_planned_revision(
     monkeypatch.setenv("TREEBOX_CONFIG", str(config))
     _git(repo, "checkout", "dev")
     (repo / "uv.lock").unlink()
+    (repo / "uv.lock").mkdir()
+    (repo / "uv.lock" / "not-a-lockfile").write_text("directory entry\n")
     (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     (repo / "package.json").write_text('{"name":"planned-revision","private":true}\n')
     _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")

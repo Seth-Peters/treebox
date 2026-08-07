@@ -1476,9 +1476,12 @@ def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, col
     assert any(c.startswith("docker run") for c in cmds)
 
 
-def test_docker_cold_dry_run_reports_reused_container_cache_mounts(tmp_path: Path, fake_common_dir):
+def test_docker_cold_dry_run_reports_orphaned_container_cache_mounts(
+    tmp_path: Path, fake_common_dir
+):
     cfg = Config(isolation="docker")
     wt = _boxed_worktree(tmp_path)
+    wt.path.rmdir()
     fake = _FakeDocker(
         ids="abc123\n",
         name=DockerRunner(cfg)._slug(wt),
@@ -2009,6 +2012,24 @@ def test_git_argv_uses_end_of_options_separator(monkeypatch: pytest.MonkeyPatch)
     assert local[-3:] == ["--", "/wt", "b"]
     assert new[-5:] == ["-b", "b", "--", "/wt", "--detach"]
     assert delete[-2:] == ["--", "b"]
+
+
+def test_files_at_revision_excludes_trees_and_gitlinks(monkeypatch: pytest.MonkeyPatch):
+    from treebox import git
+
+    monkeypatch.setattr(
+        git,
+        "_run",
+        lambda args: (
+            "100644 blob 1111111111111111111111111111111111111111\tuv.lock\n"
+            "040000 tree 2222222222222222222222222222222222222222\tpackage-lock.json\n"
+            "160000 commit 3333333333333333333333333333333333333333\tCargo.lock\n"
+        ),
+    )
+
+    assert git.files_at_revision(
+        "/repo", "dev", ("uv.lock", "package-lock.json", "Cargo.lock")
+    ) == {"uv.lock"}
 
 
 def test_state_provisioned_roundtrips(tmp_path, monkeypatch):

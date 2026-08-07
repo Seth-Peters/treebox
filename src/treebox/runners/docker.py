@@ -738,7 +738,7 @@ class DockerRunner:
             "(the live ~/.claude / ~/.codex are never mounted)",
         ]
         existing: tuple[str, ContainerState] | None = None
-        if cold and wt.path.exists():
+        if cold:
             if not self._available():
                 cmds.append(
                     "# existing Docker container state is unavailable; real setup may "
