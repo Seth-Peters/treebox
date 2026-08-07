@@ -723,7 +723,13 @@ class DockerRunner:
 
     # --- launch / teardown ---------------------------------------------------
 
-    def dry_run_setup(self, wt: Worktree, *, cold: bool) -> list[str]:
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
         config = self._merged_config(wt, cold=cold)
         cmds = [
             f"# render {self.config.template} template into {self._config_dir(wt)} "

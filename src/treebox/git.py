@@ -573,6 +573,22 @@ def resolve_branch(repo: str | Path, name: str, base: str) -> BranchPlan:
     return BranchPlan("new", name, start)
 
 
+def files_at_revision(
+    repo: str | Path,
+    revision: str,
+    paths: tuple[str, ...],
+) -> set[str]:
+    """Return requested root paths present in ``revision`` without checkout.
+
+    Dry-run setup uses this read-only tree query so its package-manager plan
+    matches the revision that ``worktree add`` will materialize.
+    """
+    if not paths:
+        return set()
+    out = _run(["-C", str(repo), "ls-tree", "--name-only", revision, "--", *paths])
+    return set(out.splitlines())
+
+
 def worktree_add(repo: str | Path, worktree: str | Path, plan: BranchPlan) -> None:
     args = ["-C", str(repo), "worktree", "add"]
     # "--" so a flag-shaped path/ref is always parsed as an operand.

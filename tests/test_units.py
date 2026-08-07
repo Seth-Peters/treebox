@@ -1469,7 +1469,7 @@ def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, col
     )
     wt = _boxed_worktree(tmp_path)
 
-    cmds = runner.dry_run_setup(wt, cold=cold)
+    cmds = runner.dry_run_setup(wt, cold=cold, source_ref=None)
 
     assert not cache.exists()
     assert any(c.startswith("docker build") for c in cmds)
@@ -1485,7 +1485,7 @@ def test_docker_cold_dry_run_reports_reused_container_cache_mounts(tmp_path: Pat
         running=True,
     )
 
-    cmds = DockerRunner(cfg, docker=fake).dry_run_setup(wt, cold=True)
+    cmds = DockerRunner(cfg, docker=fake).dry_run_setup(wt, cold=True, source_ref=None)
 
     assert any("creation-time cache mounts" in command for command in cmds)
     assert any("reuse existing container abc123" in command for command in cmds)
@@ -1500,7 +1500,7 @@ def test_docker_cold_dry_run_reports_unavailable_existing_container_state(
         docker=_FakeDocker(info_rc=1),
     )
 
-    cmds = runner.dry_run_setup(_boxed_worktree(tmp_path), cold=True)
+    cmds = runner.dry_run_setup(_boxed_worktree(tmp_path), cold=True, source_ref=None)
 
     assert any("container state is unavailable" in command for command in cmds)
     assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
@@ -2829,9 +2829,11 @@ def test_runner_dry_run_setup_protocol_cannot_drift():
 
     for owner in (Runner, HostRunner, DockerRunner):
         params = signature(owner.dry_run_setup).parameters
-        assert tuple(params) == ("self", "wt", "cold")
+        assert tuple(params) == ("self", "wt", "cold", "source_ref")
         assert params["cold"].kind is Parameter.KEYWORD_ONLY
         assert params["cold"].default is Parameter.empty
+        assert params["source_ref"].kind is Parameter.KEYWORD_ONLY
+        assert params["source_ref"].default is Parameter.empty
 
 
 def test_runner_facts_pin_doctor_vocabulary():
@@ -3708,16 +3710,33 @@ def test_host_dry_run_setup_lists_ecosystem_commands(tmp_path: Path):
     repo.mkdir()
     (repo / "uv.lock").write_text("")
     wt = Worktree(str(repo), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    assert HostRunner(Config()).dry_run_setup(wt, cold=False) == ["uv sync"]
+    assert HostRunner(Config()).dry_run_setup(wt, cold=False, source_ref=None) == ["uv sync"]
 
     empty = tmp_path / "bare"
     empty.mkdir()
     bare_wt = Worktree(str(empty), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt, cold=False)
+    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt, cold=False, source_ref=None)
     assert plan.startswith("#") and "no-op" in plan
 
     hooked = HostRunner(Config(setup_hook=["echo hi"]))
-    assert hooked.dry_run_setup(wt, cold=False) == ["sh -c 'echo hi'"]
+    assert hooked.dry_run_setup(wt, cold=False, source_ref=None) == ["sh -c 'echo hi'"]
+
+
+def test_host_dry_run_setup_uses_resumed_worktree_manifests(tmp_path: Path):
+    """A resumed create plans setup from its existing worktree, not the repo HEAD."""
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("")
+    wt_path = tmp_path / "wts" / "wt"
+    wt_path.mkdir(parents=True)
+    (wt_path / "Cargo.lock").write_text("")
+    wt = Worktree(str(repo), "wt", "wt", "main", wt_path)
+
+    commands = HostRunner(Config()).dry_run_setup(wt, cold=False, source_ref=None)
+
+    assert commands == ["cargo fetch"]
 
 
 def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(
@@ -3737,13 +3756,13 @@ def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(
         lambda: pytest.fail("dry-run probed the temporary directory"),
     )
 
-    warm = runner.dry_run_setup(wt, cold=False)
-    cold = runner.dry_run_setup(wt, cold=True)
+    warm = runner.dry_run_setup(wt, cold=False, source_ref=None)
+    cold = runner.dry_run_setup(wt, cold=True, source_ref=None)
 
     expected_cold = "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm"
     assert warm == [f"pnpm install --frozen-lockfile --store-dir {shared}"]
     assert cold == [f"pnpm install --frozen-lockfile --store-dir '{expected_cold}'"]
-    assert cold == runner.dry_run_setup(wt, cold=True)
+    assert cold == runner.dry_run_setup(wt, cold=True, source_ref=None)
     assert not shared.exists()
 
 
@@ -3772,8 +3791,8 @@ def test_host_cold_dry_run_renders_environment_cache_routing(
     wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
     runner = HostRunner(Config(caches={cache_name: str(shared)}))
 
-    assert runner.dry_run_setup(wt, cold=False) == [command]
-    assert runner.dry_run_setup(wt, cold=True) == [
+    assert runner.dry_run_setup(wt, cold=False, source_ref=None) == [command]
+    assert runner.dry_run_setup(wt, cold=True, source_ref=None) == [
         f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{cache_name}' {command}"
     ]
     assert not shared.exists()
@@ -3786,8 +3805,8 @@ def test_host_cold_dry_run_renders_setup_hook_cache_environment(tmp_path: Path):
     runner = HostRunner(Config(caches=shared, setup_hook=["echo hi"]))
     wt = Worktree("/repo", "wt", "wt", "main", tmp_path / "wts" / "wt")
 
-    assert runner.dry_run_setup(wt, cold=False) == ["sh -c 'echo hi'"]
-    (cold,) = runner.dry_run_setup(wt, cold=True)
+    assert runner.dry_run_setup(wt, cold=False, source_ref=None) == ["sh -c 'echo hi'"]
+    (cold,) = runner.dry_run_setup(wt, cold=True, source_ref=None)
     for name, env_var in (
         ("uv", "UV_CACHE_DIR"),
         ("npm", "npm_config_cache"),

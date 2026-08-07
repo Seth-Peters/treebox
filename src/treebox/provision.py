@@ -158,6 +158,7 @@ def dry_run_plan(
         _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
         _check_base_exists(repo, base=base, existing_branch=existing_branch)
     cmds: list[str] = []
+    source_ref: str | None = None
     if resuming:
         cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
     else:
@@ -166,8 +167,10 @@ def dry_run_plan(
         plan = git.resolve_branch(repo, branch, base)
         if plan.kind == "local":
             cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
+            source_ref = plan.name
         else:
             cmds.append(f"git -C {repo} worktree add -b {plan.name} {wt.path} {plan.start_point}")
+            source_ref = plan.start_point
     cmds.append(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
@@ -175,7 +178,7 @@ def dry_run_plan(
     if git.has_gitmodules(repo):
         cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
-    cmds.extend(runner.dry_run_setup(wt, cold=cold))
+    cmds.extend(runner.dry_run_setup(wt, cold=cold, source_ref=source_ref))
     return wt, cmds
 
 

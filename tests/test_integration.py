@@ -534,7 +534,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         def refresh(self, wt, *, reporter):
             calls.append("refresh")
 
-        def dry_run_setup(self, wt, *, cold):
+        def dry_run_setup(self, wt, *, cold, source_ref):
             return []
 
         def entry_command(self, wt, *, harness, args):
@@ -2554,6 +2554,26 @@ def _configure_pnpm_dry_run(
     (repo / "uv.lock").unlink()
     (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     (repo / "package.json").write_text('{"name":"cold-dry-run","private":true}\n')
+    _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-m",
+            "test: use pnpm fixture",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    pushed = _git(repo, "push", "origin", "main")
+    assert pushed.returncode == 0, pushed.stderr
     caches = {
         name: str(tmp_path / "shared" / name) for name in ("uv", "pnpm", "npm", "go", "cargo")
     }
@@ -2691,6 +2711,76 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             assert f"{env_var}=/caches/{name}" not in cold_run
     assert not root.exists()
     assert not (tmp_path / "shared").exists()
+
+
+@pytest.mark.parametrize("checkout", [False, True])
+def test_host_dry_run_detects_manifests_from_planned_revision(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: bool,
+):
+    """Setup planning reads the tree that create will check out, not current HEAD."""
+    caches = {
+        name: str(tmp_path / "shared" / name) for name in ("uv", "pnpm", "npm", "go", "cargo")
+    }
+    config = tmp_path / "planned-revision.toml"
+    config.write_text(
+        "[caches]\n" + "".join(f"{name} = {json.dumps(path)}\n" for name, path in caches.items())
+    )
+    monkeypatch.setenv("TREEBOX_CONFIG", str(config))
+    _git(repo, "checkout", "dev")
+    (repo / "uv.lock").unlink()
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (repo / "package.json").write_text('{"name":"planned-revision","private":true}\n')
+    _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-m",
+            "test: use pnpm on dev",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    pushed = _git(repo, "push", "origin", "dev")
+    assert pushed.returncode == 0, pushed.stderr
+    _git(repo, "checkout", "main")
+    # Restore the current checkout's uv-only tree. The helper changed files in
+    # dev before committing them, but main must stay different for this test.
+    assert (repo / "uv.lock").is_file()
+    assert not (repo / "pnpm-lock.yaml").exists()
+
+    args = [
+        "create",
+        "planned-revision",
+        "--repo",
+        str(repo),
+        "--root",
+        str(tmp_path / "wts"),
+        "--dry-run",
+        "--json",
+        "--no-fetch",
+    ]
+    if checkout:
+        args += ["--checkout", "dev"]
+    else:
+        args += ["--base", "dev"]
+
+    result = _run(args)
+
+    assert result.exit_code == 0, result.output
+    commands = json.loads(result.stdout)["commands"]
+    assert commands[-1] == f"pnpm install --frozen-lockfile --store-dir {caches['pnpm']}"
+    assert "uv sync" not in commands
 
 
 def test_template_flag_reaches_the_docker_runner(

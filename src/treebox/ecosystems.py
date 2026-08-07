@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import git
 from .models import expand_user
 
 # Root under which shared host caches are bind-mounted inside the sandbox container.
@@ -123,15 +124,25 @@ ECOSYSTEMS: tuple[Ecosystem, ...] = (
 )
 
 
-def detect(worktree: str | Path) -> list[Ecosystem]:
-    """Active ecosystems, in a stable order. pnpm wins over npm when both
-    lockfiles exist (pnpm-lock.yaml present implies a pnpm project)."""
-    root = Path(worktree)
-    found = [eco for eco in ECOSYSTEMS if any((root / lf).is_file() for lf in eco.lockfiles)]
+def _detect(present: Callable[[str], bool]) -> list[Ecosystem]:
+    found = [eco for eco in ECOSYSTEMS if any(present(lf) for lf in eco.lockfiles)]
     names = {e.name for e in found}
     if "pnpm" in names and "npm" in names:
         found = [e for e in found if e.name != "npm"]
     return found
+
+
+def detect(worktree: str | Path) -> list[Ecosystem]:
+    """Active ecosystems in a filesystem tree, in stable order."""
+    root = Path(worktree)
+    return _detect(lambda lockfile: (root / lockfile).is_file())
+
+
+def detect_revision(repo: str | Path, revision: str) -> list[Ecosystem]:
+    """Active ecosystems in a Git revision, without checking it out."""
+    lockfiles = tuple(lockfile for eco in ECOSYSTEMS for lockfile in eco.lockfiles)
+    present = git.files_at_revision(repo, revision, lockfiles)
+    return _detect(present.__contains__)
 
 
 @dataclass

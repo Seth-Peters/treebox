@@ -123,12 +123,20 @@ class Runner(Protocol):
         lockfile-hash skip that gates ``setup`` — auth is not a cache."""
         ...
 
-    def dry_run_setup(self, wt: Worktree, *, cold: bool) -> list[str]:
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
         """The setup commands this runner *would* run, for ``--dry-run``.
 
         ``wt`` may not exist on disk yet (``create --dry-run``); runners that
-        need repository context read ``wt.repo``. ``cold`` must select the same
-        cache isolation as ``setup`` without creating its disposable cache."""
+        need repository context read ``wt.repo``. ``source_ref`` is the Git
+        revision a new worktree will use; ``None`` means a resumed worktree at
+        ``wt.path``. ``cold`` must select the same cache isolation as ``setup``
+        without creating its disposable cache."""
         ...
 
     def prepare_entry(self, wt: Worktree) -> None:

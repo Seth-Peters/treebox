@@ -105,7 +105,13 @@ class HostRunner:
             except StepError:
                 reporter.warn(f"setup hook step {i + 1} failed; continuing")
 
-    def dry_run_setup(self, wt: Worktree, *, cold: bool) -> list[str]:
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
         if self.config.setup_hook is not None:
             commands = [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
             if not cold:
@@ -116,8 +122,14 @@ class HostRunner:
                 create_cache_dirs=False,
             )
             return [_render_cache_env(command, env) for command in commands]
-        # The worktree doesn't exist yet; detect from the source repo's manifests.
-        ecos = ecosystems.detect(wt.repo)
+        # A new worktree may come from a different --base/--checkout revision
+        # than the current repo checkout. A resumed worktree already has the
+        # exact tree that real setup will inspect.
+        if source_ref is not None:
+            ecos = ecosystems.detect_revision(wt.repo, source_ref)
+        else:
+            source = wt.path if wt.path.exists() else wt.repo
+            ecos = ecosystems.detect(source)
         if not ecos:
             return ["# no package manifests — setup is a no-op"]
         steps = ecosystems.setup_steps(
