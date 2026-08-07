@@ -11,6 +11,7 @@ for enter/teardown.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -984,14 +985,15 @@ def test_teardown_corrupt_worktree_force_removes_without_touching_main(repo: Pat
     assert not any(Path(item.path).name == "corrupt-force" for item in git.worktree_list(str(repo)))
 
 
-def test_teardown_corrupt_worktree_uses_recorded_runner(
+def test_teardown_registered_corrupt_worktree_uses_recorded_runner(
     repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """The recorded isolation mode survives a corrupt .git pointer: teardown
-    recovers it from git's own registration and drives the recorded runner,
-    instead of resolving state through the missing pointer, reading none, and
-    silently tearing a docker worktree down with the config-default runner -
-    leaking the container while reporting it cleaned."""
+    """A registered corrupt worktree is not an untrusted stray directory.
+
+    Its recorded isolation mode survives a missing .git pointer. Teardown gets
+    it from Git's registration and uses the recorded runner. It must not use the
+    exact-directory recovery path, which always skips runner cleanup.
+    """
     from treebox.runners import RunnerTeardownResult
     from treebox.runners.docker import DockerRunner
 
@@ -1013,6 +1015,7 @@ def test_teardown_corrupt_worktree_uses_recorded_runner(
     assert calls == ["corrupt-docker"]  # DockerRunner.teardown was invoked
     (record,) = json.loads(res.stdout)["worktrees"]
     assert record["container"] == "cleaned"
+    assert record["branch"] == "corrupt-docker"
     assert not wt.exists()
 
 
@@ -1662,6 +1665,531 @@ def test_create_refuse_hint_points_to_teardown_and_prune(repo: Path, root: str, 
     hint = json.loads(res.stderr)["error"]["hint"]
     assert "treebox teardown leftover" in hint
     assert "worktree prune" in hint
+
+
+def test_teardown_stray_directory_json_completes_create_recovery(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The SLUG_CONFLICT hint gives a complete create-teardown-create path."""
+    from treebox import git
+    from treebox.runners.host import HostRunner
+
+    base = ["--repo", str(repo), "--root", root]
+    stray = Path(root) / "stray-recovery"
+    stray.mkdir(parents=True)
+    (stray / "unfinished.txt").write_text("left by an interrupted operation\n")
+    _git(repo, "branch", "unrelated-keep")
+    branches_before = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout
+
+    conflict = _run(["create", "stray-recovery", *base, "--print", "--json"])
+    assert conflict.exit_code == 5
+    assert json.loads(conflict.stderr)["error"]["code"] == "SLUG_CONFLICT"
+
+    def fail_runner_cleanup(*args, **kwargs):
+        pytest.fail("stray-directory teardown must not run isolation cleanup")
+
+    monkeypatch.setattr(HostRunner, "teardown", fail_runner_cleanup)
+    removed = _run(
+        [
+            "teardown",
+            "stray-recovery",
+            *base,
+            "--force",
+            "--delete-branch",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+    assert removed.exit_code == 0, removed.output
+    payload = json.loads(removed.stdout)
+    assert payload["schemaVersion"] == SCHEMA_VERSION == 1
+    assert payload["worktrees"] == [
+        {
+            "name": "stray-recovery",
+            "branch": None,
+            "worktree_path": str(stray),
+            "removed": True,
+            "branch_deleted": False,
+            "container": "skipped",
+            "volumes_removed": False,
+        }
+    ]
+    assert not stray.exists()
+    assert _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout == (
+        branches_before
+    )
+
+    recreated = _run(["create", "stray-recovery", *base, "--print"])
+    assert recreated.exit_code == 0, recreated.output
+    assert git.branch_for_path(str(repo), str(stray)) == "stray-recovery"
+
+
+def test_teardown_stray_directory_needs_confirmation(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A stray directory stays until the user confirms or passes --force."""
+    from treebox import cli
+
+    base = ["--repo", str(repo), "--root", root]
+    stray = Path(root) / "confirm-stray"
+    stray.mkdir(parents=True)
+
+    noninteractive = _run(["teardown", "confirm-stray", *base, "--json"])
+    assert noninteractive.exit_code == 5
+    assert json.loads(noninteractive.stderr)["error"]["code"] == "NEEDS_CONFIRMATION"
+    assert stray.is_dir()
+
+    monkeypatch.setattr(cli, "_stdin_isatty", lambda: True)
+    declined = runner.invoke(
+        app,
+        ["teardown", "confirm-stray", *base],
+        input="n\n",
+        catch_exceptions=False,
+    )
+    assert declined.exit_code == 1
+    assert "Remove worktree confirm-stray?" in declined.output
+    assert stray.is_dir()
+
+    confirmed = runner.invoke(
+        app,
+        ["teardown", "confirm-stray", *base],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert confirmed.exit_code == 0, confirmed.output
+    assert "unregistered directory" in confirmed.stderr
+    assert not stray.exists()
+
+
+def test_teardown_stray_directory_requires_safe_exact_leaf(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    tmp_path: Path,
+):
+    """Stray recovery does not use substrings, nested refs, or symlinks."""
+    base = ["--repo", str(repo), "--root", root, "--force", "--json"]
+    exact = Path(root) / "exact-target"
+    nested = Path(root) / "nested" / "child"
+    outside = tmp_path / "outside-target"
+    exact.mkdir(parents=True)
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("must stay\n")
+    linked = Path(root) / "linked-target"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    for ref in ("exact", "nested/child", "../outside-target", "linked-target"):
+        result = _run(["teardown", ref, *base])
+        assert result.exit_code == 3, (ref, result.output)
+        assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+
+    assert exact.is_dir()
+    assert nested.is_dir()
+    assert linked.is_symlink()
+    assert marker.read_text() == "must stay\n"
+
+
+def test_teardown_stray_directory_requires_exact_entry_spelling(
+    repo: Path,
+    root: str,
+    hermetic_config,
+):
+    actual = Path(root) / "Case-Target"
+    actual.mkdir(parents=True)
+
+    result = _run(
+        [
+            "teardown",
+            "case-target",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert actual.is_dir()
+
+
+def test_teardown_stray_directory_rechecks_exact_entry_spelling(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from treebox import resolve
+
+    stray = Path(root) / "case-race"
+    renamed = Path(root) / "Case-Race"
+    stray.mkdir(parents=True)
+    original_remove = resolve.remove_exact_stray
+
+    def change_spelling(repo_path, cand):
+        stray.rename(renamed)
+        return original_remove(repo_path, cand)
+
+    monkeypatch.setattr(resolve, "remove_exact_stray", change_spelling)
+    result = _run(
+        [
+            "teardown",
+            "case-race",
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert renamed.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("branch", "name", "remote_only"),
+    [
+        ("owned-exact", "owned-exact", False),
+        ("treebox/owned-placeholder", "owned-placeholder", False),
+        ("feature/owned-slash", "feature--owned-slash", False),
+        ("owned-remote", "owned-remote", True),
+    ],
+)
+def test_teardown_stray_directory_refuses_related_branch(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    name: str,
+    remote_only: bool,
+):
+    from treebox import git
+    from treebox.runners.host import HostRunner
+
+    created = _git(repo, "branch", branch)
+    assert created.returncode == 0, created.stderr
+    if remote_only:
+        pushed = _git(repo, "push", "origin", branch)
+        assert pushed.returncode == 0, pushed.stderr
+        deleted = _git(repo, "branch", "-D", branch)
+        assert deleted.returncode == 0, deleted.stderr
+        assert git.remote_branch_exists(str(repo), branch)
+
+    stray = Path(root) / name
+    stray.mkdir(parents=True)
+
+    def fail_runner_cleanup(*args, **kwargs):
+        pytest.fail("branch-owned directories must not run isolation cleanup")
+
+    monkeypatch.setattr(HostRunner, "teardown", fail_runner_cleanup)
+    result = _run(
+        [
+            "teardown",
+            name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--delete-branch",
+            "--remove-volumes",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert stray.is_dir()
+    exists = git.remote_branch_exists if remote_only else git.local_branch_exists
+    assert exists(str(repo), branch)
+
+
+def test_teardown_stray_directory_rejects_hard_link_lock(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    tmp_path: Path,
+):
+    stray = Path(root) / "hard-link-lock"
+    lock_dir = Path(root) / ".locks"
+    stray.mkdir(parents=True)
+    lock_dir.mkdir()
+    outside_lock = tmp_path / "outside.lock"
+    outside_lock.write_text("keep outside lock contents\n")
+    try:
+        os.link(outside_lock, lock_dir / f"{stray.name}.lock")
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert outside_lock.read_text() == "keep outside lock contents\n"
+    assert stray.is_dir()
+
+
+def test_teardown_stray_directory_rejects_fifo_lock(
+    repo: Path,
+    root: str,
+    hermetic_config,
+):
+    stray = Path(root) / "fifo-lock"
+    lock_dir = Path(root) / ".locks"
+    stray.mkdir(parents=True)
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / f"{stray.name}.lock")
+
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert stray.is_dir()
+
+
+def test_teardown_exact_stray_takes_precedence_over_registered_substring(
+    repo: Path,
+    root: str,
+    hermetic_config,
+):
+    """An exact stray name never selects a registered substring match."""
+    base = ["--repo", str(repo), "--root", root]
+    registered = Path(root) / "foobar"
+    created = _run(["create", "foobar", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    stray = Path(root) / "foo"
+    stray.mkdir()
+
+    removed = _run(["teardown", "foo", *base, "--force", "--json"])
+
+    assert removed.exit_code == 0, removed.output
+    (record,) = json.loads(removed.stdout)["worktrees"]
+    assert record["name"] == "foo"
+    assert record["worktree_path"] == str(stray)
+    assert not stray.exists()
+    assert registered.is_dir()
+
+
+def test_teardown_stray_directory_never_inspects_git_dirtiness(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A stale linked-worktree pointer does not make a stray directory trusted."""
+    from treebox import cli, git
+
+    base = ["--repo", str(repo), "--root", root]
+    donor = Path(root) / "pointer-donor"
+    stray = Path(root) / "stale-pointer"
+    created = _run(["create", "pointer-donor", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    stray.mkdir()
+    (stray / ".git").write_text((donor / ".git").read_text())
+
+    def fail_dirty(path):
+        pytest.fail(f"git dirtiness was inspected in {path}")
+
+    monkeypatch.setattr(git, "is_dirty", fail_dirty)
+    monkeypatch.setattr(cli, "_stdin_isatty", lambda: True)
+    removed = runner.invoke(
+        app,
+        ["teardown", "stale-pointer", *base],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert removed.exit_code == 0, removed.output
+    assert donor.is_dir()
+    assert not stray.exists()
+
+
+def test_teardown_stray_directory_keeps_confirmed_root_identity(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """Replacing the configured root cannot redirect confirmed deletion."""
+    from treebox import resolve
+
+    root_path = Path(root)
+    stray = root_path / "root-race"
+    stray.mkdir(parents=True)
+    original_marker = stray / "original.txt"
+    original_marker.write_text("keep original\n")
+    outside_root = tmp_path / "outside-root"
+    outside_stray = outside_root / stray.name
+    outside_stray.mkdir(parents=True)
+    outside_marker = outside_stray / "outside.txt"
+    outside_marker.write_text("keep outside\n")
+    moved_root = tmp_path / "moved-root"
+    original_remove = resolve.remove_exact_stray
+
+    def replace_root(repo_path, cand):
+        root_path.rename(moved_root)
+        root_path.symlink_to(outside_root, target_is_directory=True)
+        return original_remove(repo_path, cand)
+
+    monkeypatch.setattr(resolve, "remove_exact_stray", replace_root)
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert (moved_root / stray.name / original_marker.name).read_text() == "keep original\n"
+    assert outside_marker.read_text() == "keep outside\n"
+
+
+def test_teardown_stray_directory_pins_root_before_lock_write(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """A changed root is rejected before a stray lock writes outside it."""
+    from contextlib import contextmanager
+
+    from treebox import locking
+
+    root_path = Path(root)
+    stray = root_path / "lock-root-race"
+    stray.mkdir(parents=True)
+    moved_root = tmp_path / "moved-lock-root"
+    outside_root = tmp_path / "outside-lock-root"
+    outside_root.mkdir()
+    outside_stray = outside_root / stray.name
+    outside_stray.mkdir()
+    original_lock = locking.worktree_lock_at
+
+    @contextmanager
+    def replace_root_before_lock(root_arg, identity, name):
+        root_path.rename(moved_root)
+        root_path.symlink_to(outside_root, target_is_directory=True)
+        with original_lock(root_arg, identity, name):
+            yield
+
+    monkeypatch.setattr(locking, "worktree_lock_at", replace_root_before_lock)
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert (moved_root / stray.name).is_dir()
+    assert outside_stray.is_dir()
+    assert not (outside_root / ".locks").exists()
+
+
+@pytest.mark.parametrize("claim", ["branch", "registration"])
+def test_teardown_stray_directory_rechecks_git_state_after_lock(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    claim: str,
+):
+    """Git state created after resolution stops unregistered recovery."""
+    from treebox import git, resolve
+
+    stray = Path(root) / f"claimed-by-{claim}"
+    stray.mkdir(parents=True)
+    original_remove = resolve.remove_exact_stray
+    registration_checks = 0
+
+    if claim == "registration":
+
+        def registered_after_resolution(repo_path, path):
+            nonlocal registration_checks
+            registration_checks += 1
+            return registration_checks > 1
+
+        monkeypatch.setattr(git, "worktree_registered", registered_after_resolution)
+
+    def claim_target(repo_path, cand):
+        if claim == "branch":
+            made = _git(repo, "branch", cand.name)
+            assert made.returncode == 0, made.stderr
+        return original_remove(repo_path, cand)
+
+    monkeypatch.setattr(resolve, "remove_exact_stray", claim_target)
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert stray.is_dir()
+    if claim == "branch":
+        assert git.local_branch_exists(str(repo), stray.name)
+    else:
+        assert registration_checks == 2
 
 
 def test_create_self_heals_stale_registration_from_interrupted_teardown(

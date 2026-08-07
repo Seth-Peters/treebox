@@ -204,6 +204,26 @@ def remote_branch_exists(repo: str | Path, name: str) -> bool:
     return _ref_exists(repo, f"refs/remotes/origin/{name}")
 
 
+def branch_names(repo: str | Path) -> set[str]:
+    out = _run(
+        [
+            "-C",
+            str(repo),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ]
+    )
+    names: set[str] = set()
+    for ref in out.splitlines():
+        if ref.startswith("refs/heads/"):
+            names.add(ref.removeprefix("refs/heads/"))
+        elif ref.startswith("refs/remotes/origin/"):
+            names.add(ref.removeprefix("refs/remotes/origin/"))
+    return names
+
+
 def _ref_exists(repo: str | Path, ref: str) -> bool:
     proc = _spawn(
         _git(["-C", str(repo), "show-ref", "--verify", "--quiet", ref]),

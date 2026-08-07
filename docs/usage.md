@@ -93,11 +93,12 @@ treebox create fix-auth --isolation docker
 | `--json`         | Provision, then print a JSON result instead of launching.                 |
 
 A name that already exists is a loud conflict (exit `5`,
-`error.code: "SLUG_CONFLICT"`) with the ways out — `enter` it, `teardown` it,
-or pick another name. It is never silently reused. If a previous `create` died
-after registering the worktree but before setup completed, running the same
-`create` again finishes setup instead; a fully provisioned same-name worktree
-is still a conflict.
+`error.code: "SLUG_CONFLICT"`). Enter the healthy registered worktree, use
+`teardown` for the exact directory named in the error, or pick another name.
+The name is never silently reused. If a previous `create` died after
+registering the worktree but before setup completed, running the same `create`
+again finishes setup instead; a fully provisioned same-name worktree is still
+a conflict.
 
 ### Stacking on another branch
 
@@ -154,8 +155,8 @@ treebox enter fix-auth --harness claude
 treebox enter fix-auth --harness codex -- --resume
 ```
 
-`enter` (and `teardown`) take a **ref**: the worktree name, its *current*
-branch, or a unique substring of either — resolved live from git, so a branch
+`enter` takes a **ref**: the worktree name, its *current* branch, or a unique
+substring of either — resolved live from git, so a branch
 the agent renamed five minutes ago still works. An ambiguous ref is a loud
 exit `2` listing the matches, never a guess. If the ref names a branch that
 exists but has no worktree (never materialized, or torn down), the `NOT_FOUND`
@@ -238,8 +239,10 @@ treebox teardown fix-auth --delete-branch       # ...and its local branch
 
 Takes one or more refs (name, branch, or unique substring). Every ref is
 resolved before anything is removed — a typo among three targets removes
-nothing. Refuses to remove a worktree with uncommitted changes unless you pass
-`--force`. For docker-sandboxed worktrees, `--remove-volumes` also removes
+nothing. The narrow recovery for an unregistered directory accepts an exact
+name only, as described below. Refuses to remove a worktree with uncommitted
+changes unless you pass `--force`. For docker-sandboxed worktrees,
+`--remove-volumes` also removes
 per-workspace volumes authorized by the runner-owned manifest written outside
 the sandbox mount at create time, so they are still removed when the container
 and user template were already deleted. If that manifest is missing or
@@ -316,22 +319,38 @@ all-or-nothing — naming a dirty tree stops the whole run. `--force` removes
 dirty worktrees either way.) The chooser is interactive-only: under `--json`
 or a non-TTY, pass refs explicitly.
 
-`teardown` is also the recovery path for a **corrupt** worktree - a registered
-directory whose `.git` pointer file is gone (say, after an interrupted removal
-by hand). Git commands inside such a directory silently answer for the *main*
-checkout, so `create` and `enter` both refuse it loudly (exit `5`,
-`error.code: "SLUG_CONFLICT"`) with a hint pointing here rather than running
-setup or an agent against your real checkout. `teardown` instead verifies the
-worktree's git linkage before asking whether it is dirty: a corrupt worktree is never blocked as "dirty" just because your
-main checkout has uncommitted changes. It takes the normal confirmation path
-instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
-removal clears both the directory and git's stale registration without
-touching the main checkout's files. Container cleanup survives the corruption
-too: teardown reads the worktree's recorded isolation and template through
-git's own registration rather than the missing pointer, so a corrupt docker
-worktree is still torn down with the runner it was created with. Volume
-ownership comes separately from the host-owned resource manifest and is never
-read from that sandbox-writable state.
+### Recovery from incomplete operations
+
+`teardown` is also the recovery path when `create` reports
+`error.code: "SLUG_CONFLICT"` because the expected directory is not a healthy
+registered worktree.
+
+For a directory that was **never registered**, explicit `teardown NAME`
+accepts only a valid, exact directory leaf under the configured worktree root.
+It does not use substring matching, accept a nested path, or treat a symlink
+leaf as a target. Because this target has no trusted Git or runner state,
+teardown does not inspect its Git dirtiness, run container or volume cleanup,
+or delete a branch, even when those cleanup flags are present. It still
+requires the normal confirmation, or `--force` under `--json` or a non-TTY.
+The JSON record reports `branch: null`, `container: "skipped"`,
+`branch_deleted: false`, and `volumes_removed: false`. Under the per-name lock,
+removal rechecks the root, directory identity, and absence of Git ownership. If
+any of them changed, teardown fails with `NOT_FOUND` and does not remove the
+changed target.
+
+For a **corrupt registered worktree** whose `.git` pointer file is gone (for
+example, after an interrupted manual removal), Git commands inside the
+directory silently answer for the *main* checkout. `create` and `enter` refuse
+it loudly with `SLUG_CONFLICT` rather than running setup or an agent against
+your real checkout. `teardown` verifies the worktree's Git linkage before it
+checks dirtiness, so changes in the main checkout do not block removal. It
+takes the normal confirmation path and clears both the directory and Git's
+stale registration without touching the main checkout's files. Container
+cleanup also survives the corruption: teardown reads the worktree's recorded
+isolation and template through Git's own registration rather than the missing
+pointer, so a corrupt docker worktree still uses the runner it was created
+with. Volume ownership comes separately from the host-owned resource manifest
+and is never read from that sandbox-writable state.
 
 If a worktree's recorded isolation mode is unknown (corrupt or hand-edited
 state), teardown refuses it as a conflict rather than guessing how to drive its
