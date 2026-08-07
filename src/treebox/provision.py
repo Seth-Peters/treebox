@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -70,6 +71,19 @@ class BranchConflictError(ProvisionError):
     def __init__(self, branch: str, where: str) -> None:
         super().__init__(f"Branch '{branch}' already exists {where}.")
         self.hint = f"Resume it with `treebox create --checkout {branch}`, or pick another name."
+
+
+class DestinationConflictError(ProvisionError):
+    """A safe file copy found a directory at its destination."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"Cannot replace directory with file: {path}")
+        self.path = path
+        self.hint = (
+            "Treebox did not remove the directory or its contents. Rename or remove "
+            "the directory on the branch, then retry. To discard this worktree and "
+            f"its contents, run `treebox teardown {path.parent.name} --force`."
+        )
 
 
 @dataclass
@@ -186,15 +200,44 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
     ``dest`` lives inside a freshly checked-out worktree whose tree is untrusted
     (a malicious branch can commit a symlink there, or a boxed agent can plant
     one). ``shutil.copyfile`` would follow such a symlink and write through it to
-    an arbitrary host path. Remove any existing entry first, then create the
-    destination with ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the
-    meantime makes the open fail instead of redirecting the write.
+    an arbitrary host path. A regular file or symlink can be unlinked without
+    write-through. A directory is a conflict because removing it could destroy
+    user data. Create the destination with ``O_NOFOLLOW | O_EXCL`` so a symlink
+    re-planted in the meantime makes the open fail instead of redirecting the
+    write.
     """
-    if dest.is_symlink() or dest.exists():
-        dest.unlink()
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        existing = dest.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISDIR(existing.st_mode):
+            raise DestinationConflictError(dest)
+        try:
+            dest.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if _is_directory_no_follow(dest):
+                raise DestinationConflictError(dest) from exc
+            raise
+
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if _is_directory_no_follow(dest):
+            raise DestinationConflictError(dest) from exc
+        raise
     with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
         shutil.copyfileobj(fsrc, fdst)
+
+
+def _is_directory_no_follow(path: Path) -> bool:
+    """Return True only when ``path`` itself is a directory, not a symlink."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:

@@ -377,6 +377,8 @@ def _classify(exc: Exception) -> _ErrorInfo:
                 "`glab auth login`, or a git credential helper), or pass --no-fetch."
             )
         return _ErrorInfo(EXIT_PERMISSION, "FETCH_FAILED", hint)
+    if isinstance(exc, provision.DestinationConflictError):
+        return _ErrorInfo(EXIT_CONFLICT, "DESTINATION_CONFLICT", exc.hint)
     if isinstance(exc, provision.SlugConflictError):
         return _ErrorInfo(EXIT_CONFLICT, "SLUG_CONFLICT", exc.hint)
     if isinstance(exc, provision.BranchInUseError):
@@ -421,6 +423,7 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         code=code,
         error_code=error_code,
         hint=hint,
+        path=str(exc.path) if isinstance(exc, provision.DestinationConflictError) else None,
         json_out=json_out,
     )
 
