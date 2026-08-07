@@ -298,6 +298,17 @@ def resolve_env_file(repo: str | Path, env_file: str) -> Path:
     return src
 
 
+def _validate_managed_file_destinations(repo: str, worktree: Path, env_file: str) -> None:
+    destinations: list[Path] = []
+    if git.has_gitmodules(repo):
+        destinations.append(worktree / ".gitmodules")
+    if resolve_env_file(repo, env_file).is_file():
+        destinations.append(worktree / ".env")
+    for destination in destinations:
+        if _is_directory_no_follow(destination):
+            raise DestinationConflictError(destination)
+
+
 def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bool:
     """Overwrite ``<worktree>/.env`` from the canonical path. Returns True when copied."""
     src = resolve_env_file(repo, env_file)
@@ -679,6 +690,7 @@ def enter(
         repo=repo, name=name, branch=branch, base=prior.base if prior else "", path=wt.path
     )
 
+    _validate_managed_file_destinations(repo, wt.path, config.env_file)
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential
     # copies here so host logins/logouts propagate on every entry — auth must

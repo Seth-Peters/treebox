@@ -411,7 +411,7 @@ def test_env_directory_collision_is_classified_on_create_retry_and_enter(
     assert (repo / ".env").read_text() == "SECRET=canonical\n"
 
 
-def test_gitmodules_directory_collision_is_classified_on_create_and_retry(
+def test_gitmodules_directory_collision_is_classified_on_create_retry_and_enter(
     repo: Path, root: str, hermetic_config
 ):
     """The shared safe-copy path also protects a .gitmodules directory."""
@@ -422,15 +422,19 @@ def test_gitmodules_directory_collision_is_classified_on_create_and_retry(
 
     first = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
     retry = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    entered = _run(["enter", "gitmodules-dir", *base, "--json"])
+    retry_after_enter = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
 
-    for result in (first, retry):
+    results = (first, retry, entered, retry_after_enter)
+    errors = [json.loads(result.stderr)["error"] for result in results]
+    for result, error in zip(results, errors, strict=True):
         assert result.exit_code == 5
         assert result.stdout == ""
-        error = json.loads(result.stderr)["error"]
         assert error["code"] == "DESTINATION_CONFLICT"
         assert error["path"] == str(collision)
         assert "treebox teardown gitmodules-dir --force" in error["hint"]
         assert "Traceback" not in result.stderr
+    assert errors == [errors[0]] * len(errors)
     assert (collision / "keep.txt").read_text() == "must survive\n"
 
 
