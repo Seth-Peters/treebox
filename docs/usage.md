@@ -145,7 +145,10 @@ than printing a plan a real run would refuse. The one exception mirrors real
 `create`: a half-built worktree from an interrupted run previews finishing
 setup (no fetch, no `worktree add`) instead of conflicting. Dry-run verdicts reflect the refs already available locally;
 run `git fetch origin` first when exact parity with create's normal fetch is
-required. Either way, nothing on disk or in git changes.
+required. The setup plan detects package manifests from the exact locally
+available `--base` or `--checkout` revision that it will materialize. When it
+resumes an interrupted create, it detects them from the existing worktree.
+Either way, nothing on disk or in git changes.
 
 With `--cold --dry-run`, the cache part of the plan also matches the real cold
 setup without creating its disposable cache. A host plan uses the stable
