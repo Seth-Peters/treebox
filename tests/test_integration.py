@@ -534,7 +534,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         def refresh(self, wt, *, reporter):
             calls.append("refresh")
 
-        def dry_run_setup(self, wt):
+        def dry_run_setup(self, wt, *, cold, source_ref):
             return []
 
         def entry_command(self, wt, *, harness, args):
@@ -2545,6 +2545,254 @@ def test_dry_run_human_rendering(repo: Path, root: str, hermetic_config):
     assert "worktree add" in res.stderr
     assert "$" in res.stderr  # command lines carry the prompt glyph
     assert not (Path(root) / "planned-h").exists()
+
+
+def _configure_pnpm_dry_run(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, str]:
+    """Make dry-run cache assertions deterministic and independent of user state."""
+    (repo / "uv.lock").unlink()
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (repo / "package.json").write_text('{"name":"cold-dry-run","private":true}\n')
+    _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-m",
+            "test: use pnpm fixture",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    pushed = _git(repo, "push", "origin", "main")
+    assert pushed.returncode == 0, pushed.stderr
+    caches = {
+        name: str(tmp_path / "shared" / name) for name in ("uv", "pnpm", "npm", "go", "cargo")
+    }
+    config = tmp_path / "cold-dry-run.toml"
+    config.write_text(
+        "[caches]\n" + "".join(f"{name} = {json.dumps(path)}\n" for name, path in caches.items())
+    )
+    monkeypatch.setenv("TREEBOX_CONFIG", str(config))
+    return caches
+
+
+@pytest.mark.parametrize("isolation", ["host", "docker"])
+def test_cold_dry_run_human_matches_real_cache_isolation(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolation: str
+):
+    """Human dry-run is an honest, side-effect-free audit of --cold."""
+    if isolation == "docker":
+        from treebox.runners.docker import DockerRunner
+
+        monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
+    caches = _configure_pnpm_dry_run(repo, tmp_path, monkeypatch)
+    root = tmp_path / "wts"
+    base = [
+        "create",
+        f"cold-human-{isolation}",
+        "--repo",
+        str(repo),
+        "--root",
+        str(root),
+        "--isolation",
+        isolation,
+        "--dry-run",
+    ]
+
+    warm = _run(base)
+    cold = _run([*base, "--cold"])
+
+    assert warm.exit_code == cold.exit_code == 0
+    assert warm.stdout == cold.stdout == ""
+    assert warm.stderr != cold.stderr  # issue #39: these were byte-identical
+    warm_plan = " ".join(warm.stderr.split())
+    cold_plan = " ".join(cold.stderr.split())
+    if isolation == "host":
+        assert f"--store-dir {caches['pnpm']}" in warm_plan
+        assert f"--store-dir {caches['pnpm']}" not in cold_plan
+        assert "--store-dir " in cold_plan
+        assert "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm" in cold_plan
+    else:
+        assert "docker run" in warm_plan
+        assert "docker run" in cold_plan
+        for name, env_var in (
+            ("uv", "UV_CACHE_DIR"),
+            ("pnpm", "npm_config_store_dir"),
+            ("npm", "npm_config_cache"),
+            ("go", "GOMODCACHE"),
+            ("cargo", "CARGO_HOME"),
+        ):
+            assert f"source={caches[name]},target=/caches/{name}" in warm_plan
+            assert f"{env_var}=/caches/{name}" in warm_plan
+            assert f"target=/caches/{name}" not in cold_plan
+            assert f"{env_var}=/caches/{name}" not in cold_plan
+    assert not root.exists()
+    assert not (tmp_path / "shared").exists()
+
+
+@pytest.mark.parametrize("isolation", ["host", "docker"])
+def test_cold_dry_run_json_preserves_schema_and_command_order(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolation: str
+):
+    """JSON plans change only cache routing and keep schemaVersion 1."""
+    if isolation == "docker":
+        from treebox.runners.docker import DockerRunner
+
+        monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
+    caches = _configure_pnpm_dry_run(repo, tmp_path, monkeypatch)
+    root = tmp_path / "wts"
+    base = [
+        "create",
+        f"cold-json-{isolation}",
+        "--repo",
+        str(repo),
+        "--root",
+        str(root),
+        "--isolation",
+        isolation,
+        "--dry-run",
+        "--json",
+    ]
+
+    warm_result = _run(base)
+    cold_result = _run([*base, "--cold"])
+
+    assert warm_result.exit_code == cold_result.exit_code == 0
+    assert warm_result.stderr == cold_result.stderr == ""
+    assert warm_result.stdout != cold_result.stdout  # issue #39: byte-identical before the fix
+    warm = json.loads(warm_result.stdout)
+    cold = json.loads(cold_result.stdout)
+    assert (
+        set(warm)
+        == set(cold)
+        == {
+            "schemaVersion",
+            "dry_run",
+            "name",
+            "worktree_path",
+            "branch",
+            "commands",
+        }
+    )
+    assert warm["schemaVersion"] == cold["schemaVersion"] == 1
+    assert len(warm["commands"]) == len(cold["commands"])
+    if isolation == "host":
+        assert warm["commands"][:-1] == cold["commands"][:-1]
+        assert warm["commands"][-1] == (
+            f"pnpm install --frozen-lockfile --store-dir {caches['pnpm']}"
+        )
+        assert caches["pnpm"] not in cold["commands"][-1]
+        assert cold["commands"][-1].endswith("'<temporary-dir>/treebox-cold-XXXXXXXX/pnpm'")
+    else:
+        warm_run_index = next(
+            index
+            for index, command in enumerate(warm["commands"])
+            if command.startswith("docker run")
+        )
+        cold_run_index = next(
+            index
+            for index, command in enumerate(cold["commands"])
+            if command.startswith("docker run")
+        )
+        assert warm_run_index == cold_run_index
+        assert warm["commands"][:warm_run_index] == cold["commands"][:cold_run_index]
+        assert warm["commands"][warm_run_index + 1 :] == cold["commands"][cold_run_index + 1 :]
+        warm_run = warm["commands"][warm_run_index]
+        cold_run = cold["commands"][cold_run_index]
+        for name, env_var in (
+            ("uv", "UV_CACHE_DIR"),
+            ("pnpm", "npm_config_store_dir"),
+            ("npm", "npm_config_cache"),
+            ("go", "GOMODCACHE"),
+            ("cargo", "CARGO_HOME"),
+        ):
+            assert f"source={caches[name]},target=/caches/{name}" in warm_run
+            assert f"{env_var}=/caches/{name}" in warm_run
+            assert f"target=/caches/{name}" not in cold_run
+            assert f"{env_var}=/caches/{name}" not in cold_run
+    assert not root.exists()
+    assert not (tmp_path / "shared").exists()
+
+
+@pytest.mark.parametrize("checkout", [False, True])
+def test_host_dry_run_detects_manifests_from_planned_revision(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: bool,
+):
+    """Setup planning reads the tree that create will check out, not current HEAD."""
+    caches = {
+        name: str(tmp_path / "shared" / name) for name in ("uv", "pnpm", "npm", "go", "cargo")
+    }
+    config = tmp_path / "planned-revision.toml"
+    config.write_text(
+        "[caches]\n" + "".join(f"{name} = {json.dumps(path)}\n" for name, path in caches.items())
+    )
+    monkeypatch.setenv("TREEBOX_CONFIG", str(config))
+    _git(repo, "checkout", "dev")
+    (repo / "uv.lock").unlink()
+    (repo / "uv.lock").mkdir()
+    (repo / "uv.lock" / "not-a-lockfile").write_text("directory entry\n")
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (repo / "package.json").write_text('{"name":"planned-revision","private":true}\n')
+    _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-m",
+            "test: use pnpm on dev",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    pushed = _git(repo, "push", "origin", "dev")
+    assert pushed.returncode == 0, pushed.stderr
+    _git(repo, "checkout", "main")
+    # Restore the current checkout's uv-only tree. The helper changed files in
+    # dev before committing them, but main must stay different for this test.
+    assert (repo / "uv.lock").is_file()
+    assert not (repo / "pnpm-lock.yaml").exists()
+
+    args = [
+        "create",
+        "planned-revision",
+        "--repo",
+        str(repo),
+        "--root",
+        str(tmp_path / "wts"),
+        "--dry-run",
+        "--json",
+        "--no-fetch",
+    ]
+    if checkout:
+        args += ["--checkout", "dev"]
+    else:
+        args += ["--base", "dev"]
+
+    result = _run(args)
+
+    assert result.exit_code == 0, result.output
+    commands = json.loads(result.stdout)["commands"]
+    assert commands[-1] == f"pnpm install --frozen-lockfile --store-dir {caches['pnpm']}"
+    assert "uv sync" not in commands
 
 
 def test_template_flag_reaches_the_docker_runner(

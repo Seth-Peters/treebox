@@ -54,7 +54,7 @@ treebox teardown fix-auth --force --delete-branch
 Provision without launching the agent (for scripting / over SSH / when you only need the worktree prepared):
 
 ```bash
-treebox create fix-auth --dry-run  # print the git/setup commands it would run; change nothing (fails like a real create on conflicts)
+treebox create fix-auth --dry-run  # print a stable side-effect-free plan; no launch
 treebox create fix-auth --print    # prints the launch command (self-contained: carries the worktree dir, runnable from anywhere), no launch
 treebox create fix-auth --json     # JSON {schemaVersion, name, worktree_path, branch, base, entry_command, created}
 treebox list --json                     # JSON {schemaVersion, worktrees:[…]}

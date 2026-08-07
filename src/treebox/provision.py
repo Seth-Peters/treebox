@@ -137,13 +137,15 @@ def dry_run_plan(
     branch: str,
     base: str,
     fetch: bool,
+    cold: bool,
     existing_branch: bool = False,
 ) -> tuple[Worktree, list[str]]:
-    """The exact git/runner commands ``create`` would run, without side effects.
+    """A stable git/runner command plan for ``create``, without side effects.
 
     Enforces the same read-only preconditions as a real ``create`` - raising the
     same conflict/not-found errors rather than returning a plan a real run would
     refuse - judged against locally available refs (a dry run never fetches).
+    Runners represent disposable paths with stable placeholders.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
@@ -156,6 +158,7 @@ def dry_run_plan(
         _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
         _check_base_exists(repo, base=base, existing_branch=existing_branch)
     cmds: list[str] = []
+    source_ref: str | None = None
     if resuming:
         cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
     else:
@@ -164,8 +167,10 @@ def dry_run_plan(
         plan = git.resolve_branch(repo, branch, base)
         if plan.kind == "local":
             cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
+            source_ref = plan.name
         else:
             cmds.append(f"git -C {repo} worktree add -b {plan.name} {wt.path} {plan.start_point}")
+            source_ref = plan.start_point
     cmds.append(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
@@ -173,7 +178,7 @@ def dry_run_plan(
     if git.has_gitmodules(repo):
         cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
-    cmds.extend(runner.dry_run_setup(wt))
+    cmds.extend(runner.dry_run_setup(wt, cold=cold, source_ref=source_ref))
     return wt, cmds
 
 

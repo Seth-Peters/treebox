@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import git
 from .models import expand_user
 
 # Root under which shared host caches are bind-mounted inside the sandbox container.
@@ -123,15 +124,25 @@ ECOSYSTEMS: tuple[Ecosystem, ...] = (
 )
 
 
-def detect(worktree: str | Path) -> list[Ecosystem]:
-    """Active ecosystems, in a stable order. pnpm wins over npm when both
-    lockfiles exist (pnpm-lock.yaml present implies a pnpm project)."""
-    root = Path(worktree)
-    found = [eco for eco in ECOSYSTEMS if any((root / lf).is_file() for lf in eco.lockfiles)]
+def _detect(present: Callable[[str], bool]) -> list[Ecosystem]:
+    found = [eco for eco in ECOSYSTEMS if any(present(lf) for lf in eco.lockfiles)]
     names = {e.name for e in found}
     if "pnpm" in names and "npm" in names:
         found = [e for e in found if e.name != "npm"]
     return found
+
+
+def detect(worktree: str | Path) -> list[Ecosystem]:
+    """Active ecosystems in a filesystem tree, in stable order."""
+    root = Path(worktree)
+    return _detect(lambda lockfile: (root / lockfile).is_file())
+
+
+def detect_revision(repo: str | Path, revision: str) -> list[Ecosystem]:
+    """Active ecosystems in a Git revision, without checking it out."""
+    lockfiles = tuple(lockfile for eco in ECOSYSTEMS for lockfile in eco.lockfiles)
+    present = git.files_at_revision(repo, revision, lockfiles)
+    return _detect(present.__contains__)
 
 
 @dataclass
@@ -142,7 +153,11 @@ class SetupStep:
 
 
 def _cache_dir_for(
-    eco: Ecosystem, caches: dict[str, str], cold_cache_root: str | None
+    eco: Ecosystem,
+    caches: dict[str, str],
+    cold_cache_root: str | None,
+    *,
+    create: bool = True,
 ) -> str | None:
     """Resolve (and create) the cache dir feeding ``eco``'s setup.
 
@@ -160,7 +175,8 @@ def _cache_dir_for(
     if not cache_dir:
         return None
     cache_path = expand_user(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
+    if create:
+        cache_path.mkdir(parents=True, exist_ok=True)
     return str(cache_path)
 
 
@@ -169,6 +185,7 @@ def setup_steps(
     caches: dict[str, str],
     *,
     cold_cache_root: str | None,
+    create_cache_dirs: bool = True,
 ) -> list[SetupStep]:
     """Build cache-backed setup commands.
 
@@ -180,7 +197,12 @@ def setup_steps(
     for eco in ecosystems:
         argv = list(eco.command)
         env: dict[str, str] = {}
-        cache_dir = _cache_dir_for(eco, caches, cold_cache_root)
+        cache_dir = _cache_dir_for(
+            eco,
+            caches,
+            cold_cache_root,
+            create=create_cache_dirs,
+        )
         if cache_dir:
             if eco.cache_env_var:
                 env[eco.cache_env_var] = cache_dir
@@ -190,14 +212,24 @@ def setup_steps(
     return steps
 
 
-def cache_env(caches: dict[str, str], *, cold_cache_root: str | None = None) -> dict[str, str]:
+def cache_env(
+    caches: dict[str, str],
+    *,
+    cold_cache_root: str | None = None,
+    create_cache_dirs: bool = True,
+) -> dict[str, str]:
     """Env vars wiring every env-driven ecosystem cache to the shared store
     (or a throwaway dir under ``cold_cache_root``). Used by custom setup hooks."""
     env: dict[str, str] = {}
     for eco in ECOSYSTEMS:
         if not eco.cache_env_var:
             continue
-        cache_dir = _cache_dir_for(eco, caches, cold_cache_root)
+        cache_dir = _cache_dir_for(
+            eco,
+            caches,
+            cold_cache_root,
+            create=create_cache_dirs,
+        )
         if cache_dir:
             env[eco.cache_env_var] = cache_dir
     return env
