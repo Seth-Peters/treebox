@@ -1516,8 +1516,9 @@ def _teardown_one(
     json_out: bool,
 ) -> TeardownRecord:
     """Tear down one resolved worktree; returns its --json record. ``run`` is
-    the batch-validated runner from ``_teardown_runner``, or ``None`` under
-    ``--skip-container`` (no container work, so no runner was resolved)."""
+    the batch-validated runner from ``_teardown_runner``. It is ``None`` when
+    ``--skip-container`` prevents cleanup or when an unregistered target has
+    no trusted runner state."""
     wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
     exists = bool(cand.stray) or wt.path.is_dir()
     st = state.load_registered(repo_path, wt.path)

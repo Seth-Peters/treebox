@@ -155,8 +155,8 @@ treebox enter fix-auth --harness claude
 treebox enter fix-auth --harness codex -- --resume
 ```
 
-`enter` (and `teardown`) take a **ref**: the worktree name, its *current*
-branch, or a unique substring of either — resolved live from git, so a branch
+`enter` takes a **ref**: the worktree name, its *current* branch, or a unique
+substring of either — resolved live from git, so a branch
 the agent renamed five minutes ago still works. An ambiguous ref is a loud
 exit `2` listing the matches, never a guess. If the ref names a branch that
 exists but has no worktree (never materialized, or torn down), the `NOT_FOUND`

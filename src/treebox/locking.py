@@ -1,10 +1,9 @@
 """Cross-process advisory locking on a worktree name.
 
-Two ``create``/``enter`` calls for the same worktree must not race on its dir
-or the shared caches it writes through. We take a POSIX ``flock`` on a small
-lock file keyed by the worktree name (the permanent identity — branches are
-mutable), held for the duration of provisioning. Non-blocking with a clear
-error so a second caller fails fast instead of corrupting a half-built tree.
+``create``, ``enter``, and ``teardown`` calls for the same worktree must not
+race on its directory or shared caches. We take a POSIX ``flock`` on a small
+lock file keyed by the permanent worktree name. The lock is non-blocking, so a
+second caller fails fast instead of corrupting or removing an active tree.
 """
 
 from __future__ import annotations

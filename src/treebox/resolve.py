@@ -1,9 +1,10 @@
-"""Resolve a user-supplied ``<ref>`` to a worktree.
+"""Resolve worktree refs and exact unregistered teardown targets.
 
-``enter`` and ``teardown`` accept a worktree name, a branch, or a unique
-substring of either — resolved live from ``git worktree list --porcelain``
-(the branch is a mutable attribute; only git knows the current one).
-Ambiguity is a loud usage error, never a guess.
+For registered worktrees, ``enter`` and ``teardown`` accept a name, a branch,
+or a unique substring of either. Resolution uses live
+``git worktree list --porcelain`` data because a branch is mutable. Teardown
+also has a guarded exact-name recovery for an unregistered directory.
+Ambiguity is a usage error, never a guess.
 """
 
 from __future__ import annotations
@@ -38,10 +39,12 @@ class StrayDirectory:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One live worktree under the treebox root: its permanent name (the
-    directory leaf) and its current branch, straight from git. ``stray`` marks
-    the narrow teardown recovery case: an exact, safe directory with no Git
-    registration and no matching branch."""
+    """One registered worktree or exact unregistered teardown target.
+
+    Registered candidates use the permanent directory-leaf name and the live
+    Git branch. ``stray`` marks the narrow recovery case: a safe directory with
+    no Git registration and no matching branch.
+    """
 
     name: str
     branch: str | None
@@ -111,9 +114,9 @@ def exact_stray(repo: str, root: str, ref: str) -> Candidate | None:
 
     This is not general discovery. The ref must be one directory-leaf slug,
     and only ``<root>/<ref>`` is checked. Symlinks are not targets because they
-    can point outside the configured root. Call this only after registered
-    worktree and branch resolution fails, so those trusted cases keep their
-    normal teardown behavior.
+    can point outside the configured root. Call this only after exact
+    registered-name and branch resolution fails, so those trusted cases keep
+    their normal teardown behavior.
     """
     if not is_slug(ref):
         return None
