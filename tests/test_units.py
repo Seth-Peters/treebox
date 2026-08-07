@@ -1495,9 +1495,7 @@ def test_docker_cold_dry_run_reports_orphaned_container_cache_mounts(
     assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
 
 
-def test_docker_cold_dry_run_reports_unavailable_existing_container_state(
-    tmp_path: Path, fake_common_dir
-):
+def test_docker_cold_dry_run_without_daemon_plans_a_new_container(tmp_path: Path, fake_common_dir):
     runner = DockerRunner(
         Config(isolation="docker"),
         docker=_FakeDocker(info_rc=1),
@@ -1505,8 +1503,9 @@ def test_docker_cold_dry_run_reports_unavailable_existing_container_state(
 
     cmds = runner.dry_run_setup(_boxed_worktree(tmp_path), cold=True, source_ref=None)
 
-    assert any("container state is unavailable" in command for command in cmds)
-    assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
+    assert not any("container state is unavailable" in command for command in cmds)
+    assert any(command.startswith("docker build") for command in cmds)
+    assert any(command.startswith("docker run") for command in cmds)
 
 
 def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_common_dir):

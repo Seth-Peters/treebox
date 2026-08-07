@@ -2590,6 +2590,10 @@ def test_cold_dry_run_human_matches_real_cache_isolation(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolation: str
 ):
     """Human dry-run is an honest, side-effect-free audit of --cold."""
+    if isolation == "docker":
+        from treebox.runners.docker import DockerRunner
+
+        monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
     caches = _configure_pnpm_dry_run(repo, tmp_path, monkeypatch)
     root = tmp_path / "wts"
     base = [
@@ -2618,6 +2622,8 @@ def test_cold_dry_run_human_matches_real_cache_isolation(
         assert "--store-dir " in cold_plan
         assert "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm" in cold_plan
     else:
+        assert "docker run" in warm_plan
+        assert "docker run" in cold_plan
         for name, env_var in (
             ("uv", "UV_CACHE_DIR"),
             ("pnpm", "npm_config_store_dir"),
@@ -2638,6 +2644,10 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolation: str
 ):
     """JSON plans change only cache routing and keep schemaVersion 1."""
+    if isolation == "docker":
+        from treebox.runners.docker import DockerRunner
+
+        monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
     caches = _configure_pnpm_dry_run(repo, tmp_path, monkeypatch)
     root = tmp_path / "wts"
     base = [

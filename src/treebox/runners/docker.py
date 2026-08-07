@@ -738,13 +738,7 @@ class DockerRunner:
             "(the live ~/.claude / ~/.codex are never mounted)",
         ]
         existing: tuple[str, ContainerState] | None = None
-        if cold:
-            if not self._available():
-                cmds.append(
-                    "# existing Docker container state is unavailable; real setup may "
-                    "reuse creation-time cache mounts or create the requested container"
-                )
-                return cmds
+        if cold and self._available():
             existing = self._existing_container(wt)
 
         firewall = self.config.firewall
