@@ -201,14 +201,24 @@ def setup_steps(
     return steps
 
 
-def cache_env(caches: dict[str, str], *, cold_cache_root: str | None = None) -> dict[str, str]:
+def cache_env(
+    caches: dict[str, str],
+    *,
+    cold_cache_root: str | None = None,
+    create_cache_dirs: bool = True,
+) -> dict[str, str]:
     """Env vars wiring every env-driven ecosystem cache to the shared store
     (or a throwaway dir under ``cold_cache_root``). Used by custom setup hooks."""
     env: dict[str, str] = {}
     for eco in ECOSYSTEMS:
         if not eco.cache_env_var:
             continue
-        cache_dir = _cache_dir_for(eco, caches, cold_cache_root)
+        cache_dir = _cache_dir_for(
+            eco,
+            caches,
+            cold_cache_root,
+            create=create_cache_dirs,
+        )
         if cache_dir:
             env[eco.cache_env_var] = cache_dir
     return env

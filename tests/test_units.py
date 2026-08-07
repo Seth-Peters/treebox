@@ -1463,7 +1463,10 @@ def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, col
     """--dry-run must change nothing: rendering the plan may not create the
     configured cache directories (that happens in setup, before docker run)."""
     cache = tmp_path / "not-yet" / "uv"
-    runner = DockerRunner(Config(isolation="docker", caches={"uv": str(cache)}))
+    runner = DockerRunner(
+        Config(isolation="docker", caches={"uv": str(cache)}),
+        docker=_FakeDocker(),
+    )
     wt = _boxed_worktree(tmp_path)
 
     cmds = runner.dry_run_setup(wt, cold=cold)
@@ -1471,6 +1474,36 @@ def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, col
     assert not cache.exists()
     assert any(c.startswith("docker build") for c in cmds)
     assert any(c.startswith("docker run") for c in cmds)
+
+
+def test_docker_cold_dry_run_reports_reused_container_cache_mounts(tmp_path: Path, fake_common_dir):
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    fake = _FakeDocker(
+        ids="abc123\n",
+        name=DockerRunner(cfg)._slug(wt),
+        running=True,
+    )
+
+    cmds = DockerRunner(cfg, docker=fake).dry_run_setup(wt, cold=True)
+
+    assert any("creation-time cache mounts" in command for command in cmds)
+    assert any("reuse existing container abc123" in command for command in cmds)
+    assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
+
+
+def test_docker_cold_dry_run_reports_unavailable_existing_container_state(
+    tmp_path: Path, fake_common_dir
+):
+    runner = DockerRunner(
+        Config(isolation="docker"),
+        docker=_FakeDocker(info_rc=1),
+    )
+
+    cmds = runner.dry_run_setup(_boxed_worktree(tmp_path), cold=True)
+
+    assert any("container state is unavailable" in command for command in cmds)
+    assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
 
 
 def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_common_dir):
@@ -3687,10 +3720,10 @@ def test_host_dry_run_setup_lists_ecosystem_commands(tmp_path: Path):
     assert hooked.dry_run_setup(wt, cold=False) == ["sh -c 'echo hi'"]
 
 
-def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(tmp_path: Path):
+def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Cold planning shows its isolated store, stays stable, and writes nothing."""
-    import tempfile
-
     from treebox.runners.host import HostRunner
 
     repo = tmp_path / "repo"
@@ -3699,16 +3732,71 @@ def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(tmp_
     shared = tmp_path / "shared" / "pnpm"
     wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
     runner = HostRunner(Config(caches={"pnpm": str(shared)}))
+    monkeypatch.setattr(
+        "treebox.runners.host.tempfile.gettempdir",
+        lambda: pytest.fail("dry-run probed the temporary directory"),
+    )
 
     warm = runner.dry_run_setup(wt, cold=False)
     cold = runner.dry_run_setup(wt, cold=True)
 
-    expected_cold = str(Path(tempfile.gettempdir()) / "treebox-cold-XXXXXXXX" / "pnpm")
+    expected_cold = "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm"
     assert warm == [f"pnpm install --frozen-lockfile --store-dir {shared}"]
-    assert cold == [f"pnpm install --frozen-lockfile --store-dir {expected_cold}"]
+    assert cold == [f"pnpm install --frozen-lockfile --store-dir '{expected_cold}'"]
     assert cold == runner.dry_run_setup(wt, cold=True)
     assert not shared.exists()
-    assert not Path(expected_cold).exists()
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "command", "env_var", "cache_name"),
+    [
+        ("uv.lock", "uv sync", "UV_CACHE_DIR", "uv"),
+        ("package-lock.json", "npm ci", "npm_config_cache", "npm"),
+        ("go.sum", "go mod download", "GOMODCACHE", "go"),
+        ("Cargo.lock", "cargo fetch", "CARGO_HOME", "cargo"),
+    ],
+)
+def test_host_cold_dry_run_renders_environment_cache_routing(
+    tmp_path: Path,
+    lockfile: str,
+    command: str,
+    env_var: str,
+    cache_name: str,
+):
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / lockfile).write_text("")
+    shared = tmp_path / "shared" / cache_name
+    wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
+    runner = HostRunner(Config(caches={cache_name: str(shared)}))
+
+    assert runner.dry_run_setup(wt, cold=False) == [command]
+    assert runner.dry_run_setup(wt, cold=True) == [
+        f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{cache_name}' {command}"
+    ]
+    assert not shared.exists()
+
+
+def test_host_cold_dry_run_renders_setup_hook_cache_environment(tmp_path: Path):
+    from treebox.runners.host import HostRunner
+
+    shared = {name: str(tmp_path / "shared" / name) for name in ("uv", "npm", "go", "cargo")}
+    runner = HostRunner(Config(caches=shared, setup_hook=["echo hi"]))
+    wt = Worktree("/repo", "wt", "wt", "main", tmp_path / "wts" / "wt")
+
+    assert runner.dry_run_setup(wt, cold=False) == ["sh -c 'echo hi'"]
+    (cold,) = runner.dry_run_setup(wt, cold=True)
+    for name, env_var in (
+        ("uv", "UV_CACHE_DIR"),
+        ("npm", "npm_config_cache"),
+        ("go", "GOMODCACHE"),
+        ("cargo", "CARGO_HOME"),
+    ):
+        assert f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{name}'" in cold
+    assert cold.endswith("sh -c 'echo hi'")
+    assert not (tmp_path / "shared").exists()
 
 
 def test_worktree_status_missing_row_never_shells_out():

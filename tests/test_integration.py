@@ -2596,7 +2596,7 @@ def test_cold_dry_run_human_matches_real_cache_isolation(
         assert f"--store-dir {caches['pnpm']}" in warm_plan
         assert f"--store-dir {caches['pnpm']}" not in cold_plan
         assert "--store-dir " in cold_plan
-        assert "treebox-cold-XXXXXXXX/pnpm" in cold_plan
+        assert "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm" in cold_plan
     else:
         for name, env_var in (
             ("uv", "UV_CACHE_DIR"),
@@ -2661,7 +2661,7 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             f"pnpm install --frozen-lockfile --store-dir {caches['pnpm']}"
         )
         assert caches["pnpm"] not in cold["commands"][-1]
-        assert cold["commands"][-1].endswith("treebox-cold-XXXXXXXX/pnpm")
+        assert cold["commands"][-1].endswith("'<temporary-dir>/treebox-cold-XXXXXXXX/pnpm'")
     else:
         warm_run_index = next(
             index

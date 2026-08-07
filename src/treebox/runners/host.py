@@ -29,7 +29,12 @@ if TYPE_CHECKING:
 # globally) and the agent CLI (verified at launch) there is nothing
 # container-specific to check.
 _FACTS = RunnerFacts(preflight_detail="no container dependencies", login_required=True)
-_DRY_RUN_COLD_DIR = "treebox-cold-XXXXXXXX"
+_DRY_RUN_COLD_ROOT = "<temporary-dir>/treebox-cold-XXXXXXXX"
+
+
+def _render_cache_env(command: str, env: dict[str, str]) -> str:
+    assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    return f"{assignments} {command}" if assignments else command
 
 
 class HostRunner:
@@ -102,19 +107,28 @@ class HostRunner:
 
     def dry_run_setup(self, wt: Worktree, *, cold: bool) -> list[str]:
         if self.config.setup_hook is not None:
-            return [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
+            commands = [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
+            if not cold:
+                return commands
+            env = ecosystems.cache_env(
+                self.config.caches,
+                cold_cache_root=_DRY_RUN_COLD_ROOT,
+                create_cache_dirs=False,
+            )
+            return [_render_cache_env(command, env) for command in commands]
         # The worktree doesn't exist yet; detect from the source repo's manifests.
         ecos = ecosystems.detect(wt.repo)
         if not ecos:
             return ["# no package manifests — setup is a no-op"]
-        cold_root = os.path.join(tempfile.gettempdir(), _DRY_RUN_COLD_DIR) if cold else None
         steps = ecosystems.setup_steps(
             ecos,
             self.config.caches,
-            cold_cache_root=cold_root,
+            cold_cache_root=_DRY_RUN_COLD_ROOT if cold else None,
             create_cache_dirs=False,
         )
-        return [" ".join(s.argv) for s in steps]
+        if not cold:
+            return [" ".join(step.argv) for step in steps]
+        return [_render_cache_env(shlex.join(step.argv), step.env) for step in steps]
 
     def prepare_entry(self, wt: Worktree) -> None:
         # Nothing to make ready: the agent runs directly on the host, so an
