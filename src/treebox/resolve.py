@@ -8,6 +8,10 @@ Ambiguity is a loud usage error, never a guess.
 
 from __future__ import annotations
 
+import errno
+import os
+import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +30,13 @@ class AmbiguousRefError(ProvisionError):
 
 
 @dataclass(frozen=True)
+class StrayDirectory:
+    root: str
+    root_identity: tuple[int, int]
+    target_identity: tuple[int, int]
+
+
+@dataclass(frozen=True)
 class Candidate:
     """One live worktree under the treebox root: its permanent name (the
     directory leaf) and its current branch, straight from git. ``stray`` marks
@@ -35,7 +46,7 @@ class Candidate:
     name: str
     branch: str | None
     path: str
-    stray: bool = False
+    stray: StrayDirectory | None = None
 
 
 def candidates(repo: str, root: str) -> list[Candidate]:
@@ -90,11 +101,85 @@ def exact_stray(repo: str, root: str, ref: str) -> Candidate | None:
         return None
     path = worktree_path(repo, root, ref)
     base = worktree_root(repo, root)
-    if (
-        path.is_symlink()
-        or not path.is_dir()
-        or not path_is_under(path, base)
-        or same_path(path, repo)
-    ):
+    stray = _stray_directory(base, ref)
+    if stray is None or same_path(path, repo) or _stray_has_git_state(repo, stray, ref):
         return None
-    return Candidate(name=ref, branch=None, path=str(path), stray=True)
+    return Candidate(name=ref, branch=None, path=str(path), stray=stray)
+
+
+def remove_exact_stray(repo: str, cand: Candidate) -> bool:
+    stray = cand.stray
+    if stray is None:
+        return False
+    try:
+        root_fd = _open_directory(Path(stray.root))
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return False
+        raise
+    try:
+        if _identity(os.fstat(root_fd)) != stray.root_identity:
+            return False
+        try:
+            current = os.stat(cand.name, dir_fd=root_fd, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        if not stat.S_ISDIR(current.st_mode) or _identity(current) != stray.target_identity:
+            return False
+        if _stray_has_git_state(repo, stray, cand.name):
+            return False
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise OSError("safe directory-relative removal is unavailable")
+        try:
+            shutil.rmtree(cand.name, dir_fd=root_fd)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            try:
+                changed = os.stat(cand.name, dir_fd=root_fd, follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+            if not stat.S_ISDIR(changed.st_mode) or _identity(changed) != stray.target_identity:
+                return False
+            raise
+    finally:
+        os.close(root_fd)
+    return True
+
+
+def _stray_directory(root: Path, name: str) -> StrayDirectory | None:
+    try:
+        physical_root = root.resolve(strict=True)
+        root_fd = _open_directory(physical_root)
+    except OSError:
+        return None
+    try:
+        root_stat = os.fstat(root_fd)
+        target_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    finally:
+        os.close(root_fd)
+    if not stat.S_ISDIR(root_stat.st_mode) or not stat.S_ISDIR(target_stat.st_mode):
+        return None
+    return StrayDirectory(
+        root=str(physical_root),
+        root_identity=_identity(root_stat),
+        target_identity=_identity(target_stat),
+    )
+
+
+def _stray_has_git_state(repo: str, stray: StrayDirectory, name: str) -> bool:
+    target = Path(stray.root) / name
+    return git.local_branch_exists(repo, name) or git.worktree_registered(repo, str(target))
+
+
+def _open_directory(path: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _identity(value: os.stat_result) -> tuple[int, int]:
+    return value.st_dev, value.st_ino

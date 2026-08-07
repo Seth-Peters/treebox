@@ -1799,6 +1799,138 @@ def test_teardown_stray_directory_requires_safe_exact_leaf(
     assert marker.read_text() == "must stay\n"
 
 
+def test_teardown_stray_directory_never_inspects_git_dirtiness(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A stale linked-worktree pointer does not make a stray directory trusted."""
+    from treebox import cli, git
+
+    base = ["--repo", str(repo), "--root", root]
+    donor = Path(root) / "pointer-donor"
+    stray = Path(root) / "stale-pointer"
+    created = _run(["create", "pointer-donor", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    stray.mkdir()
+    (stray / ".git").write_text((donor / ".git").read_text())
+
+    def fail_dirty(path):
+        pytest.fail(f"git dirtiness was inspected in {path}")
+
+    monkeypatch.setattr(git, "is_dirty", fail_dirty)
+    monkeypatch.setattr(cli, "_stdin_isatty", lambda: True)
+    removed = runner.invoke(
+        app,
+        ["teardown", "stale-pointer", *base],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert removed.exit_code == 0, removed.output
+    assert donor.is_dir()
+    assert not stray.exists()
+
+
+def test_teardown_stray_directory_keeps_confirmed_root_identity(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """Replacing the configured root cannot redirect confirmed deletion."""
+    from treebox import resolve
+
+    root_path = Path(root)
+    stray = root_path / "root-race"
+    stray.mkdir(parents=True)
+    original_marker = stray / "original.txt"
+    original_marker.write_text("keep original\n")
+    outside_root = tmp_path / "outside-root"
+    outside_stray = outside_root / stray.name
+    outside_stray.mkdir(parents=True)
+    outside_marker = outside_stray / "outside.txt"
+    outside_marker.write_text("keep outside\n")
+    moved_root = tmp_path / "moved-root"
+    original_remove = resolve.remove_exact_stray
+
+    def replace_root(repo_path, cand):
+        root_path.rename(moved_root)
+        root_path.symlink_to(outside_root, target_is_directory=True)
+        return original_remove(repo_path, cand)
+
+    monkeypatch.setattr(resolve, "remove_exact_stray", replace_root)
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert (moved_root / stray.name / original_marker.name).read_text() == "keep original\n"
+    assert outside_marker.read_text() == "keep outside\n"
+
+
+@pytest.mark.parametrize("claim", ["branch", "registration"])
+def test_teardown_stray_directory_rechecks_git_state_after_lock(
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    claim: str,
+):
+    """Git state created after resolution stops unregistered recovery."""
+    from treebox import git, resolve
+
+    stray = Path(root) / f"claimed-by-{claim}"
+    stray.mkdir(parents=True)
+    original_remove = resolve.remove_exact_stray
+    registration_checks = 0
+
+    if claim == "registration":
+        def registered_after_resolution(repo_path, path):
+            nonlocal registration_checks
+            registration_checks += 1
+            return registration_checks > 1
+
+        monkeypatch.setattr(git, "worktree_registered", registered_after_resolution)
+
+    def claim_target(repo_path, cand):
+        if claim == "branch":
+            made = _git(repo, "branch", cand.name)
+            assert made.returncode == 0, made.stderr
+        return original_remove(repo_path, cand)
+
+    monkeypatch.setattr(resolve, "remove_exact_stray", claim_target)
+    result = _run(
+        [
+            "teardown",
+            stray.name,
+            "--repo",
+            str(repo),
+            "--root",
+            root,
+            "--force",
+            "--json",
+        ]
+    )
+    assert result.exit_code == 3, result.output
+    assert json.loads(result.stderr)["error"]["code"] == "NOT_FOUND"
+    assert stray.is_dir()
+    if claim == "branch":
+        assert git.local_branch_exists(str(repo), stray.name)
+    else:
+        assert registration_checks == 2
+
+
 def test_create_self_heals_stale_registration_from_interrupted_teardown(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):

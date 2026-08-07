@@ -1299,6 +1299,8 @@ def teardown(
     # so). For explicit refs it stays all-or-nothing: naming a dirty tree should
     # stop the whole run — a scripting contract, not a partial surprise.
     def _blocked_dirty(c: resolve.Candidate) -> bool:
+        if c.stray:
+            return False
         path = Path(c.path)
         # A missing/corrupt .git pointer lets git walk up into the main
         # checkout, so only ask git about dirtiness after linkage is proven.
@@ -1327,7 +1329,7 @@ def teardown(
                     json_out=json_out,
                 )
 
-    if not force and not from_chooser and any(Path(c.path).is_dir() for c in targets):
+    if not force and not from_chooser and any(c.stray or Path(c.path).is_dir() for c in targets):
         # --json is a scripting contract: never block on a prompt (and never
         # let one leak into stdout) — require --force instead.
         if _stdin_isatty() and not json_out:
@@ -1498,7 +1500,7 @@ def _teardown_one(
     the batch-validated runner from ``_teardown_runner``, or ``None`` under
     ``--skip-container`` (no container work, so no runner was resolved)."""
     wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
-    exists = wt.path.is_dir()
+    exists = bool(cand.stray) or wt.path.is_dir()
     st = state.load_registered(repo_path, wt.path)
 
     branch_name = (
@@ -1543,22 +1545,8 @@ def _teardown_one(
 
     if exists:
         if cand.stray:
-            # Recheck the narrow path rule after confirmation and lock
-            # acquisition. A replaced symlink must not turn this recovery into
-            # deletion outside the configured root.
-            current = resolve.exact_stray(repo_path, cfg.root, cand.name)
-            if current is None or not same_path(current.path, wt.path):
-                raise _die(
-                    reporter,
-                    f"Unregistered directory '{cand.name}' is no longer a safe teardown target.",
-                    code=EXIT_NOTFOUND,
-                    error_code="NOT_FOUND",
-                    hint="Check the exact directory under the configured root and retry.",
-                    path=str(wt.path),
-                    json_out=json_out,
-                )
             try:
-                shutil.rmtree(wt.path)
+                removed = resolve.remove_exact_stray(repo_path, cand)
             except OSError as exc:
                 raise _die(
                     reporter,
@@ -1568,6 +1556,16 @@ def _teardown_one(
                     path=str(wt.path),
                     json_out=json_out,
                 ) from exc
+            if not removed:
+                raise _die(
+                    reporter,
+                    f"Unregistered directory '{cand.name}' is no longer a safe teardown target.",
+                    code=EXIT_NOTFOUND,
+                    error_code="NOT_FOUND",
+                    hint="Check the exact directory under the configured root and retry.",
+                    path=str(wt.path),
+                    json_out=json_out,
+                )
         else:
             try:
                 git.worktree_remove(repo_path, wt.path, force=force)
