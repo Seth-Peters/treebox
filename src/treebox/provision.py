@@ -24,6 +24,7 @@ from .harnesses import Harness
 from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
 from .output import Reporter
 from .runners.base import Runner
+from .submodule_copy import copy_submodule
 
 
 class ProvisionError(RuntimeError):
@@ -309,17 +310,10 @@ def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
         resolved = _resolve_submodule_copy(Path(repo), worktree, rel, reporter)
         if resolved is None:
             continue
-        src, dest = resolved
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        _src, dest = resolved
         # Exclude .git pointers/dirs: a copied pointer's relative gitdir path
         # breaks every git command in the linked worktree (issue #16).
-        shutil.copytree(
-            src,
-            dest,
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git"),
-        )
+        copy_submodule(Path(repo), worktree, dest.relative_to(worktree))
         copied += 1
     reporter.ok("submodules", f"copied {copied}")
     return copied
