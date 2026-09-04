@@ -187,7 +187,11 @@ Under docker isolation, `enter` **preflights the Docker daemon first** (like
 error deeper in launch. It also **re-stages the scoped credential copies**
 from the host on every entry — independent of the lockfile-hash skip — so a
 host logout/revocation drops the stale copies and a fresh login reaches the
-sandbox on the very next entry. A container that stopped since setup (host
+sandbox on the very next entry. Refresh replaces staged files atomically:
+links in the sandbox cannot redirect credential writes or permission changes
+to host files. Conflicting directories are preserved and stop entry with a
+classified error; inspect their contents before removing the conflict.
+A container that stopped since setup (host
 reboot, manual `docker stop`) is restarted with the firewall re-established
 before the agent launches - and before a `--print`/`--json` command is
 emitted - so a treebox-owned restart never leaves egress silently open.
