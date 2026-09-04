@@ -86,11 +86,15 @@ class Harness:
         in-container token refresh and agent state work against the copy; a
         staged copy whose source is gone (host logout) is deleted. Both a
         re-login and a revocation therefore reach the sandbox on the next
-        entry. The live login dir itself is never touched.
+        entry. The live login dir itself is never touched. Filesystem errors
+        raise ``RuntimeError``; see ``docs/usage.md`` for recovery guidance.
+
+        The caller must keep ``dest.parent`` under host control and outside
+        all sandbox mounts. Only ``dest`` may be mounted into the sandbox.
         """
-        # Only dest is mounted into the sandbox. Its parent is host-owned:
-        # prepare complete files there, then atomically replace destination
-        # entries. Never open or chmod a sandbox-controlled file for writing.
+        # Prepare complete files in the host-owned parent, then atomically
+        # replace destination entries. Never open or chmod a sandbox-controlled
+        # file for writing.
         # Pin the mounted directory so a replacement cannot redirect writes.
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
