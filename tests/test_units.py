@@ -2597,7 +2597,8 @@ def test_status_compute_pr_overrides_squash_merge():
         has_upstream=True,
         ahead=2,
         merged_ancestor=False,
-        pr=PRStatus(state="merged", number=42),
+        pr=PRStatus(state="merged", number=42, head_oid="a" * 40),
+        current_oid="a" * 40,
     )
     assert s.safe and "merged" in s.label and "#42" in s.label
 

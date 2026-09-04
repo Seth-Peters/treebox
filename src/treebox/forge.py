@@ -18,6 +18,7 @@ chooser degrades cleanly to Tier-1.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Literal
@@ -39,6 +40,7 @@ class PRStatus:
     state: PRState
     number: int | None = None
     url: str | None = None
+    head_oid: str | None = None
 
     @property
     def merged(self) -> bool:
@@ -47,6 +49,13 @@ class PRStatus:
     @property
     def open(self) -> bool:
         return self.state in ("open", "draft")
+
+
+def _head_oid(value: object) -> str | None:
+    """Only a complete commit identity can authorize the merged badge."""
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+        return value.lower()
+    return None
 
 
 def _run(argv: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str] | None:
@@ -93,7 +102,7 @@ class GhForge(Forge):
 
     def pr_status(self, repo_path: str, branch: str) -> PRStatus | None:
         proc = _run(
-            ["gh", "pr", "view", branch, "--json", "state,number,url,isDraft"],
+            ["gh", "pr", "view", branch, "--json", "state,number,url,isDraft,headRefOid"],
             cwd=repo_path,
         )
         if proc is None:
@@ -101,6 +110,8 @@ class GhForge(Forge):
         try:
             data = json.loads(proc.stdout)
         except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(data, dict):
             return None
         raw = str(data.get("state", "")).upper()
         state: PRState
@@ -117,6 +128,7 @@ class GhForge(Forge):
             state=state,
             number=number if isinstance(number, int) else None,
             url=data.get("url") or None,
+            head_oid=_head_oid(data.get("headRefOid")),
         )
 
 
@@ -153,10 +165,10 @@ class GlabForge(Forge):
         statuses = [st for st in (self._parse_mr(mr) for mr in items) if st is not None]
         if not statuses:
             return None
-        # A branch can carry several MRs (an abandoned closed one plus the real
-        # merged/open one); merged and open outrank closed.
-        rank: dict[PRState, int] = {"merged": 0, "open": 1, "draft": 1, "closed": 2}
-        return min(statuses, key=lambda st: rank[st.state])
+        # Branch names are reusable. An old merged request must not mask a
+        # newer request for new work. Project-local IIDs increase on creation;
+        # do not rely on API ordering (an old MR can be updated more recently).
+        return max(statuses, key=lambda st: st.number or 0)
 
     @staticmethod
     def _parse_mr(mr: object) -> PRStatus | None:
@@ -178,6 +190,7 @@ class GlabForge(Forge):
             state=state,
             number=number if isinstance(number, int) else None,
             url=mr.get("web_url") or None,
+            head_oid=_head_oid(mr.get("sha")),
         )
 
 

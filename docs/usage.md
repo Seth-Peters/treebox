@@ -302,6 +302,15 @@ state — which is the only reliable way to spot a **squash** merge. Everything
 degrades cleanly: no CLI, an unknown host, or offline just falls back to the
 local badge.
 
+A merged PR/MR proves a squash merge only when its recorded head commit
+matches the worktree's current commit. New local or pushed commits on a reused
+branch do not inherit the old request's green badge. If the commits differ or
+the forge does not supply a complete head commit ID, the picker shows
+`merge not verified for current tip` unless local Git independently proves
+the current commit is already in the base. GitLab uses the newest request for
+the branch, so an old merged request does not hide a newer open one. Dirty
+worktrees remain unsafe even when their committed work has merged.
+
 The branch question is per-worktree, not one switch for the batch — drop a
 merged branch and keep an in-progress one in the same pass, so
 `--delete-branch` isn't something you have to remember up front. `Ctrl+C` at

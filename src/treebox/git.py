@@ -526,6 +526,14 @@ def ahead_behind(worktree: str | Path) -> AheadBehind | None:
     return AheadBehind(ahead=ahead, behind=behind)
 
 
+def head_oid(worktree: str | Path) -> str | None:
+    """Snapshot the current commit, or return unknown if it cannot be read."""
+    try:
+        return _run(["-C", str(worktree), "rev-parse", "--verify", "HEAD^{commit}"]).strip()
+    except GitError:
+        return None
+
+
 def is_merged_into(repo: str | Path, branch: str, base: str) -> bool:
     """Whether ``branch`` is an ancestor of ``origin/<base>`` (its commits are
     already contained there). Catches merge-commit / fast-forward / rebase
