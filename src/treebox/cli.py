@@ -990,7 +990,8 @@ def _worktree_status(
     branch: str | None = None if row["branch"] == "detached" else row["branch"]
     ab = git.ahead_behind(path)
     base = row["base"] or default_base
-    merged_ancestor = git.is_merged_into(repo_path, branch, base) if branch else False
+    current_oid = git.head_oid(path)
+    merged_ancestor = git.is_merged_into(repo_path, current_oid, base) if current_oid else False
     pr = None
     if provider is not None and branch and not row["unnamed"]:
         pr = provider.pr_status(repo_path, branch)
@@ -1001,6 +1002,7 @@ def _worktree_status(
         ahead=ab.ahead if ab else 0,
         merged_ancestor=merged_ancestor,
         pr=pr,
+        current_oid=current_oid,
     )
 
 

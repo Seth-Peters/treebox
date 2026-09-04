@@ -32,11 +32,16 @@ def compute(
     ahead: int,
     merged_ancestor: bool,
     pr: PRStatus | None,
+    current_oid: str | None = None,
 ) -> WorktreeStatus:
     """Build the badge. ``pr`` (when present) sees squash merges that the local
     ancestor check cannot; ``merged_ancestor`` covers branches merged outside
-    the PR (or with no forge answering). Either signal marks the branch merged."""
-    pr_merged = pr is not None and pr.merged
+    the PR (or with no forge answering). A PR proves a squash merge only when
+    its recorded head matches the current commit. A branch name alone cannot
+    prove that later work is included in an old merge."""
+    pr_merged = (
+        pr is not None and pr.merged and pr.head_oid is not None and pr.head_oid == current_oid
+    )
 
     # A never-pushed placeholder with no commits of its own trivially passes the
     # ancestor check — its tip *is* ``origin/<base>`` — so ``merged_ancestor`` is
@@ -53,10 +58,12 @@ def compute(
         parts.append("⚠ empty")
     elif merged:
         tag = "✓ merged"
-        if pr is not None and pr.number:
+        if pr_merged and pr is not None and pr.number:
             tag += f" (PR #{pr.number})"
         parts.append(tag)
     else:
+        if pr is not None and pr.merged:
+            parts.append("⚠ merge not verified for current tip")
         if pr is not None and pr.open:
             label = "draft" if pr.state == "draft" else "open"
             parts.append(f"● PR #{pr.number} {label}" if pr.number else f"● PR {label}")
@@ -67,7 +74,9 @@ def compute(
         elif not (pr is not None and pr.open):
             parts.append("unmerged")
 
-    caution = (pr is not None and pr.open) or placeholder or not has_upstream or ahead > 0
+    caution = (
+        (pr is not None and (pr.open or pr.merged)) or placeholder or not has_upstream or ahead > 0
+    )
     if dirty:
         style = "wt.fail"
     elif merged:

@@ -291,16 +291,25 @@ $ treebox teardown
   Removed 1 worktree · kept 1 with uncommitted changes.
 ```
 
-The badge is pure local git — dirty tree, ahead/behind, merged into your base,
-never-pushed — so it works on **any** remote (GitHub, GitLab, Bitbucket, plain
-git) and any auth. A freshly created worktree with no commits of its own reads
-`⚠ empty` (safe to delete, but not to be mistaken for a landed branch) rather
-than `✓ merged`, since a placeholder sitting exactly at your base trivially
-counts as "merged into" it. If a forge CLI you're already logged into is present
+The badge starts with local Git facts: uncommitted changes, commits ahead of
+the upstream, whether the current commit is in the base, and whether an
+upstream is set. These checks work with **any** remote (GitHub, GitLab,
+Bitbucket, plain git) and any auth. A freshly created worktree with no commits
+of its own shows `⚠ empty` (safe to delete when clean). Its tip is already in
+the base, but no work has been merged. If a forge CLI you're already logged into is present
 (`gh` for GitHub, `glab` for GitLab), the picker also shows the branch's PR/MR
-state — which is the only reliable way to spot a **squash** merge. Everything
-degrades cleanly: no CLI, an unknown host, or offline just falls back to the
-local badge.
+state. With no CLI, an unknown host, or no connection, the picker falls back
+to the local badge.
+
+A merged PR/MR proves a squash merge only when its recorded head commit
+matches the worktree's current commit. New local or pushed commits on a reused
+branch do not inherit the old request's green badge. If a merged request is
+found but the current commit cannot be read, the commits differ, or the
+request has no complete, valid head commit ID, the picker shows
+`merge not verified for current tip` unless local Git independently proves
+the current commit is already in the base. GitLab uses the newest request for
+the branch, so an old merged request does not hide a newer open one. Dirty
+worktrees remain unsafe even when their committed work has merged.
 
 The branch question is per-worktree, not one switch for the batch — drop a
 merged branch and keep an in-progress one in the same pass, so
