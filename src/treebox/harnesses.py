@@ -23,8 +23,11 @@ Invariants (part of this module's interface, relied on by every caller):
 
 from __future__ import annotations
 
+import os
+import secrets
 import shutil
 from collections.abc import Sequence
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,17 +86,40 @@ class Harness:
         in-container token refresh and agent state work against the copy; a
         staged copy whose source is gone (host logout) is deleted. Both a
         re-login and a revocation therefore reach the sandbox on the next
-        entry. The live login dir itself is never touched.
+        entry. The live login dir itself is never touched. Filesystem errors
+        raise ``RuntimeError``; see ``docs/usage.md`` for recovery guidance.
+
+        The caller must keep ``dest.parent`` under host control and outside
+        all sandbox mounts. Only ``dest`` may be mounted into the sandbox.
         """
-        dest.mkdir(mode=0o700, parents=True, exist_ok=True)
-        src_dir = self.credential_path()
-        for name in self._credential_files:
-            src, dst = src_dir / name, dest / name
-            if src.is_file():
-                shutil.copy2(src, dst)
-                dst.chmod(0o600)
-            elif dst.is_file():
-                dst.unlink()
+        # Prepare complete files in the host-owned parent, then atomically
+        # replace destination entries. Never open or chmod a sandbox-controlled
+        # file for writing.
+        # Pin the mounted directory so a replacement cannot redirect writes.
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with ExitStack() as stack:
+                parent_fd = os.open(dest.parent, os.O_RDONLY | os.O_DIRECTORY)
+                stack.callback(os.close, parent_fd)
+                with suppress(FileExistsError):
+                    os.mkdir(dest.name, mode=0o700, dir_fd=parent_fd)
+                dest_fd = os.open(
+                    dest.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+                )
+                stack.callback(os.close, dest_fd)
+                src_dir = self.credential_path()
+                for name in self._credential_files:
+                    src = src_dir / name
+                    if src.is_file():
+                        _replace_credential(src, name, parent_fd, dest_fd)
+                    else:
+                        with suppress(FileNotFoundError):
+                            os.unlink(name, dir_fd=dest_fd)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot safely refresh credentials at {dest}: {exc.strerror}. "
+                "Check the staged credential directory and remove conflicting directories."
+            ) from exc
 
     def sandbox_mount(self, staged: Path, user: str) -> tuple[Path, str]:
         """Where a sandbox mounts the staged copies: ``(host source, target)``.
@@ -103,6 +129,25 @@ class Harness:
         it), for the in-container user ``user``.
         """
         return staged, f"/home/{user}/.{self.name}"
+
+
+def _replace_credential(src: Path, name: str, parent_fd: int, dest_fd: int) -> None:
+    """Publish a private host-side copy without following destination links."""
+    temporary = f".treebox-credential-{secrets.token_hex(16)}"
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=parent_fd,
+    )
+    try:
+        with os.fdopen(fd, "wb") as out, src.open("rb") as source:
+            os.fchmod(out.fileno(), 0o600)
+            shutil.copyfileobj(source, out)
+        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=dest_fd)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=parent_fd)
 
 
 CLAUDE = Harness(

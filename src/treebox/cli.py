@@ -65,7 +65,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1  # generic / unexpected failure
 EXIT_USAGE = 2  # bad invocation (invalid name/branch, ambiguous ref, bad option)
 EXIT_NOTFOUND = 3  # the worktree/branch the command needs does not exist
-EXIT_PERMISSION = 4  # auth / fetch / credential problem
+EXIT_PERMISSION = 4
 EXIT_CONFLICT = 5  # already exists / uncommitted changes / lock held
 
 # Current JSON schema version. Payloads only ever *gain* fields within a
