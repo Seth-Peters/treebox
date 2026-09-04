@@ -1,10 +1,7 @@
 """Optional pull/merge-request status for the teardown chooser.
 
-Tier-1 status (dirty / ahead / merged-by-ancestor / never-pushed) is pure local
-git and forge-agnostic — every user gets it regardless of provider or auth. This
-module adds the *optional* Tier-2 signal: whether a branch has an open or merged
-PR/MR. That is inherently forge-specific, and it is the only reliable way to see
-a **squash** merge (which ``git.is_merged_into`` cannot detect).
+Tier-1 status comes from local Git facts. This module supplies optional Tier-2
+PR/MR data to ``status.compute``, which owns the merge-evidence checks.
 
 It never handles credentials. It delegates entirely to a forge CLI the user has
 already logged into — ``gh`` for GitHub, ``glab`` for GitLab — probed against the
