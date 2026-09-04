@@ -277,9 +277,8 @@ def _resolve_submodule_copy(
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
     absolute and ``..``-escaping values, never follow a source that is itself a
-    symlink, and require both endpoints to resolve inside their roots — else a
-    malicious repo can pull host trees into the agent mount (``vendor -> /home``)
-    or copy outside the worktree entirely.
+    symlink, and require the source to resolve inside its root - else a
+    malicious repo can pull host trees into the agent mount (``vendor -> /home``).
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
@@ -292,9 +291,7 @@ def _resolve_submodule_copy(
     if not src.is_dir():
         return None  # not checked out in the source repo; nothing to copy
     dest = worktree / p
-    if not src.resolve().is_relative_to(repo.resolve()) or not dest.resolve().is_relative_to(
-        worktree.resolve()
-    ):
+    if not src.resolve().is_relative_to(repo.resolve()):
         reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
         return None
     return src, dest

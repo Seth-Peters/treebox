@@ -14,16 +14,7 @@ from treebox.cli import app
 from treebox.submodule_copy import SubmoduleCopyError, copy_submodule
 
 
-def test_checkout_nested_submodule_link_cannot_overwrite_host_file(
-    repo: Path, tmp_path: Path, hermetic_config: Path
-) -> None:
-    """An ordinary checkout can track a link below the source's submodule root."""
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    victim = outside / "victim"
-    victim.write_text("host data\n")
-    (repo / "sub" / "inner").mkdir()
-    (repo / "sub" / "inner" / "victim").write_text("source data\n")
+def _create_link_checkout(repo: Path, tmp_path: Path, link_path: str, target: Path) -> None:
     env = dict(
         os.environ,
         GIT_INDEX_FILE=str(tmp_path / "attack-index"),
@@ -45,10 +36,36 @@ def test_checkout_nested_submodule_link_cannot_overwrite_host_file(
 
     git("read-tree", "main")
     git("update-index", "--force-remove", "sub")
-    link = git("hash-object", "-w", "--stdin", data=str(outside))
-    git("update-index", "--add", "--cacheinfo", f"120000,{link},sub/inner")
+    link = git("hash-object", "-w", "--stdin", data=str(target))
+    git("update-index", "--add", "--cacheinfo", f"120000,{link},{link_path}")
     commit = git("commit-tree", git("write-tree"), "-p", "main", data="unsafe checkout\n")
     git("branch", "copy-target", commit)
+
+
+@pytest.mark.parametrize(
+    ("relative", "link_path"),
+    [
+        ("sub", "sub/inner"),
+        ("sub", "sub"),
+        ("vendor/lib", "vendor"),
+        ("vendor/lib", "vendor/lib"),
+    ],
+)
+def test_checkout_submodule_link_cannot_overwrite_host_file(
+    repo: Path, tmp_path: Path, hermetic_config: Path, relative: str, link_path: str
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim"
+    victim.write_text("host data\n")
+    if relative != "sub":
+        (repo / relative).parent.mkdir(parents=True)
+        (repo / "sub").rename(repo / relative)
+        modules = repo / ".gitmodules"
+        modules.write_text(modules.read_text().replace("path = sub", f"path = {relative}"))
+    (repo / relative / "inner").mkdir()
+    (repo / relative / "inner" / "victim").write_text("source data\n")
+    _create_link_checkout(repo, tmp_path, link_path, outside)
 
     root = tmp_path / "worktrees"
     args = ["create", "--checkout", "copy-target", "--repo", str(repo), "--root", str(root)]
@@ -59,16 +76,105 @@ def test_checkout_nested_submodule_link_cannot_overwrite_host_file(
     error = json.loads(result.stderr)
     assert error["schemaVersion"] == 1
     assert error["error"]["code"] == "DESTINATION_CONFLICT"
-    assert error["error"]["path"] == str(root / "copy-target" / "sub" / "inner")
+    assert error["error"]["path"] == str(root / "copy-target" / link_path)
     assert "hint" in error["error"]
 
     # Failed copies remain retryable after the operator moves the unsafe link.
-    dest = root / "copy-target" / "sub" / "inner"
+    dest = root / "copy-target" / link_path
     dest.unlink()
     retry = CliRunner().invoke(app, [*args, "--json"], catch_exceptions=False)
     assert retry.exit_code == 0, retry.output
-    assert (dest / "victim").read_text() == "source data\n"
+    assert (root / "copy-target" / relative / "inner" / "victim").read_text() == "source data\n"
     assert victim.read_text() == "host data\n"
+
+
+def test_create_retry_preserves_readonly_submodule_directories(
+    repo: Path, tmp_path: Path, hermetic_config: Path
+) -> None:
+    source = repo / "sub"
+    nested = source / "nested"
+    nested.mkdir()
+    (nested / "run").write_text("source data\n")
+    (nested / "run").chmod(0o751)
+    (repo / "later" / "inner").mkdir(parents=True)
+    (repo / "later" / "inner" / "victim").write_text("later data\n")
+    with (repo / ".gitmodules").open("a") as modules:
+        modules.write('\n[submodule "later"]\n\tpath = later\n\turl = unused\n')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim").write_text("host data\n")
+    _create_link_checkout(repo, tmp_path, "later/inner", outside)
+    root = tmp_path / "worktrees"
+    dest = root / "copy-target"
+    args = ["create", "--checkout", "copy-target", "--repo", str(repo), "--root", str(root)]
+    source.chmod(0o555)
+    nested.chmod(0o550)
+    try:
+        result = CliRunner().invoke(app, [*args, "--json"], catch_exceptions=False)
+        assert result.exit_code == 5, result.output
+        error = json.loads(result.stderr)["error"]
+        assert error["code"] == "DESTINATION_CONFLICT"
+        assert error["path"] == str(dest / "later" / "inner")
+        assert (dest / "sub").stat().st_mode & 0o777 == 0o555
+        assert (dest / "sub" / "nested").stat().st_mode & 0o777 == 0o550
+
+        (dest / "later" / "inner").unlink()
+        retry = CliRunner().invoke(app, [*args, "--json"], catch_exceptions=False)
+        assert retry.exit_code == 0, retry.output
+        enter = CliRunner().invoke(
+            app,
+            ["enter", "copy-target", "--repo", str(repo), "--root", str(root), "--json"],
+            catch_exceptions=False,
+        )
+        assert enter.exit_code == 0, enter.output
+        assert (dest / "sub" / "nested" / "run").read_text() == "source data\n"
+        assert (dest / "sub" / "nested" / "run").stat().st_mode & 0o777 == 0o751
+        assert (dest / "later" / "inner" / "victim").read_text() == "later data\n"
+        assert (outside / "victim").read_text() == "host data\n"
+        for path, mode in [(source, 0o555), (nested, 0o550)]:
+            assert path.stat().st_mode & 0o777 == mode
+            assert (dest / path.relative_to(repo)).stat().st_mode & 0o777 == mode
+    finally:
+        for path in [source, nested, dest / "sub", dest / "sub" / "nested"]:
+            if path.is_dir():
+                path.chmod(0o755)
+
+
+@pytest.mark.parametrize("relative", ["sub", "sub/nested"])
+def test_readonly_directory_modes_are_restored_after_conflict_and_retry(
+    tmp_path: Path, relative: str
+) -> None:
+    repo, worktree = tmp_path / "repo", tmp_path / "worktree"
+    source, dest = repo / relative, worktree / relative
+    source.mkdir(parents=True)
+    (source / "entry").write_text("source data")
+    (dest / "entry").mkdir(parents=True)
+    (dest / "entry" / "keep").write_text("user data")
+    directories = {source: 0o555, repo / "sub": 0o555, dest: 0o500, worktree / "sub": 0o500}
+    for path, mode in directories.items():
+        path.chmod(mode)
+    try:
+        with pytest.raises(SubmoduleCopyError) as error:
+            copy_submodule(repo, worktree, Path("sub"))
+        assert error.value.conflict
+        assert error.value.path == dest / "entry"
+        for path, mode in directories.items():
+            assert path.stat().st_mode & 0o777 == mode
+        assert (dest / "entry" / "keep").read_text() == "user data"
+        assert not list(worktree.rglob(".treebox-copy-*"))
+
+        dest.chmod(0o700)
+        (dest / "entry").rename(dest / "extra")
+        dest.chmod(0o500)
+        for _ in range(2):
+            copy_submodule(repo, worktree, Path("sub"))
+            assert (dest / "entry").read_text() == "source data"
+            assert (dest / "extra" / "keep").read_text() == "user data"
+            for path in directories:
+                assert path.stat().st_mode & 0o777 == 0o555
+    finally:
+        for path in directories:
+            path.chmod(0o755)
 
 
 @pytest.mark.parametrize("kind", ["hardlink", "symlink"])

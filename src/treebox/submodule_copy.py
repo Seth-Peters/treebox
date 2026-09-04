@@ -122,27 +122,35 @@ def _copy_leaf(source: _Directory, dest: _Directory, name: str, mode: int) -> No
 
 
 def _copy_contents(source: _Directory, dest: _Directory) -> None:
-    for name in os.listdir(source.fd):
-        if name == ".git":
-            continue
-        try:
-            metadata = os.stat(name, dir_fd=source.fd, follow_symlinks=False)
-            if stat.S_ISDIR(metadata.st_mode):
-                with (
-                    _directory(source.path / name, parent=source) as child_source,
-                    _directory(dest.path / name, parent=dest, create=True) as child_dest,
-                ):
-                    _copy_contents(child_source, child_dest)
-            else:
-                _copy_leaf(source, dest, name, metadata.st_mode)
-        except OSError as exc:
-            raise SubmoduleCopyError(
-                dest.path / name, str(exc), conflict=exc.errno in _CONFLICT_ERRNOS
-            ) from exc
     dest.check()
-    metadata = os.fstat(source.fd)
-    os.fchmod(dest.fd, stat.S_IMODE(metadata.st_mode))
-    os.utime(dest.fd, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    final_mode = stat.S_IMODE(os.fstat(dest.fd).st_mode)
+    writable_mode = final_mode | stat.S_IRWXU
+    if writable_mode != final_mode:
+        os.fchmod(dest.fd, writable_mode)
+    try:
+        for name in os.listdir(source.fd):
+            if name == ".git":
+                continue
+            try:
+                metadata = os.stat(name, dir_fd=source.fd, follow_symlinks=False)
+                if stat.S_ISDIR(metadata.st_mode):
+                    with (
+                        _directory(source.path / name, parent=source) as child_source,
+                        _directory(dest.path / name, parent=dest, create=True) as child_dest,
+                    ):
+                        _copy_contents(child_source, child_dest)
+                else:
+                    _copy_leaf(source, dest, name, metadata.st_mode)
+            except OSError as exc:
+                raise SubmoduleCopyError(
+                    dest.path / name, str(exc), conflict=exc.errno in _CONFLICT_ERRNOS
+                ) from exc
+        dest.check()
+        metadata = os.fstat(source.fd)
+        os.utime(dest.fd, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        final_mode = stat.S_IMODE(metadata.st_mode)
+    finally:
+        os.fchmod(dest.fd, final_mode)
 
 
 def copy_submodule(repo: Path, worktree: Path, relative: Path) -> None:
