@@ -142,9 +142,8 @@ def dry_run_plan(
 ) -> tuple[Worktree, list[str]]:
     """The exact git/runner commands ``create`` would run, without side effects.
 
-    Enforces the same read-only preconditions as a real ``create`` - raising the
-    same conflict/not-found errors rather than returning a plan a real run would
-    refuse - judged against locally available refs (a dry run never fetches).
+    Checks use locally available refs because this plan must not fetch or write.
+    See ``docs/usage.md#dry-run-checks`` for the preflight contract.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False

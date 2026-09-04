@@ -146,10 +146,10 @@ treebox teardown                        # pick interactively
 treebox is built to be scripted, including by agents: the worktree commands and
 `doctor` take `--json` (data to stdout, diagnostics to stderr, a schema that
 only gains fields within a version), `--dry-run` prints the exact commands
-without running them (and fails with the same errors a real run would, so it
-doubles as a preflight), and exit codes are stable (`0` ok · `1` runtime/doctor
+without running them, and exit codes are stable (`0` ok · `1` runtime/doctor
 blocked · `2` usage · `3` not found · `4` auth · `5` conflict). Full
-reference in the [usage guide](https://seth-peters.github.io/treebox/usage/).
+reference, including [dry-run checks and limits](https://seth-peters.github.io/treebox/usage/#dry-run-checks),
+is in the [usage guide](https://seth-peters.github.io/treebox/usage/).
 
 ## Every agent ships its own cage
 

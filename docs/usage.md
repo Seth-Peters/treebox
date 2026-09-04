@@ -99,6 +99,27 @@ after registering the worktree but before setup completed, running the same
 `create` again finishes setup instead; a fully provisioned same-name worktree
 is still a conflict.
 
+### Submodule copies and recovery
+
+During `create`, including retries, treebox merges checked-out submodule
+contents from the source repo into the worktree. It preserves regular file
+contents and permissions, including executable bits. Source symlinks, including
+dangling links, are copied as links. Entries named `.git` are excluded at every
+depth, and `.git` cannot be a submodule path component. Destination entries
+that have no matching source entry are kept.
+
+Existing destination symlinks and hardlinks at file locations are replaced
+without writing to their targets. Paths to destination directories must contain
+real directories. A symlink or file in a directory path, a directory blocking a
+source file or link, or a directory that changes during copying stops creation.
+Treebox does not remove conflicting directories.
+
+A copy failure identifies the affected path and gives a recovery hint. Inspect
+that path, move any conflicting entry aside, then retry `create` with the same
+worktree name and branch. Files copied before the failure can remain; the retry
+merges the contents again. `enter` does not copy submodules. See the
+[scripting contract](#scripting-against-treebox) for error codes and JSON fields.
+
 ### Stacking on another branch
 
 `--base` isn't limited to `main`. Point it at `dev`, a release branch, or an
@@ -133,19 +154,23 @@ $ treebox create fix-auth --dry-run
     $ uv sync
 ```
 
-A dry run is also a real preflight: it enforces the same read-only
-preconditions as `create` and fails with the identical exit code and JSON
-error - `BRANCH_EXISTS` for a name whose branch already exists,
+<a id="dry-run-checks"></a>
+
+A dry run checks repository, worktree registration, and template preconditions.
+It reports the corresponding `create` exit code and JSON error -
+`BRANCH_EXISTS` for a name whose branch already exists,
 `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
 `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
 backing another worktree, `TEMPLATE_NOT_FOUND` for a docker `--template` that
 doesn't resolve, `TEMPLATE_INVALID` for one that resolves but whose
-`container.json` (or `firewall.json` with `--firewall`) is broken - rather
-than printing a plan a real run would refuse. The one exception mirrors real
-`create`: a half-built worktree from an interrupted run previews finishing
-setup (no fetch, no `worktree add`) instead of conflicting. Dry-run verdicts reflect the refs already available locally;
-run `git fetch origin` first when exact parity with create's normal fetch is
-required. Either way, nothing on disk or in git changes.
+`container.json` (or `firewall.json` with `--firewall`) is broken.
+As with real `create`, a half-built worktree from an interrupted run previews
+finishing setup (no fetch, no `worktree add`) instead of conflicting. Dry-run
+verdicts reflect the refs already available locally; run `git fetch origin`
+first when exact parity with create's normal fetch is required. A dry run does
+not copy submodules or inspect their destination paths, so it cannot detect
+[submodule copy conflicts](#submodule-copies-and-recovery).
+Nothing on disk or in git changes.
 
 ## `enter` — come back to a worktree
 
@@ -399,20 +424,14 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 The worktree commands and `doctor` take `--json`; payloads carry a
 `schemaVersion` — fields are only ever added within a version, and a breaking
 reshape or rename bumps it. Agents branch on these payloads, so treat the shape
-as a contract:
+as a contract. Request JSON output with:
 
 ```console
 $ treebox create fix-auth --json
-{
-  "schemaVersion": 1,
-  "name": "fix-auth",
-  "worktree_path": "/home/you/code/myapp/.treebox/worktrees/fix-auth",
-  "branch": "treebox/fix-auth",
-  "base": "main",
-  "entry_command": ["sh", "-c", "cd /home/you/code/myapp/.treebox/worktrees/fix-auth && exec claude --dangerously-skip-permissions"],
-  "created": true
-}
 ```
+
+For a complete result, see the generated
+[`create --json` snapshot](https://github.com/Seth-Peters/treebox/blob/main/tests/golden/create-host-json.txt).
 
 With `--json` (or `--print`) treebox provisions but does **not** launch the
 agent — it hands you the launch command instead, so your script decides when
@@ -465,7 +484,7 @@ JSON errors are emitted to stderr as:
 
 `error.code` and `error.message` are always present; `error.hint` and
 `error.path` appear when treebox has useful remediation or a path-specific
-failure.
+failure. Both submodule copy errors include `error.path` and `error.hint`.
 
 `error.code` and the exit code are the scripting contract:
 
@@ -481,7 +500,9 @@ failure.
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
+| `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `ERROR` | `1` | Unclassified runtime or setup failure. |
+| `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
