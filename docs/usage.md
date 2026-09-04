@@ -36,9 +36,9 @@ lockfile hash, and launches the agent.
 An explicit `NAME` is intentional, so it **is the branch**, created fresh
 from `origin/<base>`: slug tokens joined by slashes
 (`fix-auth`, `feature/user-auth`), with the slashes flattened to `--` in the
-directory. The flattened form is the worktree's **permanent identity**: the
-directory (`.treebox/worktrees/<name>`), the lock key, and what `enter` /
-`teardown` address. The `treebox/` prefix is reserved for generated
+directory. Use the flattened name when
+[selecting a worktree](#enter-come-back-to-a-worktree).
+The `treebox/` prefix is reserved for generated
 placeholders and rejected as a name.
 
 You never *have* to invent a branch name up front, though. Omit `NAME` and
@@ -154,11 +154,16 @@ treebox enter fix-auth --harness claude
 treebox enter fix-auth --harness codex -- --resume
 ```
 
-`enter` (and `teardown`) take a **ref**: the worktree name, its *current*
-branch, or a unique substring of either — resolved live from git, so a branch
-the agent renamed five minutes ago still works. An ambiguous ref is a loud
-exit `2` listing the matches, never a guess. If the ref names a branch that
-exists but has no worktree (never materialized, or torn down), the `NOT_FOUND`
+`enter` and `teardown` select from registered linked worktrees below the
+configured root, including nested directories. The main checkout is excluded.
+They take a **ref**, matched in this order: exact worktree name, exact current
+branch, then a unique substring of either. Branches are read live from git,
+so a renamed branch still works. An ambiguous ref exits `2` and lists the
+matches. If nested worktrees share a name, use their distinct branch refs or
+set `--root` to the target's parent directory. Operations then follow the
+[selected worktree path](how-it-works.md#names-are-identity-branches-are-mutable).
+If the ref names a branch that exists but has no worktree (never materialized,
+or torn down), the `NOT_FOUND`
 error hints at `treebox create --checkout REF` instead of the generic advice.
 
 Re-enters the worktree and launches the agent. By default it reuses the
@@ -214,9 +219,9 @@ committed. The **name** is the stable handle; the **branch** is read live.
 A worktree's **isolation** is read from its recorded creation-time state;
 legacy worktrees or registrations whose state is unavailable show `unknown`
 instead of being mislabeled with the current config default. The muted
-**Root** footer combines with each stable name to identify its directory
-without repeating long paths in every row; `list --json` carries each full
-`path`. On a narrow terminal, the commit-subject column is omitted first so
+**Root** footer shows the discovery root. It does not show the intermediate
+directories of nested worktrees; use `list --json` for each full `path`.
+On a narrow terminal, the commit-subject column is omitted first so
 identity, isolation, age, dependency freshness, and `.env` state stay legible.
 If name and branch still cannot fit side by side, the branch moves below its
 stable name instead of either value being truncated.
@@ -240,11 +245,12 @@ Takes one or more refs (name, branch, or unique substring). Every ref is
 resolved before anything is removed — a typo among three targets removes
 nothing. Refuses to remove a worktree with uncommitted changes unless you pass
 `--force`. For docker-sandboxed worktrees, `--remove-volumes` also removes
-per-workspace volumes authorized by the runner-owned manifest written outside
+per-workspace volumes authorized by the
+[runner-owned manifest](how-it-works.md#freshness-is-enforced-not-hoped-for) written outside
 the sandbox mount at create time, so they are still removed when the container
 and user template were already deleted. If that manifest is missing or
 invalid, including on older worktrees or after manual deletion of the
-`<worktree-root>/.containers/<worktree>` directory, treebox warns and skips volume removal
+rendered config directory, treebox warns and skips volume removal
 instead of guessing. `--skip-container` leaves containers/images untouched.
 `--json` prints a structured record of what was removed (and never blocks on
 a prompt).

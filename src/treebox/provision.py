@@ -516,8 +516,7 @@ def create(
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
 
-    # The name is the identity, so an existing directory is a conflict — loud,
-    # with the ways out — EXCEPT the crash-recovery case: a prior run created
+    # An existing target directory is a conflict except when a prior run created
     # the dir on this exact branch but died before setup finished (state is
     # recorded only after runner.setup completes). Launching into that
     # half-built tree would be the "said Ready, then failed" bug; finish it.

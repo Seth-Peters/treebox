@@ -818,7 +818,7 @@ def _run_session(
     args: list[str],
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
-    the per-name worktree lock, the provisioning step, one exception →
+    the worktree lock (see ``locking.worktree_lock``), the provisioning step, one exception →
     exit-code classification, then the ``--json`` / ``--print`` / launch fork.
 
     Preflight runs first so runner-specific preconditions (a no-op for the
@@ -1350,9 +1350,9 @@ def teardown(
     if targets:
         try:
             with contextlib.ExitStack() as stack:
-                # The same per-name lock create/enter hold: a teardown must not
+                # The same worktree lock create/enter hold: a teardown must not
                 # delete the tree or its container out from under a concurrent
-                # provision of the same name. Every lock is taken before any
+                # provision of the same target. Every lock is taken before any
                 # removal starts, so a held lock aborts the whole batch cleanly
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:

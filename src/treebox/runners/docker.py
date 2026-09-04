@@ -83,7 +83,7 @@ from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 if TYPE_CHECKING:
     from ..config import Config
 
-# Sibling of the worktree root that holds each worktree's operator-owned
+# Host-side directory that holds each worktree's operator-owned
 # container config + build context. The config/build files themselves are NEVER
 # mounted into the container (only the worktree, its git common dir, and the
 # scoped credential copies below), so a boxed agent can't reach them.
@@ -318,8 +318,10 @@ class DockerRunner:
     # --- locations & identity --------------------------------------------------
 
     def _config_dir(self, wt: Worktree) -> Path:
-        """Host-side dir holding this worktree's container config + build
-        context. A sibling of the worktree root, so it is never mounted in."""
+        """Keep container config and build files outside the worktree mount.
+
+        See the safety invariant at ``_CONFIG_ROOT``.
+        """
         return wt.path.parent / _CONFIG_ROOT / wt.name
 
     def _config_file(self, wt: Worktree) -> Path:

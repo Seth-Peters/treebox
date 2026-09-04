@@ -141,8 +141,7 @@ Prereq: `fix-auth` worktree from B1 exists.
       `git -C "$ROOT/fix-auth" branch -m fix/auth-renamed`, then enter by the
       original name `fix-auth`, by the new branch `fix/auth-renamed`, and by a
       unique substring (e.g. `renamed`)
-      Expect: all three resolve to the same worktree, exit 0 (name is
-      permanent identity; branch is read live).
+      Expect: all three resolve to the same worktree, exit 0.
 - [ ] **C5 ambiguous & missing refs** — precondition: at least two worktrees must
       share the substring you test (create e.g. `amb-one` and `amb-two` first —
       after C4, `fix` alone matches only `fix-auth` and would resolve, not conflict).
@@ -305,7 +304,7 @@ one behind on purpose.
       `schemaVersion`; the number matches `tests/golden/` (currently `1`).
       If code and `tests/golden/` disagree with `docs/usage.md` or
       `skills/treebox/SKILL.md`, report **doc drift** as a finding.
-- [ ] **X4 per-name lock** — if any command reported a lock conflict (exit 5)
+- [ ] **X4 worktree lock** - if any command reported a lock conflict (exit 5)
       during sequential runs, that's a bug — the lock must be released on exit.
 - [ ] **X5 no host pollution** — after `e2e_cleanup`: nothing new under the real
       `~/.treebox`, no stray `treebox-e2e.*` dirs left in `$TMPDIR`,
