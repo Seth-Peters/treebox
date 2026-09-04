@@ -8,7 +8,7 @@ Ambiguity is a loud usage error, never a guess.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import git
@@ -33,6 +33,26 @@ class Candidate:
     name: str
     branch: str | None
     path: str
+
+    def under_root(self, repo: str, root: str) -> Candidate:
+        """Keep the full registered suffix and the caller's root spelling.
+
+        Git can canonicalize an alias such as /var to /private/var. Existing
+        runner resource names depend on the path spelling used at create, so
+        retain that prefix when it names the same root. Never reduce a nested
+        path to only its leaf name.
+        """
+        base = worktree_root(repo, root)
+        path = Path(self.path)
+        for prefix in (base, base.resolve()):
+            try:
+                relative = path.relative_to(prefix)
+            except ValueError:
+                continue
+            return replace(self, path=str(base / relative))
+        # The registration can use another alias for the root. Retain it
+        # rather than resolving a possibly replaced target into another tree.
+        return self
 
 
 def candidates(repo: str, root: str) -> list[Candidate]:

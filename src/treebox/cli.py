@@ -744,7 +744,7 @@ def enter(
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
     try:
-        cand = resolve.resolve_ref(repo_path, cfg.root, ref)
+        cand = resolve.resolve_ref(repo_path, cfg.root, ref).under_root(repo_path, cfg.root)
     except provision.NotFoundError as exc:
         # The branch may exist without a worktree (torn down, or never had
         # one): point at the command that materializes it instead of the
@@ -783,6 +783,7 @@ def enter(
             run,
             repo=repo_path,
             name=cand.name,
+            path=Path(cand.path),
             harness=agent,
             cold=cold,
             args=args or [],
@@ -794,7 +795,7 @@ def enter(
         run,
         agent,
         repo_path=repo_path,
-        root=cfg.root,
+        root=str(Path(cand.path).parent),
         name=cand.name,
         provision_call=_provision,
         json_out=json_out,
@@ -1271,6 +1272,12 @@ def teardown(
         if delete_branch:
             branch_delete = {c.path for c in targets}
 
+    targets = [cand.under_root(repo_path, cfg.root) for cand in targets]
+    # Selection and branch deletion use the same path spelling.
+    branch_delete = {
+        cand.path for cand in targets if any(same_path(cand.path, path) for path in branch_delete)
+    }
+
     # Defense in depth: no resolved target may be the main working tree.
     # Enumeration already excludes it, but the branch-lingering fallback above
     # can still construct the repo's own path when the root contains the repo
@@ -1349,7 +1356,9 @@ def teardown(
                 # removal starts, so a held lock aborts the whole batch cleanly
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
-                    stack.enter_context(locking.worktree_lock(repo_path, cfg.root, cand.name))
+                    stack.enter_context(
+                        locking.worktree_lock(repo_path, str(Path(cand.path).parent), cand.name)
+                    )
                 # Validate the isolation mode for EVERY target before removing
                 # anything: a mismatch or unknown recorded mode firing mid-batch
                 # would leave the earlier targets removed but unreported in the
@@ -1494,7 +1503,9 @@ def _teardown_one(
     """Tear down one resolved worktree; returns its --json record. ``run`` is
     the batch-validated runner from ``_teardown_runner``, or ``None`` under
     ``--skip-container`` (no container work, so no runner was resolved)."""
-    wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
+    wt = Worktree(
+        repo=repo_path, name=cand.name, branch=cand.branch or "", base="", path=Path(cand.path)
+    )
     exists = wt.path.is_dir()
     st = state.load_registered(repo_path, wt.path)
 

@@ -610,6 +610,7 @@ def enter(
     *,
     repo: str,
     name: str,
+    path: Path,
     harness: Harness,
     cold: bool,
     args: list[str],
@@ -619,7 +620,9 @@ def enter(
     lockfile changed since last setup or a prior setup never completed
     (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
-    wt = Worktree.locate(repo, config.root, name)
+    # Discovery can select descendants of the configured root. Keep the exact
+    # registered path instead of reconstructing root/name from its leaf.
+    wt = Worktree(repo=repo, name=name, branch="", base="", path=path)
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 
