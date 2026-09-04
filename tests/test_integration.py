@@ -553,6 +553,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         _Recorder(),
         repo=str(repo),
         name="fresh-creds",
+        path=Path(root) / "fresh-creds",
         harness=get_harness("claude"),
         cold=False,
         args=[],

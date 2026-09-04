@@ -516,8 +516,7 @@ def create(
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
 
-    # The name is the identity, so an existing directory is a conflict — loud,
-    # with the ways out — EXCEPT the crash-recovery case: a prior run created
+    # An existing target directory is a conflict except when a prior run created
     # the dir on this exact branch but died before setup finished (state is
     # recorded only after runner.setup completes). Launching into that
     # half-built tree would be the "said Ready, then failed" bug; finish it.
@@ -610,6 +609,7 @@ def enter(
     *,
     repo: str,
     name: str,
+    path: Path,
     harness: Harness,
     cold: bool,
     args: list[str],
@@ -619,7 +619,9 @@ def enter(
     lockfile changed since last setup or a prior setup never completed
     (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
-    wt = Worktree.locate(repo, config.root, name)
+    # Discovery can select descendants of the configured root. Keep the exact
+    # registered path instead of reconstructing root/name from its leaf.
+    wt = Worktree(repo=repo, name=name, branch="", base="", path=path)
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 

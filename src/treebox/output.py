@@ -363,14 +363,13 @@ class Reporter:
     def render_list(self, rows: list[WorktreeRow], root_path: str) -> None:
         """Render the worktree list as a clean, aligned, color-coded view.
 
-        Recognition lives here, not in directory names: NAME is the permanent
-        identity, BRANCH is read live (the agent renames it as work takes
-        shape), ISOLATION comes from the worktree's recorded state, and LAST
+        BRANCH is read live (the agent renames it as work takes shape),
+        ISOLATION comes from the worktree's recorded state, and LAST
         COMMIT + AGE carry the "which worktree was doing what" load. A
         placeholder (``treebox/*``) branch is always ``treebox/<name>``, so
         repeating it would be noise: the cell renders just ``⚠ unnamed`` so
-        unpushable work is visible at a glance. ROOT plus NAME identifies the
-        directory without spending a wide table column on repeated paths.
+        unpushable work is visible at a glance. For directory paths, see
+        docs/usage.md#list-what-exists-whats-stale.
         """
         console = self.data_console
         console.print()

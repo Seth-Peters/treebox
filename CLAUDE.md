@@ -91,7 +91,7 @@ Module map:
   into the package. `enter`/`teardown` resolve a ref as
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
   `create` and `enter` share `_run_session` for runner preflight, the
-  per-name lock, provision error classification, and the final
+  worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
   so the printed `entry_command` is never dead on replay).
   `_reconcile_with_state` folds recorded
@@ -119,10 +119,10 @@ Module map:
   through the repo's own worktree
   registration (`load_registered`) rather than the worktree's `.git` pointer,
   so a corrupt tree's recorded choices still drive container cleanup.
-- **`models.py`** holds the `Worktree` value object and the name-as-identity
-  rule: the *name* is the directory leaf and lock key, never renamed; the
-  *branch* is a mutable attribute read live from git (the agent renames it
-  with `git branch -m`). Branch-shaped inputs (`create feature/auth`,
+- **`models.py`** holds the `Worktree` value object. For changes to worktree
+  selection, read the [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable)
+  and `resolve.Candidate.under_root` for root alias compatibility.
+  Branch-shaped inputs (`create feature/auth`,
   `create --checkout feature/auth`) derive the name by flattening slashes to
   `--` (`feature--auth`); generated names come from `names.py`. Also home to
   `expand_user`, the tolerant `~`-expansion helper every path-consuming module
@@ -198,8 +198,7 @@ What a backend may **assume** (host locality):
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
   bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, the lockfile hash stats host files, and the
-  name-is-permanent rule in `models.py` presumes the absolute-path mount.
+  host-side private git dir, and the lockfile hash stats host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud

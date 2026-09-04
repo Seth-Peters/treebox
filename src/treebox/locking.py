@@ -1,10 +1,9 @@
-"""Cross-process advisory locking on a worktree name.
+"""Cross-process advisory locking during provisioning and teardown.
 
-Two ``create``/``enter`` calls for the same worktree must not race on its dir
-or the shared caches it writes through. We take a POSIX ``flock`` on a small
-lock file keyed by the worktree name (the permanent identity — branches are
-mutable), held for the duration of provisioning. Non-blocking with a clear
-error so a second caller fails fast instead of corrupting a half-built tree.
+For an existing worktree, callers must pass its actual parent as ``root``.
+The discovery root can be an ancestor and would lock a different worktree
+with the same name. A non-blocking POSIX ``flock`` makes a second caller fail
+before it can corrupt a worktree while another operation is in progress.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ class LockError(RuntimeError):
 
 @contextmanager
 def worktree_lock(repo: str, root: str, name: str) -> Iterator[None]:
-    """Hold an exclusive lock for the worktree ``name`` while provisioning it."""
+    """Hold an exclusive lock until the caller completes its operation."""
     try:
         import fcntl
     except ImportError:  # non-POSIX: locking unsupported, proceed unguarded

@@ -53,8 +53,7 @@ def flatten_branch(branch: str) -> str:
 
     ``feature/auth`` -> ``feature--auth``. Only used to *derive* a worktree
     name from a branch-shaped input (``create feature/auth``,
-    ``create --checkout <branch>``); the name — not the branch — is the
-    worktree's permanent identity from then on.
+    ``create --checkout <branch>``).
     """
     return branch.replace("/", "--")
 
@@ -134,12 +133,8 @@ class TemplateRow(TypedDict):
 class Worktree:
     """A provisioned (or to-be-provisioned) worktree.
 
-    ``name`` is the permanent identity: the directory leaf, the lock key, and
-    what container names/labels derive from. It is never renamed — the docker
-    runner bind-mounts the absolute path and a live agent's CWD sits in it.
-    ``branch`` is a mutable attribute: the branch the worktree was materialized
-    on, expected to be renamed by the agent (``git branch -m``); always read it
-    live from git when it matters.
+    For path identity and branch rules, see
+    docs/how-it-works.md#names-are-identity-branches-are-mutable.
     """
 
     repo: str

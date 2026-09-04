@@ -30,8 +30,7 @@ discipline, JSON shape, filesystem effects, and drift between behavior and docs.
 - **Judge behavior, not prose.** Exit codes, JSON fields, files on disk,
   stdout/stderr separation. Exact human-output text is `tests/golden/`'s job —
   don't duplicate it, and don't fail a scenario over cosmetic wording.
-- Run scenarios **sequentially** — worktree names collide and the per-name lock
-  plus shared fixture state make parallel sweeps flaky by construction.
+- Run scenarios **sequentially** because they share fixture worktrees and state.
 - Run the sweep from a **bash** shell — the fixture is bash and is `source`d. The
   session shell may be zsh, where unquoted no-match globs (`/tmp/treebox-e2e.*`)
   error instead of returning empty, tripping cleanup checks.
