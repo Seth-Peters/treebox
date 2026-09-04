@@ -1896,11 +1896,12 @@ def test_copy_env_does_not_follow_a_planted_symlink(tmp_path: Path):
     assert (worktree / ".env").read_text() == "SECRET=canonical\n"
 
 
-def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
+def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(tmp_path: Path):
     """``.gitmodules`` is untrusted: ``..``/absolute paths and symlinks must
     never make the copy read outside the repo or write outside the worktree."""
     from treebox.output import Reporter
     from treebox.provision import copy_submodules
+    from treebox.submodule_copy import SubmoduleCopyError
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1925,10 +1926,19 @@ def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
+    with pytest.raises(SubmoduleCopyError) as error:
+        copy_submodules(str(repo), worktree, Reporter())
+    assert error.value.conflict
+    assert error.value.path == worktree / "pkg"
+    assert "retry create" in error.value.hint
+    assert (worktree / "pkg").is_symlink()
+    assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+    (worktree / "pkg").unlink()
     copied = copy_submodules(str(repo), worktree, Reporter())
 
-    # Only the honest submodule is copied; every escape vector is skipped.
-    assert copied == 1
+    assert copied == 2
+    assert (worktree / "pkg" / "inner").is_dir()
     assert (worktree / "sub" / "lib.txt").read_text() == "legit\n"
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.

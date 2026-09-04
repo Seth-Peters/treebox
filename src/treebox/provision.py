@@ -24,6 +24,7 @@ from .harnesses import Harness
 from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
 from .output import Reporter
 from .runners.base import Runner
+from .submodule_copy import copy_submodule
 
 
 class ProvisionError(RuntimeError):
@@ -141,9 +142,8 @@ def dry_run_plan(
 ) -> tuple[Worktree, list[str]]:
     """The exact git/runner commands ``create`` would run, without side effects.
 
-    Enforces the same read-only preconditions as a real ``create`` - raising the
-    same conflict/not-found errors rather than returning a plan a real run would
-    refuse - judged against locally available refs (a dry run never fetches).
+    Checks use locally available refs because this plan must not fetch or write.
+    See ``docs/usage.md#dry-run-checks`` for the preflight contract.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
@@ -276,9 +276,8 @@ def _resolve_submodule_copy(
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
     absolute and ``..``-escaping values, never follow a source that is itself a
-    symlink, and require both endpoints to resolve inside their roots — else a
-    malicious repo can pull host trees into the agent mount (``vendor -> /home``)
-    or copy outside the worktree entirely.
+    symlink, and require the source to resolve inside its root - else a
+    malicious repo can pull host trees into the agent mount (``vendor -> /home``).
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
@@ -291,9 +290,7 @@ def _resolve_submodule_copy(
     if not src.is_dir():
         return None  # not checked out in the source repo; nothing to copy
     dest = worktree / p
-    if not src.resolve().is_relative_to(repo.resolve()) or not dest.resolve().is_relative_to(
-        worktree.resolve()
-    ):
+    if not src.resolve().is_relative_to(repo.resolve()):
         reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
         return None
     return src, dest
@@ -309,17 +306,10 @@ def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
         resolved = _resolve_submodule_copy(Path(repo), worktree, rel, reporter)
         if resolved is None:
             continue
-        src, dest = resolved
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        _src, dest = resolved
         # Exclude .git pointers/dirs: a copied pointer's relative gitdir path
         # breaks every git command in the linked worktree (issue #16).
-        shutil.copytree(
-            src,
-            dest,
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git"),
-        )
+        copy_submodule(Path(repo), worktree, dest.relative_to(worktree))
         copied += 1
     reporter.ok("submodules", f"copied {copied}")
     return copied

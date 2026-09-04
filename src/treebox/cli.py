@@ -59,6 +59,7 @@ from .models import (
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
 from .runners import VALID_ISOLATION, PreflightError, Runner, get_runner
+from .submodule_copy import SubmoduleCopyError
 
 # Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
 EXIT_OK = 0
@@ -352,6 +353,12 @@ _GIT_MISSING_HINT = "Install git and ensure it is on PATH."
 
 def _classify(exc: Exception) -> _ErrorInfo:
     """Map a provisioning exception to its exit code / error code / hint."""
+    if isinstance(exc, SubmoduleCopyError):
+        return _ErrorInfo(
+            EXIT_CONFLICT if exc.conflict else EXIT_ERROR,
+            "DESTINATION_CONFLICT" if exc.conflict else "SUBMODULE_COPY_FAILED",
+            exc.hint,
+        )
     if isinstance(exc, git.GitMissingError):
         # Before FetchError/GitError branches: the binary itself is absent, so
         # auth/repo hints would mislead.
@@ -421,6 +428,7 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         code=code,
         error_code=error_code,
         hint=hint,
+        path=str(exc.path) if isinstance(exc, SubmoduleCopyError) else None,
         json_out=json_out,
     )
 
