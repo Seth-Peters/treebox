@@ -385,3 +385,88 @@ def test_load_config_rejects_wrong_types(tmp_path: Path, line: str):
     cfg_file.write_text(line + "\n")
     with pytest.raises(ValueError, match="must be"):
         load_config(cfg_file)
+
+
+# --- --sbx-cpus / --sbx-memory (CLI) ---------------------------------------------
+
+
+@pytest.fixture
+def fake_sbx_cli(monkeypatch: pytest.MonkeyPatch) -> _FakeSbx:
+    """A healthy sbx for CLI-level tests: no real binary or daemon needed."""
+    fake = _FakeSbx()
+    monkeypatch.setattr("treebox.runners.sbx._sbx", fake)
+    monkeypatch.setattr("treebox.runners.sbx.system.have", lambda cmd: True)
+    monkeypatch.setattr("treebox.runners.sbx.platform.machine", lambda: "arm64")
+    return fake
+
+
+def _cli(args: list[str]):
+    from typer.testing import CliRunner
+
+    from treebox.cli import app
+
+    return CliRunner().invoke(app, args, catch_exceptions=False)
+
+
+def _dry(repo: Path, tmp_path: Path, *extra: str):
+    root = str(tmp_path / "wts")
+    return _cli(["create", "sized", "--repo", str(repo), "--root", root, "--dry-run", *extra])
+
+
+def test_flags_reach_the_sbx_create_command(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
+):
+    res = _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-cpus", "6", "--sbx-memory", "12g")
+    assert res.exit_code == 0, res.output
+    assert "--cpus 6 --memory 12g" in res.stderr
+
+
+def test_flags_override_config_values(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli, monkeypatch: pytest.MonkeyPatch
+):
+    cfg = tmp_path / "sbx.toml"
+    cfg.write_text('isolation = "sbx"\nsbx_cpus = 2\nsbx_memory = "4g"\n')
+    monkeypatch.setenv("TREEBOX_CONFIG", str(cfg))
+    # Config alone applies...
+    assert "--cpus 2 --memory 4g" in _dry(repo, tmp_path).stderr
+    # ...and a flag wins per key, leaving the other from config.
+    res = _dry(repo, tmp_path, "--sbx-cpus", "8")
+    assert "--cpus 8 --memory 4g" in res.stderr
+
+
+@pytest.mark.parametrize("isolation", [None, "host", "docker"])
+def test_flags_on_other_isolation_are_a_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config, isolation: str | None
+):
+    extra = ["--isolation", isolation] if isolation else []
+    res = _dry(repo, tmp_path, *extra, "--sbx-cpus", "4")
+    assert res.exit_code == 2, res.output
+    assert "only apply to --isolation sbx" in res.stderr
+    assert not (tmp_path / "wts").exists()  # nothing was provisioned
+    res = _dry(repo, tmp_path, *extra, "--sbx-memory", "8g", "--json")
+    assert res.exit_code == 2
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_CONFIG"
+
+
+def test_invalid_flag_values_are_a_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
+):
+    assert _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-memory", "lots").exit_code == 2
+    assert _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-cpus", "0").exit_code == 2
+    assert _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-cpus", "x").exit_code == 2
+
+
+def test_sbx_config_keys_are_inert_for_other_runners(tmp_path: Path):
+    """A global sbx_cpus/sbx_memory in config must not affect (or break) host
+    or docker isolation: only an explicit flag is rejected there."""
+    from treebox.runners import DockerRunner, HostRunner
+
+    for iso, cls in (("host", HostRunner), ("docker", DockerRunner)):
+        cfg = Config(isolation=iso, sbx_cpus=4, sbx_memory="8g")
+        validate_config(cfg)
+        assert isinstance(get_runner(cfg), cls)
+
+
+def test_enter_has_no_sbx_resource_flags(repo: Path, tmp_path: Path, hermetic_config):
+    res = _cli(["enter", "x", "--repo", str(repo), "--sbx-cpus", "4"])
+    assert res.exit_code == 2

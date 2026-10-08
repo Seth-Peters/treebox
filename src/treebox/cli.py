@@ -136,6 +136,8 @@ def _resolve_config(
     root: str | None,
     firewall: bool | None,
     template: str | None = None,
+    sbx_cpus: int | None = None,
+    sbx_memory: str | None = None,
     json_out: bool = False,
 ) -> Config:
     try:
@@ -161,7 +163,21 @@ def _resolve_config(
         root=root,
         firewall=firewall,
         template=template,
+        sbx_cpus=sbx_cpus,
+        sbx_memory=sbx_memory,
     )
+    if (sbx_cpus is not None or sbx_memory is not None) and cfg.isolation != "sbx":
+        # Explicit sbx-only flags on another runner would be silently dropped.
+        # (The sbx_* *config keys* stay inert elsewhere: a global default is
+        # not a per-run request.)
+        raise _die(
+            reporter,
+            "--sbx-cpus/--sbx-memory only apply to --isolation sbx "
+            f"(isolation is '{cfg.isolation}').",
+            code=EXIT_USAGE,
+            error_code="INVALID_CONFIG",
+            json_out=json_out,
+        )
     try:
         # Re-check after flag overrides: load_config only vets the file, and a
         # bogus --isolation/--harness must be a usage error, not a traceback.
@@ -558,6 +574,18 @@ def create(
         "Resolved from $TREEBOX_TEMPLATE_DIR or $TREEBOX_HOME/templates/<name> "
         "(default ~/.treebox/templates/<name>).",
     ),
+    sbx_cpus: int | None = typer.Option(
+        None,
+        "--sbx-cpus",
+        help="CPUs for the sandbox (sbx isolation only; fixed at creation). "
+        "Unset: the sbx_cpus config value, else the sbx default.",
+    ),
+    sbx_memory: str | None = typer.Option(
+        None,
+        "--sbx-memory",
+        help="Memory for the sandbox, e.g. 16g (sbx isolation only; fixed at creation). "
+        "Unset: the sbx_memory config value, else the sbx default.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -595,6 +623,8 @@ def create(
         # like every other config-backed option.
         firewall=firewall,
         template=template,
+        sbx_cpus=sbx_cpus,
+        sbx_memory=sbx_memory,
         json_out=json_out,
     )
     if name is not None:

@@ -99,6 +99,8 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
             "--firewall",
             "--no-firewall",
             "--template",
+            "--sbx-cpus",
+            "--sbx-memory",
             "--dry-run",
             "-n",
             "--print",
