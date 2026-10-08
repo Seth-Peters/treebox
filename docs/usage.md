@@ -91,6 +91,7 @@ or into a Docker Sandboxes microVM with `--isolation sbx` (needs `sbx` and
 | `--no-fetch`     | Opt out of the required `origin` fetch and accept possibly stale refs.    |
 | `--firewall/--no-firewall` | Enable/disable the container firewall (docker isolation). Unset: the config default applies. Not supported with `sbx` (use `sbx policy`). |
 | `--template NAME`| Operator-owned sandbox template to render.                                |
+| `--sbx-cpus N`, `--sbx-memory SIZE` | CPUs / memory for the sandbox (`sbx` isolation only; any other isolation exits `2`). Override `sbx_cpus` / `sbx_memory` from config. Fixed at creation. |
 | `--dry-run, -n`  | Print the exact commands that would run; change nothing.                  |
 | `--print`        | Provision, then print the launch command instead of launching.            |
 | `--json`         | Provision, then print a JSON result instead of launching.                 |

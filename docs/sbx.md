@@ -40,7 +40,15 @@ sbx_cpus   = 8        # optional; passed to `sbx create --cpus`
 sbx_memory = "16g"    # optional; passed to `sbx create --memory`
 ```
 
-Both keys are user-level config only, like everything else in treebox.
+Both keys are user-level config only, like everything else in treebox. For a
+single run, pass `--sbx-cpus N` / `--sbx-memory SIZE` to `create`; a flag wins
+over the config value, and using either with another isolation mode is a usage
+error (exit `2`) rather than being silently ignored. The config keys themselves
+are inert for `host` and `docker`.
+
+```bash
+treebox create fix-auth --isolation sbx --sbx-cpus 8 --sbx-memory 16g
+```
 
 ## How it works
 
