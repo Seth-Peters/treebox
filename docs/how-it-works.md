@@ -7,7 +7,7 @@ than reimplementing them. The whole tool is organized around one seam:
 Three closed vocabularies sit on top of that seam:
 
 - **Harness** — which agent CLI launches (`claude`, `codex`).
-- **Runner / isolation** — where it executes (`host`, `docker`).
+- **Runner / isolation** — where it executes (`host`, `docker`, `sbx`).
 - **Ecosystem** — what setup runs (uv, npm, pnpm, go, cargo).
 
 ## The provisioning pipeline
@@ -33,11 +33,19 @@ steps happen:
 | -------- | ------------------------------- | --------------------------------------- |
 | `host`   | in the worktree shell           | in the worktree shell                   |
 | `docker` | inside the container, on create | via `docker exec`, inside the sandbox   |
+| `sbx`    | not on the host (install inside the sandbox) | via `sbx run`, inside a per-worktree microVM |
 
 Docker isolation builds and starts the sandbox with plain `docker build` /
 `docker run`. The worktree and the repo's git dir are bind-mounted at their
 host paths — mirrored 1:1 — so in-container `git` resolves the worktree's
 pointers exactly as the host does, with no extra tooling.
+
+`sbx` isolation ([details](sbx.md)) uses the same 1:1 path mirroring, but each
+worktree gets its own microVM (kernel and Docker daemon) instead of a
+container in a shared VM. `sbx` owns the agent login and network policy, so
+treebox stages no credentials and rejects `--firewall`; the sandbox name is
+recorded in a host-side manifest outside every mount, and `hooks/` is
+mounted read-only inside the writable git dir.
 
 ## Names are identity; branches are mutable
 

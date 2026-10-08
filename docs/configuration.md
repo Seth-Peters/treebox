@@ -17,12 +17,15 @@ Move old files to the treebox home (`$TREEBOX_HOME` when set, otherwise
 `~/.treebox`), or set `$TREEBOX_CONFIG` / `$TREEBOX_TEMPLATE_DIR` explicitly.
 
 ```toml
-isolation = "host"     # host | docker
+isolation = "host"     # host | docker | sbx
 harness  = "claude"    # claude | codex
 base     = "main"      # default base branch
 root     = ".treebox/worktrees"
 env_file = ".env"      # canonical secrets path, copied into each worktree
 firewall = false       # container firewall (docker isolation)
+# sbx isolation only; fixed when the sandbox is created
+# sbx_cpus   = 8
+# sbx_memory = "16g"
 template = "default"   # sandbox template name
 
 # Replace auto-detected dependency setup with your own shell commands,
@@ -70,13 +73,15 @@ with a warning instead of guessing.
 
 | Key        | Default              | What it controls                                          |
 | ---------- | -------------------- | --------------------------------------------------------- |
-| `isolation`| `host`               | Where agents run: the worktree shell, or a docker sandbox. |
+| `isolation`| `host`               | Where agents run: the worktree shell, a docker sandbox, or an sbx microVM. |
 | `harness`  | `claude`             | Which agent `create` launches by default; `enter` reuses the harness the worktree was created with unless `--harness` overrides it. |
 | `base`     | `main`               | Base branch for new branches (resolved as `origin/<base>`). |
 | `root`     | `.treebox/worktrees` | Where worktree directories are created: repo-relative, absolute, or `~`-prefixed. |
 | `env_file` | `.env`               | The secrets file copied into every new worktree; repo-relative unless absolute or `~`-prefixed. |
 | `firewall` | `false`              | Restrict container egress (docker isolation).              |
 | `template` | `default`            | Which operator template defines the sandbox.              |
+| `sbx_cpus` | *(sbx default)*      | CPUs for an `sbx` sandbox (sbx isolation); fixed at creation. |
+| `sbx_memory` | *(sbx default)*    | Memory for an `sbx` sandbox, e.g. `16g` (sbx isolation); fixed at creation. |
 | `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. |
 | `caches`   | *(standard env vars)* | Per-ecosystem shared cache locations treebox installs from and mounts. |
 

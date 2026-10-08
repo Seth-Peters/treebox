@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--isolation sbx`: run the agent in a Docker Sandboxes (`sbx`) microVM — its
+  own kernel and private Docker daemon per worktree. Git works inside (the git
+  dir is mounted with `hooks/` read-only), `sbx` owns agent login and network
+  policy, and no dependencies are installed on the host. New config keys
+  `sbx_cpus` and `sbx_memory`. `--firewall` and `--template` are rejected with
+  `sbx` isolation (exit `2`); use `sbx policy` for egress control. `create`
+  also accepts `--sbx-cpus` / `--sbx-memory` per run (sbx isolation only).
+
 ## [1.0.1] - 2026-07-10
 
 ### Fixed

@@ -90,6 +90,47 @@ exit 0
 EOF
 chmod +x "$SHIM/docker"
 
+# --- sbx shim: simulates a signed-in sbx with persistent sandboxes -------------
+# `create` records the sandbox's primary workspace under its name; `ls --json`
+# reports every recorded sandbox as running (name + first workspace is all the
+# runner reads); `rm` forgets it. Same fresh-create-then-healthy-enter shape as
+# the docker shim, with no microVM involved.
+mkdir -p "$SHIM/sandboxes"
+cat > "$SHIM/sbx" <<'EOF'
+#!/bin/sh
+STATE="$(dirname "$0")/sandboxes"
+case "$1" in
+  create)
+    shift; name=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name) name="$2"; shift 2 ;;
+        --cpus|--memory) shift 2 ;;
+        *) break ;;
+      esac
+    done
+    # $1 is the agent, $2 the primary workspace.
+    printf '%s\n' "$2" > "$STATE/$name"
+    ;;
+  ls)
+    printf '{"sandboxes":['; sep=""
+    for f in "$STATE"/*; do
+      [ -f "$f" ] || continue
+      printf '%s{"name":"%s","status":"running","workspaces":["%s"]}' \
+        "$sep" "$(basename "$f")" "$(cat "$f")"
+      sep=","
+    done
+    printf ']}\n'
+    ;;
+  rm)
+    shift
+    for a in "$@"; do case "$a" in --force) ;; *) rm -f "$STATE/$a" ;; esac; done
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$SHIM/sbx"
+
 # --- hermetic config: setup is a marker-writing hook, never a real installer -
 CFG="$ROOT/config.toml"
 printf 'setup_hook = ["echo ran >> setup.log"]\n' > "$CFG"
@@ -212,6 +253,17 @@ run_case create-docker-print  "$HOME_FAKE" create golden-docker "${RW[@]}" --iso
 run_case create-docker-json   "$HOME_FAKE" create golden-docker-json "${RW[@]}" --isolation docker --json
 run_case enter-docker-print   "$HOME_FAKE" enter golden-docker "${RW[@]}" --print
 run_case enter-docker-json    "$HOME_FAKE" enter golden-docker "${RW[@]}" --json
+# --- sbx isolation (through the shim) -------------------------------------------
+run_case doctor-sbx           "$HOME_FAKE" doctor "${R[@]}" --isolation sbx
+run_case doctor-sbx-json      "$HOME_FAKE" doctor "${R[@]}" --isolation sbx --json
+run_case create-dryrun-sbx      "$HOME_FAKE" create golden-sbx "${RW[@]}" --isolation sbx --dry-run
+run_case create-dryrun-sbx-json "$HOME_FAKE" create golden-sbx "${RW[@]}" --isolation sbx --dry-run --json
+run_case create-sbx-print     "$HOME_FAKE" create golden-sbx "${RW[@]}" --isolation sbx --print
+run_case create-sbx-json      "$HOME_FAKE" create golden-sbx-json "${RW[@]}" --isolation sbx --json
+run_case enter-sbx-print      "$HOME_FAKE" enter golden-sbx "${RW[@]}" --print
+run_case enter-sbx-json       "$HOME_FAKE" enter golden-sbx "${RW[@]}" --json
+# sbx has its own network policy: --firewall is a usage error, not a no-op.
+run_case create-sbx-firewall-rejected "$HOME_FAKE" create golden-sbx-fw "${RW[@]}" --isolation sbx --firewall --dry-run
 run_case list                 "$HOME_FAKE" list "${RW[@]}"
 
 if [[ "$MODE" == "diff" && "$FAILED" -ne 0 ]]; then

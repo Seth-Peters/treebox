@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -31,7 +32,7 @@ from .models import expand_user
 # plain ``str``; deeper seams resolve them once to Harness/Runner objects.
 # The Literal aliases are hard-coded for static typing, and a drift test
 # asserts each alias still matches its registry.
-Isolation = Literal["host", "docker"]
+Isolation = Literal["host", "docker", "sbx"]
 Harness = Literal["claude", "codex"]
 
 DEFAULT_ROOT_REL = ".treebox/worktrees"
@@ -62,6 +63,9 @@ class Config:
     # Operator-owned container template to render the sandbox from. Resolved
     # by assets.template_dir() — never read from the target repo.
     template: str = DEFAULT_TEMPLATE
+    # sbx isolation only: sandbox resources, fixed at `sbx create` time.
+    sbx_cpus: int | None = None
+    sbx_memory: str | None = None
     # Setup hook override. When None, setup is auto-detected from manifests.
     # A list of shell command strings, each run in the worktree dir.
     setup_hook: list[str] | None = None
@@ -79,6 +83,8 @@ class Config:
         env_file: str | None = None,
         firewall: bool | None = None,
         template: str | None = None,
+        sbx_cpus: int | None = None,
+        sbx_memory: str | None = None,
         setup_hook: list[str] | None = None,
         caches: dict[str, str] | None = None,
     ) -> Config:
@@ -92,6 +98,8 @@ class Config:
             "env_file": env_file,
             "firewall": firewall,
             "template": template,
+            "sbx_cpus": sbx_cpus,
+            "sbx_memory": sbx_memory,
             "setup_hook": setup_hook,
             "caches": caches,
         }
@@ -203,6 +211,8 @@ def load_config(path: Path | None = None) -> Config:
         env_file=_expand_user_path(_typed(data, "env_file", str, path)),
         firewall=_typed(data, "firewall", bool, path),
         template=_typed(data, "template", str, path),
+        sbx_cpus=_typed(data, "sbx_cpus", int, path),
+        sbx_memory=_typed(data, "sbx_memory", str, path),
         setup_hook=setup_hook,
         caches=caches,
     )
@@ -233,3 +243,20 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"Invalid isolation mode '{cfg.isolation}'. Use one of {VALID_ISOLATION}.")
     if cfg.harness not in VALID_HARNESSES:
         raise ValueError(f"Invalid harness '{cfg.harness}'. Use one of {VALID_HARNESSES}.")
+    if cfg.sbx_cpus is not None and cfg.sbx_cpus < 1:
+        raise ValueError(f"Invalid sbx_cpus {cfg.sbx_cpus}: must be a positive integer.")
+    if cfg.sbx_memory is not None and not re.fullmatch(
+        r"[1-9]\d*[kmgt]i?b?", cfg.sbx_memory, re.IGNORECASE
+    ):
+        raise ValueError(f"Invalid sbx_memory '{cfg.sbx_memory}': use a size like 512m or 8g.")
+    if cfg.isolation == "sbx":
+        if cfg.firewall:
+            raise ValueError(
+                "--firewall is not supported with sbx isolation: sbx has its own global "
+                "network policy. Manage it with `sbx policy`."
+            )
+        if cfg.template != DEFAULT_TEMPLATE:
+            raise ValueError(
+                "--template does not apply to sbx isolation: sandbox templates are a "
+                "docker-runner feature."
+            )
