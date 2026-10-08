@@ -15,8 +15,10 @@ treebox create fix-auth --isolation sbx
 - **Per-agent microVM.** Apple silicon + macOS Sonoma 14+ (or Linux). `sbx` is
   free but **not open source**.
 - **`sbx login` is required** (a Docker account). `sbx` also owns the agent's
-  login: run `/login` inside the sandbox the first time. treebox stages no
-  credentials for this runner and never reads an API key.
+  login: the agent starts signed in, using the Anthropic login `sbx` manages
+  (`sbx secret ls` shows it). Only if that login is missing or expired do you
+  need to run `/login` inside the sandbox. treebox stages no credentials for
+  this runner, never copies your `~/.claude`, and never reads an API key.
 - **No dependencies are installed on the host.** macOS builds would not run in
   the Linux guest, so `create` only makes the sandbox; install dependencies
   inside it. `setup_hook` and the shared host caches do not apply.

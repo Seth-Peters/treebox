@@ -3,10 +3,10 @@
 container sharing the Docker Desktop VM.
 
 ``sbx`` is a standalone CLI that owns the sandbox lifecycle, the agent image,
-agent login (``/login`` inside the sandbox) and a global network policy
-(``sbx policy``). This runner therefore stages no credentials, renders no
-templates and builds no image: it creates one sandbox per worktree and attaches
-to it.
+agent login (managed by sbx; ``/login`` inside the sandbox is the fallback) and
+a global network policy (``sbx policy``). This runner therefore stages no
+credentials, renders no templates and builds no image: it creates one sandbox
+per worktree and attaches to it.
 
 Host-locality: sbx mounts every workspace at its identical absolute host path,
 so the worktree's ``.git`` pointer resolves unchanged inside the VM and this
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 _MANIFEST = "treebox-sbx.json"
 _MANIFEST_SCHEMA_VERSION = 1
 
-# sbx owns agent login (inside the sandbox), so a missing host login is
+# sbx owns agent login (managed by sbx, not the host's ~/.claude), so a missing host login is
 # advisory. Whether sbx itself is signed in is not checkable non-interactively.
 _FACTS = RunnerFacts(preflight_detail="sbx ok (login state not checkable)", login_required=False)
 
@@ -216,7 +216,7 @@ class SbxRunner:
         reporter.step("sandbox", "created (dependencies install inside)", self._create_command(wt))
 
     def refresh(self, wt: Worktree, *, reporter: Reporter) -> None:
-        # sbx owns agent auth (login inside the sandbox); nothing to stage.
+        # sbx owns agent auth (its own managed login); nothing to stage.
         return
 
     def dry_run_setup(self, wt: Worktree) -> list[str]:
