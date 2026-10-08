@@ -9,8 +9,10 @@
   golden-docker-json  golden-docker-json  docker      Xs  ● fresh  ● present
   golden-host         golden-host         host        Xs  ● fresh  ● present
   golden-host-json    golden-host-json    host        Xs  ● fresh  ● present
+  golden-sbx          golden-sbx          sbx         Xs  ● fresh  ● present
+  golden-sbx-json     golden-sbx-json     sbx         Xs  ● fresh  ● present
 
-  Summary: 5 worktrees
+  Summary: 7 worktrees
   Root: __ROOT__/wts
 
 # --- stderr ---

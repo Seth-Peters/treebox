@@ -1,0 +1,18 @@
+# treebox create golden-sbx --repo __ROOT__/repo --root __ROOT__/wts --isolation sbx --dry-run --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "dry_run": true,
+  "name": "golden-sbx",
+  "worktree_path": "__ROOT__/wts/golden-sbx",
+  "branch": "golden-sbx",
+  "commands": [
+    "git -C __ROOT__/repo fetch origin --quiet",
+    "git -C __ROOT__/repo worktree add -b golden-sbx __ROOT__/wts/golden-sbx origin/main",
+    "# install pre-push guard: per-worktree core.hooksPath -> <private git dir>/treebox-hooks (treebox/* refs are un-pushable)",
+    "cp .env __ROOT__/wts/golden-sbx/.env",
+    "sbx create --name treebox-golden-sbx-__HASH__ claude __ROOT__/wts/golden-sbx __ROOT__/repo/.git __ROOT__/repo/.git/hooks:ro"
+  ]
+}
+# --- stderr ---

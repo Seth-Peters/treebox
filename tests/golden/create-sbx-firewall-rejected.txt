@@ -1,0 +1,5 @@
+# treebox create golden-sbx-fw --repo __ROOT__/repo --root __ROOT__/wts --isolation sbx --firewall --dry-run
+# exit: 2
+# --- stdout ---
+# --- stderr ---
+  ✗ --firewall is not supported with sbx isolation: sbx has its own global network policy. Manage it with `sbx policy`.

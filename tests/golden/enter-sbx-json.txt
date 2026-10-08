@@ -1,0 +1,18 @@
+# treebox enter golden-sbx --repo __ROOT__/repo --root __ROOT__/wts --json
+# exit: 0
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "name": "golden-sbx",
+  "worktree_path": "__ROOT__/wts/golden-sbx",
+  "branch": "golden-sbx",
+  "base": "main",
+  "entry_command": [
+    "sbx",
+    "run",
+    "--name",
+    "treebox-golden-sbx-__HASH__"
+  ],
+  "created": false
+}
+# --- stderr ---
