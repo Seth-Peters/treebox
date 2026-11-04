@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://platform.claude.com/schemas/ant/beta/environment.json
+#
+# The sandbox every worker session runs in. Environments are not versioned by
+# the API; this file's git history (and the factory version stamped on each
+# session) is the record of which configuration a run used.
+name: treebox-factory
+description: Cloud sandbox for treebox factory workers. Python + uv, git, shellcheck.
+config:
+  type: cloud
+  packages:
+    apt:
+      - shellcheck
+    pip:
+      - uv
+  networking:
+    type: limited
+    allow_package_managers: true
+    allow_mcp_servers: true
+    allowed_hosts:
+      - github.com
+      - api.github.com
