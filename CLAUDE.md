@@ -220,6 +220,16 @@ needs path translation today, so building it would be indirection).
 - **Never trust the target repo's config.** No reading its container config,
   its treebox config, or its setup hooks for the sandbox definition.
 
+## Software factory
+
+`factory/` and the `delegate`, `implement`, `review`, `improve-factory`, and
+`grilling` skills define a code-first software factory that builds treebox
+changes in Claude Managed Agents sessions and opens draft PRs. It is separate
+from the treebox product: its own uv project (`factory/pyproject.toml`), never
+shipped in the wheel. See `factory/README.md`. The factory uses the Claude API
+(`ANTHROPIC_API_KEY` / `ant auth login`); the "subscription auth only" invariant
+above is about the agents treebox launches, not this tooling.
+
 ## Conventions
 
 - Conventional Commit subjects (`feat(...)`, `fix:`, `docs:`); keep commits
