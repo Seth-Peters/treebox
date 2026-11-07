@@ -1896,6 +1896,49 @@ def test_copy_env_does_not_follow_a_planted_symlink(tmp_path: Path):
     assert (worktree / ".env").read_text() == "SECRET=canonical\n"
 
 
+def test_copy_env_replaces_a_directory_at_dest(tmp_path: Path):
+    # A branch can commit ``.env/<file>``; the copy must replace the directory
+    # (never following a symlink nested inside it) instead of crashing.
+    from treebox.output import Reporter
+    from treebox.provision import copy_env
+
+    canonical = tmp_path / "canonical.env"
+    canonical.write_text("SECRET=canonical\n")
+    outside = tmp_path / "victim.txt"
+    outside.write_text("untouched\n")
+
+    worktree = tmp_path / "wt"
+    (worktree / ".env").mkdir(parents=True)
+    (worktree / ".env" / "config").write_text("x=1\n")
+    (worktree / ".env" / "link").symlink_to(outside)
+
+    assert copy_env(str(worktree), worktree, str(canonical), Reporter()) is True
+
+    assert (worktree / ".env").is_file()
+    assert (worktree / ".env").read_text() == "SECRET=canonical\n"
+    assert outside.read_text() == "untouched\n"
+
+
+def test_copy_submodules_replaces_a_gitmodules_directory(tmp_path: Path, monkeypatch):
+    from treebox import git
+    from treebox.output import Reporter
+    from treebox.provision import copy_submodules
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".gitmodules").write_text("[submodule]\n")
+    monkeypatch.setattr(git, "has_gitmodules", lambda r: True)
+    monkeypatch.setattr(git, "submodule_paths", lambda r: [])
+
+    worktree = tmp_path / "wt"
+    (worktree / ".gitmodules").mkdir(parents=True)
+    (worktree / ".gitmodules" / "x").write_text("x\n")
+
+    copy_submodules(str(repo), worktree, Reporter())
+
+    assert (worktree / ".gitmodules").is_file()
+
+
 def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
     """``.gitmodules`` is untrusted: ``..``/absolute paths and symlinks must
     never make the copy read outside the repo or write outside the worktree."""

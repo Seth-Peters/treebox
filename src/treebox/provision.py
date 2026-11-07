@@ -188,9 +188,17 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
     one). ``shutil.copyfile`` would follow such a symlink and write through it to
     an arbitrary host path. Remove any existing entry first, then create the
     destination with ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the
-    meantime makes the open fail instead of redirecting the write.
+    meantime makes the open fail instead of redirecting the write. A directory
+    at ``dest`` is removed recursively.
     """
-    if dest.is_symlink() or dest.exists():
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.is_dir():
+        # A branch can commit ``.env/<file>`` (or a boxed agent can swap the
+        # copy for a directory); ``unlink`` would raise and wedge the worktree.
+        # ``rmtree`` removes symlinks inside it without following them.
+        shutil.rmtree(dest)
+    elif dest.exists():
         dest.unlink()
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
