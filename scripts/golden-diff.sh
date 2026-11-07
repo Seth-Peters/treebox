@@ -95,7 +95,8 @@ CFG="$ROOT/config.toml"
 printf 'setup_hook = ["echo ran >> setup.log"]\n' > "$CFG"
 
 # --- fixture repo: a working clone of a local bare origin --------------------
-git_q() { git -c init.defaultBranch=main "$@" >/dev/null; }
+# push.negotiate=false: hosts that set it globally warn on pushes to a local bare remote.
+git_q() { git -c init.defaultBranch=main -c push.negotiate=false "$@" >/dev/null; }
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@e
 git_q init --bare -b main "$ROOT/origin.git"
 git_q clone "$ROOT/origin.git" "$ROOT/repo" 2>/dev/null
