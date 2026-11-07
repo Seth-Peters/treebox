@@ -31,6 +31,8 @@ Look for:
 - incorrect assumptions about the codebase, its contracts, or its invariants
 - security problems
 - tests that would pass even if the change were broken
+- verification evidence that doesn't actually demonstrate the spec (re-run
+  anything you doubt)
 
 Reply with exactly this shape:
 

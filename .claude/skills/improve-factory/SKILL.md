@@ -15,25 +15,26 @@ authenticated. It's triggered by a human when enough runs have accumulated.
 ## 1. Find the runs since the last retro
 
 - The newest file in `factory/retros/` names the factory version it reviewed.
-  Runs to review are the factory sessions created since then.
-- List sessions with `ant beta:sessions list --format jsonl` and keep those
-  whose `metadata.factory_name` matches `name` in `factory/factory.yaml`. Each
-  session's metadata carries `factory_version`, `factory_sha`, `slug`,
-  `requested_by`, and `source`.
+  Runs to review are the factory issues and sessions since then.
+- Factory tasks are GitHub issues labelled `factory`:
+  `gh issue list --label factory --state all --json number,title,state,createdAt,closedAt`.
+- Each issue's sessions (one per attempt) come from
+  `uv run --project factory factory status --issue <n>`. Every session's
+  metadata carries `factory_version`, `factory_sha`, `agent_version`, `issue`,
+  `branch`, and `requested_by`.
 - If fewer than **5** new runs exist, say so and stop. Patterns need more than
   a couple of data points.
 
 ## 2. Read each run
 
-Query the data directly; don't copy it into the repo.
-
-- **Transcript (primary):** `ant beta:sessions:events list --session-id <id>
-  --format jsonl`. The reviewer subagent runs in its own session thread; read
-  its thread's events too (see `ant beta:sessions --help` for the threads
-  commands). Also check `ant beta:sessions retrieve --session-id <id>` for
-  status, usage, and stats.
-- **PR (secondary):** `gh pr list --label factory --state all --search
-  "head:factory/<slug>" --json number,state,mergedAt,labels,reviews,comments,commits`.
+- **Transcript (primary):**
+  `uv run --project factory factory transcript --issue <n> --out <scratch dir>`
+  writes every event in order (each message, tool call, and tool result,
+  including developer steering messages) plus each subagent thread (the
+  reviewer) and a `summary.json` of event and tool counts. Use a scratch
+  directory outside the repo; transcripts are data, never committed.
+- **Outcome (secondary):** the issue and its PR:
+  `gh pr list --state all --search "<n> in:body" --json number,state,mergedAt,labels,reviews,comments,commits`.
   Merged as-is, merged after human commits, closed unmerged, and
   `factory:needs-human` all mean different things.
 
@@ -41,7 +42,10 @@ Query the data directly; don't copy it into the repo.
 
 Things worth finding, each tied to specific sessions:
 
-- the engineer misunderstood briefs of a certain shape (prompt or `delegate` skill)
+- the engineer misunderstood specs of a certain shape (`agents/engineer.md`, `implement`)
+- developers had to steer mid-run for the same kind of reason (the steering
+  messages are in the transcript: what did the factory keep missing?)
+- verification that was skipped, shallow, or claimed without evidence (`verify`)
 - time and tokens burned on environment setup or missing tools (`environments/`)
 - the reviewer approved changes a human later had to fix, or blocked on noise
   (`agents/reviewer.md`, `review` skill)

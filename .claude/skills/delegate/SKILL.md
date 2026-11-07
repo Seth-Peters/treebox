@@ -1,68 +1,60 @@
 ---
 name: delegate
-description: Hand a task to the treebox software factory, which runs it in an isolated Claude Managed Agents session and returns a draft PR. Use when someone says "delegate this", "send this to the factory", "have the factory do it", or wants a plan, request, or bug report built without working on it here.
+description: Hand a developer's spec or plan to the treebox software factory, which files a GitHub issue for it and runs it in an isolated Claude Managed Agents session that implements, verifies, reviews, and opens a draft PR. Also steers or checks a running factory task. Use when a developer says "delegate this", "send this to the factory", "have the factory build it", or wants to steer or check on a factory run.
 ---
 
-# Delegate a task to the factory
+# Delegate to the factory
 
-The factory takes work from anyone, in any shape: a developer's finished plan,
-a designer's request from Slack, a PO's one-line bug report. Your job is to
-turn what you were given into one clear brief and dispatch it. You do not
-implement anything here.
+The developer comes with the spec or plan already worked out. That's their
+job, not the factory's. Yours is to get it to the factory intact, then help
+them follow and steer the run.
 
-## 1. Shape the brief
+## Hand off a task
 
-Write the brief the way the requester would want an engineer to read it. Keep
-their words; add structure only where it helps. These sections are a guide,
-not a form; drop any that would be empty:
+1. **Confirm the spec.** Use what the developer wrote, verbatim where you can.
+   If it's scattered across the conversation, assemble it into one markdown
+   brief (what to build, where, constraints, what "done" looks like), show it,
+   and get a yes. Don't invent requirements. A short issue title goes with it.
+2. **Dispatch.** Save the brief to a temp file and run, from the repo root:
 
-- **Goal**: what should be true when this is done
-- **Context**: where in the codebase, why it matters, links or snippets they gave
-- **Constraints**: what must not change, approaches to avoid
-- **Done when**: how a reviewer can tell it worked
+   ```bash
+   uv run --project factory factory delegate --title "<title>" --brief-file <path>
+   ```
 
-A one-line bug report can stay a few lines. A long plan can be passed through
-nearly verbatim. Do not invent requirements the requester didn't express.
+   To delegate an issue that already exists, run
+   `uv run --project factory factory delegate --issue <n>` instead.
 
-**Ask, don't guess, when the cost of a wrong guess is a wasted run.** If the
-intent is genuinely unclear (two readings lead to different PRs), ask the
-requester one or two pointed questions first. For anything bigger than a
-small fix where the requester is present and wants to think it through, offer
-the `grilling` skill before dispatching.
+   This files the GitHub issue (labelled `factory`), starts the worker session,
+   and comments the session ID on the issue. Add `--dry-run` first to see
+   exactly what the worker will receive.
+3. **Report back** the issue URL and session ID from the JSON output, and what
+   happens next: the worker implements, verifies end to end, has a
+   fresh-context reviewer try to break it, fixes, and opens a draft PR that
+   closes the issue.
 
-Show the requester the brief and get a yes before dispatching. A trivial,
-unambiguous fix can go straight through if they asked you to just send it.
+## Steer a running task
 
-## 2. Pick the metadata
-
-- **slug**: short kebab-case name for the work (`fix-teardown-exit-code`).
-  It becomes the branch `factory/<slug>` and the session title.
-- **requested-by**: who asked (a name or handle).
-- **source**: where it came from (`dev`, `slack`, `issue`, `po`, ...).
-
-## 3. Dispatch
-
-Save the brief to a file. Long-lived plans can live in `factory/specs/<slug>.md`
-(commit them yourself if they should be kept); anything else can go in a temp
-file. Then run, from the repo root:
+When the developer notices something wrong or wants to add context mid-run:
 
 ```bash
-uv run --project factory factory run \
-  --slug <slug> --requested-by <who> --source <where> \
-  --brief-file <path>
+uv run --project factory factory steer --issue <n> "<their message>"
 ```
 
-Add `--dry-run` first if you want to see exactly what the worker will receive.
+It reaches the running session as a developer message and is recorded on the
+issue. Pass the developer's words, not a paraphrase.
 
-The command prints JSON with the `session_id`. Report it to the requester with
-what happens next: the worker implements, has a fresh-context reviewer try to
-break it, fixes, and opens a **draft** PR labelled `factory` on branch
-`factory/<slug>`. Humans review and merge.
+## Check on a task
 
-## If dispatch fails
+```bash
+uv run --project factory factory status --issue <n>           # sessions + status
+uv run --project factory factory status --issue <n> --wait    # block until it settles
+```
 
-The CLI exits non-zero with the reason on stderr. Common causes: no
-`ANTHROPIC_API_KEY` / `ant auth login`, `factory/claude-lock.json` missing
-(run `ant apply` from `factory/` first), `FACTORY_GITHUB_TOKEN` unset, or local
-factory code differing from `origin/main` (the worker runs what's on `main`,
-so push or pass `--allow-unpushed`). Report the cause; don't work around it.
+## If something fails
+
+The CLI exits non-zero with the reason on stderr. Common causes: not logged in
+(`ant auth login`), `factory/claude-lock.json` missing (run `ant apply .` in
+`factory/` and commit it), `FACTORY_GITHUB_TOKEN` unset, `gh` not logged in, or
+local factory code differing from `origin/main` (the worker runs what's on
+`main`, so push first, or pass `--allow-unpushed`). Report the cause; don't
+work around it.

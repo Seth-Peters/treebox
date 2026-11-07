@@ -13,7 +13,10 @@ reasoning tries to prove the change wrong. Protect that.
 Delegate to the `reviewer` subagent. Give it only:
 
 - the repository path and the base ref (`origin/main`)
-- the brief, verbatim, as the requester gave it
+- the spec, verbatim (your first message without the footer), plus any
+  developer messages that changed it
+- your verification evidence block, so it can judge whether the evidence
+  actually demonstrates the spec
 - on a re-review: the previous findings and which commits address them
 
 Do **not** send your plan, your reasoning, your summary of the change, or why
@@ -26,8 +29,7 @@ same reviewer so it can check its earlier findings were fixed.
 
 - **approve**: go open the PR.
 - **changes-requested**: fix every `blocking` finding (and `minor` ones that are
-  cheap), commit, re-run the checks from the `implement` skill, then review
-  again.
+  cheap), commit, follow the `verify` skill again, then review again.
 - If you disagree with a finding, don't silently skip it: say why in your
   reply to the reviewer and let it rule.
 
