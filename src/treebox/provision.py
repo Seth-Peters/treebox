@@ -212,12 +212,13 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
         elif dest.exists():
             dest.unlink()
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
-            shutil.copyfileobj(fsrc, fdst)
     except OSError as exc:
-        # Anything left at ``dest`` we cannot clear (e.g. a read-only subdir an
-        # agent planted) must surface as a classified error, never a traceback.
+        # Anything at ``dest`` we cannot clear or create (e.g. a read-only subdir
+        # an agent planted, a symlink re-planted mid-copy) must surface as a
+        # classified error, never a traceback.
         raise HostCopyError(dest, exc) from exc
+    with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+        shutil.copyfileobj(fsrc, fdst)
 
 
 def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:

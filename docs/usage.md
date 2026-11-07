@@ -495,3 +495,4 @@ failure.
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
+| `COPY_FAILED` | `1` | A host-side copy failed: `create` / `enter` could not replace an unremovable `.env` / `.gitmodules` at the worktree destination (remove it by hand and retry), or a `template init` copy failed. |
