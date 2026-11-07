@@ -18,14 +18,15 @@ class Resources:
     engineer_agent: str
     reviewer_agent: str
     environment: str
-    vault: str
+    worker_vault: str
 
 
 @dataclass(frozen=True)
-class SessionDefaults:
-    budget_usd: int
+class TaskSettings:
+    label: str
+    needs_human_label: str
     branch_prefix: str
-    pr_label: str
+    budget_usd: int
 
 
 @dataclass(frozen=True)
@@ -42,12 +43,16 @@ class Manifest:
     repository_url: str
     base_branch: str
     resources: Resources
-    task_prompt: str
-    session: SessionDefaults
+    task: TaskSettings
     factory_code: FactoryCode
 
     def path(self, relative: str) -> Path:
         return self.root / relative
+
+    @property
+    def repo_slug(self) -> str:
+        """`owner/name` from the repository URL."""
+        return self.repository_url.removesuffix(".git").split("github.com/", 1)[-1]
 
 
 def _require(data: dict[str, Any], key: str, kind: type, where: str) -> Any:
@@ -74,25 +79,25 @@ def parse_manifest(data: Any, root: Path) -> Manifest:
         raise FactoryError(f"{MANIFEST_NAME} must be a mapping")
     repo = _section(data, "repository")
     res = _section(data, "resources")
-    sess = _section(data, "session")
+    task = _section(data, "task")
     code = _section(data, "factory_code")
     return Manifest(
         root=root,
         name=_require(data, "name", str, MANIFEST_NAME),
-        version=str(_require(data, "version", str, MANIFEST_NAME)),
+        version=_require(data, "version", str, MANIFEST_NAME),
         repository_url=_require(repo, "url", str, "repository"),
         base_branch=_require(repo, "base_branch", str, "repository"),
         resources=Resources(
             engineer_agent=_require(res, "engineer_agent", str, "resources"),
             reviewer_agent=_require(res, "reviewer_agent", str, "resources"),
             environment=_require(res, "environment", str, "resources"),
-            vault=_require(res, "vault", str, "resources"),
+            worker_vault=_require(res, "worker_vault", str, "resources"),
         ),
-        task_prompt=_require(data, "task_prompt", str, MANIFEST_NAME),
-        session=SessionDefaults(
-            budget_usd=_require(sess, "budget_usd", int, "session"),
-            branch_prefix=_require(sess, "branch_prefix", str, "session"),
-            pr_label=_require(sess, "pr_label", str, "session"),
+        task=TaskSettings(
+            label=_require(task, "label", str, "task"),
+            needs_human_label=_require(task, "needs_human_label", str, "task"),
+            branch_prefix=_require(task, "branch_prefix", str, "task"),
+            budget_usd=_require(task, "budget_usd", int, "task"),
         ),
         factory_code=FactoryCode(
             editable=_patterns(code, "editable"),

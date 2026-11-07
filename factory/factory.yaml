@@ -3,15 +3,14 @@
 # This manifest is an index, not a generator: the files it points at ARE the
 # factory. Claude Managed Agents resources (agents, environment, vault) are
 # applied with `ant apply` from this directory; the skills under .claude/skills
-# are loaded by the worker from the mounted repo and by your local master
+# are loaded by the worker from the mounted repo and by your local Claude Code
 # session alike.
 #
-# Every outer-loop (improve-factory) PR bumps `version`. Every inner-loop
-# session is stamped with it, so any run can be traced to the factory that
-# produced it.
+# Every outer-loop (improve-factory) PR bumps `version`. Every session is
+# stamped with it, so any run can be traced to the factory that produced it.
 
 name: treebox-factory
-version: 0.1.0
+version: 0.2.0
 
 repository:
   url: https://github.com/Seth-Peters/treebox
@@ -23,16 +22,15 @@ resources:
   engineer_agent: agents/engineer.md
   reviewer_agent: agents/reviewer.md
   environment: environments/treebox.yaml
-  vault: vaults/github.yaml
+  worker_vault: vaults/github-worker.yaml
 
-# The first message every worker session receives (string.Template, $vars).
-task_prompt: prompts/task.md
-
-# Defaults for `factory run`.
-session:
-  budget_usd: 10
+# Every delegated task is one GitHub issue with this label; the worker's PR
+# closes it. Questions and steering never create issues.
+task:
+  label: factory
+  needs_human_label: factory:needs-human
   branch_prefix: factory/
-  pr_label: factory
+  budget_usd: 10
 
 # What the outer loop (improve-factory) may change, relative to the repo root.
 # Everything that shapes how the factory behaves; never the product it builds.
@@ -41,7 +39,7 @@ factory_code:
     - factory/**
     - .claude/**
   never:
-    - factory/retros/**   # past retros are history; only new ones are added
+    - factory/retros/**         # past retros are history; only new ones are added
     - factory/claude-lock.json  # written by `ant apply` after merge, never by hand
     - src/**
     - tests/**

@@ -1,7 +1,7 @@
 # Factory shortcuts. treebox's own checks live in scripts/validate.sh (see CLAUDE.md).
 FACTORY_UV := uv run --project factory --extra dev
 
-.PHONY: factory-test factory-check factory-plan factory-apply
+.PHONY: factory-test factory-check factory-plan factory-apply factory-smoke
 
 factory-test: ## lint, strict types, and tests for the factory CLI
 	cd factory && uv run --extra dev ruff check src tests
@@ -17,3 +17,6 @@ factory-plan: ## show what `ant apply` would change
 
 factory-apply: ## apply agents, environment, and vault; then commit factory/claude-lock.json
 	cd factory && ant apply .
+
+factory-smoke: ## live end-to-end run: make factory-smoke ISSUE=38 [REF=branch]
+	factory/scripts/smoke.sh $(ISSUE) $(REF)

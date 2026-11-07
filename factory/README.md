@@ -1,22 +1,23 @@
 # treebox software factory
 
-A small, code-defined factory that turns a task brief into a reviewed draft PR,
-plus an outer loop that improves the factory itself.
+A small, code-defined factory: a developer hands over a spec, and the factory
+implements it, verifies it end to end, has a fresh-context reviewer try to
+break it, and opens a draft PR. An outer loop reads the full transcripts of
+those runs and improves the factory itself.
 
 ```
-anyone (dev plan, Slack request, bug report)
-   │  `delegate` skill shapes a brief
+developer (Claude Code, spec in hand)
+   │  delegate skill → factory delegate
    ▼
-factory run ──► Claude Managed Agents session (fresh cloud sandbox, repo mounted)
-                 engineer: implement ─► reviewer subagent (fresh context) ─► fix ≤2 rounds
-                 ─► draft PR, label `factory`
-   ▼
-human reviews + merges
-
-… after enough runs …
-
-improve-factory skill: transcripts (ant) + PRs (gh) ─► retro ─► one PR changing factory code
+GitHub issue (label `factory`) ──► Managed Agents worker session (cloud sandbox, repo mounted)
+   ▲                                 implement → verify → review (reviewer subagent) → fix ≤2
+   │  factory steer (mid-run)        └─► draft PR "Closes #N"
+   │
+improve-factory (manual, after many runs): full transcripts + issues/PRs → retro → one PR to factory code
 ```
+
+Every task is one GitHub issue (the record); every attempt at it is one
+session (`metadata.issue = N`); the PR closes the issue.
 
 ## What's in here
 
@@ -25,68 +26,60 @@ merges and applies them.
 
 | Path | What it defines |
 |---|---|
-| `factory.yaml` | Manifest: name, **version**, repo, session defaults, what counts as factory code |
+| `factory.yaml` | Manifest: name, **version**, repo, task label/branch/budget, what counts as factory code |
 | `agents/engineer.md` | Worker agent (model, tools, GitHub MCP, reviewer subagent) and system prompt |
 | `agents/reviewer.md` | Adversarial reviewer subagent: read-only, prompt only, no rubric |
-| `environments/treebox.yaml` | Cloud sandbox: packages and networking |
-| `vaults/github.yaml` | Vault holding the GitHub token the MCP server uses |
-| `prompts/task.md` | First message each session receives (wraps the brief) |
+| `environments/treebox.yaml` | The sandbox: packages and networking (the "Dockerfile") |
+| `vaults/github-worker.yaml` | Vault holding the GitHub token the worker's MCP server uses |
 | `claude-lock.json` | Written by `ant apply`: resource IDs and agent versions. Commit it; never hand-edit |
-| `specs/` | Optional home for longer briefs worth keeping |
-| `scorers/` | Outer-loop scorers. **Empty for now**; scoring is a planned addition, separate from the adversarial review |
+| `scorers/` | Outer-loop scorers. Empty for now |
 | `retros/` | One file per outer-loop run; history, never edited |
-| `src/factory_cli/` | The `factory` CLI: `run`, `check`, `vault set-github-token`, `version` |
+| `src/factory_cli/` | The `factory` CLI |
 
-The skills live in the repo's `.claude/skills/`, where both the cloud worker
-and your local Claude Code session load them: `delegate`, `implement`,
-`review`, `improve-factory`, and `grilling` (vendored from Matt Pocock's
-skills, MIT).
+Skills live in the repo's `.claude/skills/`, loaded by the cloud worker and by
+your local Claude Code session: `delegate`, `implement`, `verify`, `review`,
+`improve-factory`, and `grilling` (vendored from Matt Pocock's skills, MIT).
 
 ## One-time setup
 
-1. **API credits.** Max, Ultra, and Team plans include monthly Claude API
-   credits that cover Managed Agents: claude.ai → Settings → Billing → API
-   credits → link a Console organization. Create a `treebox-factory` workspace
-   with a spend limit.
-2. **CLI.** `brew install anthropics/tap/ant` (v1.40+), then `ant auth login`.
-3. **GitHub token.** A fine-grained PAT for `Seth-Peters/treebox` only, with
-   Contents and Pull requests set to read/write. Keep it in your shell, e.g.
-   `export FACTORY_GITHUB_TOKEN=...` (never commit it).
-4. **Apply the factory**, from this directory, and commit the lockfile:
+1. **API access.** `brew install anthropics/tap/ant`, then `ant auth login`.
+   The CLI uses that login; no API key needed.
+2. **GitHub.** `gh auth login`, and a fine-grained PAT for this repo only
+   (Contents and Pull requests: read/write) exported as `FACTORY_GITHUB_TOKEN`.
+   The worker clones and pushes with it; never commit it.
+3. **Apply the factory** and commit the lockfile:
    ```bash
    cd factory && ant apply . && cd ..
    uv run --project factory factory vault set-github-token
-   git add factory/claude-lock.json && git commit -m "chore(factory): apply v0.1.0"
-   git push
+   git add factory/claude-lock.json && git commit -m "chore(factory): apply" && git push
    ```
 
 ## Use it
 
-From a Claude Code session in this repo, say "delegate this" with any brief:
-a plan, a pasted Slack message, a one-liner. The `delegate` skill shapes it and
-runs:
+From Claude Code, say "delegate this" with your spec. The `delegate` skill runs:
 
 ```bash
-uv run --project factory factory run --slug <slug> --requested-by <who> \
-  --source <dev|slack|po|...> --brief-file <path>     # or --brief, or stdin
+uv run --project factory factory delegate --title "<title>" --brief-file spec.md
+uv run --project factory factory delegate --issue 61            # an existing issue
+uv run --project factory factory steer --issue 61 "also cover --json"
+uv run --project factory factory status --issue 61 [--wait]
+uv run --project factory factory transcript --issue 61 --out /tmp/runs
 ```
 
-`--dry-run` prints the exact session request and first message. The worker
-always runs the factory code on `origin/main`, so `factory run` refuses to
-dispatch while your local factory files differ from it (`--allow-unpushed`
-overrides).
-
-Watch a run with `ant beta:sessions:events stream --session-id <id> --format jsonl`,
-or in the Claude Console.
+The worker runs the factory code on `origin/main`, so `delegate` refuses while
+your local factory files differ from it (`--allow-unpushed` overrides).
+`--ref <branch>` runs against another branch instead, which is how an
+unmerged factory change is tried before it lands. `--dry-run` prints the exact
+request and first message.
 
 ## Improve it
 
-When enough runs have accumulated (the skill wants at least 5), ask Claude
-Code to "improve the factory". The `improve-factory` skill reads transcripts
-with `ant` and PRs with `gh`, writes `retros/<date>.md`, makes one change to
-factory code, bumps `version`, checks the change stays in bounds
-(`factory check --boundary`), and opens a PR. After you merge it, re-run
-`ant apply .` here and commit the lockfile.
+After enough runs (the skill wants at least 5), ask Claude Code to "improve
+the factory". `improve-factory` reads every run's full transcript (`factory
+transcript`) and its issue and PR (`gh`), writes `retros/<date>.md`, makes one
+change to factory code, bumps `version`, checks it stays in bounds (`factory
+check --boundary`), and opens a PR. After you merge it, run `ant apply .` here
+and commit the lockfile.
 
 ## Develop the CLI
 

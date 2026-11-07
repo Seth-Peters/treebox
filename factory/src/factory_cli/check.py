@@ -8,31 +8,18 @@ from factory_cli.agents import AgentFile, load_agent
 from factory_cli.boundary import violations
 from factory_cli.errors import FactoryError
 from factory_cli.manifest import Manifest
-from factory_cli.prompt import unknown_placeholders
 
 GITHUB_MCP = "github"
 
 
 def _missing_files(manifest: Manifest) -> list[str]:
     res = manifest.resources
-    required = (
-        ("environment", res.environment),
-        ("vault", res.vault),
-        ("task prompt", manifest.task_prompt),
-    )
+    required = (("environment", res.environment), ("worker vault", res.worker_vault))
     return [
         f"{label} file missing: {rel}"
         for label, rel in required
         if not manifest.path(rel).is_file()
     ]
-
-
-def _prompt_problems(manifest: Manifest) -> list[str]:
-    path = manifest.path(manifest.task_prompt)
-    if not path.is_file():
-        return []
-    unknown = unknown_placeholders(path.read_text())
-    return [f"{manifest.task_prompt}: unknown placeholders {sorted(unknown)}"] if unknown else []
 
 
 def _engineer_problems(manifest: Manifest, engineer: AgentFile) -> list[str]:
@@ -54,7 +41,7 @@ def _engineer_problems(manifest: Manifest, engineer: AgentFile) -> list[str]:
 
 def definition_problems(manifest: Manifest) -> list[str]:
     """Structural problems in the factory's own files. Empty means coherent."""
-    problems = _missing_files(manifest) + _prompt_problems(manifest)
+    problems = _missing_files(manifest)
     res = manifest.resources
     agents: dict[str, AgentFile] = {}
     for label, rel in (("engineer", res.engineer_agent), ("reviewer", res.reviewer_agent)):
