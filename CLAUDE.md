@@ -222,12 +222,13 @@ needs path translation today, so building it would be indirection).
 
 ## Software factory
 
-`factory/` and the `delegate`, `implement`, `review`, `improve-factory`, and
-`grilling` skills define a code-first software factory that builds treebox
-changes in Claude Managed Agents sessions and opens draft PRs. It is separate
+`factory/` and the `delegate`, `implement`, `verify`, `review`,
+`improve-factory`, and `grilling` skills define a code-first software factory
+that turns a developer's spec (one GitHub issue) into a verified, reviewed
+draft PR in a Claude Managed Agents session. It is separate
 from the treebox product: its own uv project (`factory/pyproject.toml`), never
 shipped in the wheel. See `factory/README.md`. The factory uses the Claude API
-(`ANTHROPIC_API_KEY` / `ant auth login`); the "subscription auth only" invariant
+(`ant auth login`); the "subscription auth only" invariant
 above is about the agents treebox launches, not this tooling.
 
 ## Conventions
