@@ -10,7 +10,7 @@
 # stamped with it, so any run can be traced to the factory that produced it.
 
 name: treebox-factory
-version: 0.2.0
+version: 0.3.0
 
 repository:
   url: https://github.com/Seth-Peters/treebox

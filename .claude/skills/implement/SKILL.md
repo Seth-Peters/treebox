@@ -12,7 +12,15 @@ description: How a treebox factory worker implements a task and opens its pull r
    bind every change, whether or not the spec mentions them.
 2. Create the branch named in your first message's footer from the base it
    names (normally `origin/main`) and work only there.
-3. Install the dev environment: `uv sync --extra dev`.
+3. Install the dev environment. The sandbox image has an old `uv` in
+   `/root/.local/bin`, which comes first on PATH. That old `uv` cannot get
+   Python 3.14, so the live smoke step in `validate.sh` fails with it. Point
+   PATH at the `uv` that the environment installs, then sync:
+
+   ```bash
+   mkdir -p /root/.local/bin && ln -sf /usr/local/bin/uv /usr/local/bin/uvx /root/.local/bin/
+   uv sync --extra dev
+   ```
 
 ## Make the change
 
