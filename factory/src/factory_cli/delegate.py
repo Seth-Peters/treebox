@@ -47,13 +47,31 @@ def behavior_pathspecs(repo: Path, manifest: Manifest) -> tuple[str, ...]:
     return (".claude", "CLAUDE.md", *(f"{factory}/{p}" for p in owned))
 
 
-def check_drift(repo: Path, manifest: Manifest, base: str, allow: bool) -> list[str]:
+def _ref_hint(repo: Path, manifest: Manifest, ref: str) -> str:
+    """Point at --ref when the current branch is pushed and carries exactly this code."""
+    current = git.current_branch(repo)
+    if current is None or current == ref or not git.try_fetch(repo, current):
+        return ""
+    if git.changed_paths(repo, f"origin/{current}", behavior_pathspecs(repo, manifest)):
+        return ""
+    return (
+        f" Your branch {current} is pushed with this factory code: to run the factory "
+        f"from it, pass --ref {current}."
+    )
+
+
+def check_drift(repo: Path, manifest: Manifest, ref: str, allow: bool) -> list[str]:
+    base = f"origin/{ref}"
     drift = git.changed_paths(repo, base, behavior_pathspecs(repo, manifest))
     if drift and not allow:
         raise FactoryError(
             f"local factory code differs from {base}, and the worker runs {base}: "
             + ", ".join(drift)
-            + ". Push it first, or pass --allow-unpushed."
+            + "."
+            + (_ref_hint(repo, manifest, ref) or " Push it first.")
+            + " (--allow-unpushed runs the worker on "
+            + base
+            + " anyway, without these changes.)"
         )
     return drift
 
@@ -107,7 +125,7 @@ def delegate(
     base = f"origin/{ref}"
     git.fetch(repo, ref)
     factory_sha = git.rev_parse(repo, base)
-    drift = check_drift(repo, manifest, base, allow=request.allow_unpushed or request.dry_run)
+    drift = check_drift(repo, manifest, ref, allow=request.allow_unpushed or request.dry_run)
 
     requested_by = gh.login()
     if not request.dry_run:

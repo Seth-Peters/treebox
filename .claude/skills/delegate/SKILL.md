@@ -54,7 +54,17 @@ uv run --project factory factory status --issue <n> --wait    # block until it s
 
 The CLI exits non-zero with the reason on stderr. Common causes: not logged in
 (`ant auth login`), `factory/claude-lock.json` missing (run `ant apply .` in
-`factory/` and commit it), `FACTORY_GITHUB_TOKEN` unset, `gh` not logged in, or
-local factory code differing from `origin/main` (the worker runs what's on
-`main`, so push first, or pass `--allow-unpushed`). Report the cause; don't
-work around it.
+`factory/` and commit it), `FACTORY_GITHUB_TOKEN` unset, or `gh` not logged in.
+Report the cause; don't work around it.
+
+**"Local factory code differs from origin/…"** means the worker would run
+different factory instructions than the ones checked out here. The worker
+always runs the factory from the branch it checks out (`--ref`, default `main`):
+
+- If the developer is on a pushed branch that changes the factory (testing
+  unmerged factory work), rerun with `--ref <that branch>`. The error message
+  names the branch when this applies.
+- If the factory changes aren't pushed yet, ask the developer to push them.
+- Don't offer `--allow-unpushed` as a fix. It runs the worker on the other
+  branch's factory code, so the run doesn't test what the developer has. Use it
+  only when the developer explicitly asks for it.

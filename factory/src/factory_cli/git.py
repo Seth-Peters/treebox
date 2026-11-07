@@ -38,3 +38,17 @@ def changed_paths(repo: Path, base: str, pathspecs: tuple[str, ...] = ()) -> lis
     tracked = _git(repo, "diff", "--name-only", base, *spec).splitlines()
     untracked = _git(repo, "ls-files", "--others", "--exclude-standard", *spec).splitlines()
     return sorted({p for p in [*tracked, *untracked] if p})
+
+
+def current_branch(repo: Path) -> str | None:
+    name = _git(repo, "branch", "--show-current").strip()
+    return name or None
+
+
+def try_fetch(repo: Path, branch: str) -> bool:
+    """Fetch a branch that may not exist on origin. True if it does."""
+    try:
+        fetch(repo, branch)
+    except FactoryError:
+        return False
+    return True

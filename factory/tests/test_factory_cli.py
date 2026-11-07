@@ -384,6 +384,22 @@ def test_cli_delegate_refuses_unpushed_factory_changes(
     assert "differs from origin/main" in capsys.readouterr().err
 
 
+def test_cli_delegate_suggests_ref_when_branch_carries_the_factory_code(
+    repo: Path, fakes: tuple[FakeGitHub, FakeApi], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _gh, api = fakes
+    (repo / ".claude" / "skills" / "review" / "SKILL.md").write_text("changed\n")
+    ident = ("-c", "user.email=t@e", "-c", "user.name=t")
+    _sh(repo, "git", "switch", "-qc", "feat/factory-next")
+    _sh(repo, "git", *ident, "commit", "-qam", "factory change")
+    _sh(repo, "git", "push", "-q", "origin", "feat/factory-next")
+    assert cli.main(["delegate", "--issue", "61"]) == 1
+    err = capsys.readouterr().err
+    assert "pass --ref feat/factory-next" in err and api.created == []
+    assert cli.main(["delegate", "--issue", "61", "--ref", "feat/factory-next"]) == 0
+    assert api.created[0]["resources"][0]["checkout"]["name"] == "feat/factory-next"
+
+
 def test_cli_steer_sends_and_records_on_issue(
     repo: Path, fakes: tuple[FakeGitHub, FakeApi], capsys: pytest.CaptureFixture[str]
 ) -> None:
