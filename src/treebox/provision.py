@@ -416,13 +416,22 @@ def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictErr
     linked = links_to_worktree_gitdir(repo, wt.path)
     actual = git.branch_for_path(repo, str(wt.path)) or ""
     if not linked or (not actual and not git.worktree_registered(repo, str(wt.path))):
-        conflict.hint = (
-            "The directory is not a healthy registered worktree (likely leftover "
-            f"from an interrupted teardown). Recover with `treebox teardown {wt.name}` "
-            "— it clears both the directory and git's stale registration — then "
-            f"re-run. By hand: rm -rf {wt.path} && git -C {repo} worktree prune "
-            "(a bare rm -rf leaves the registration behind and re-create fails)."
-        )
+        if git.worktree_registered(repo, str(wt.path)):
+            conflict.hint = (
+                "The directory is not a healthy registered worktree (likely leftover "
+                f"from an interrupted teardown). Recover with `treebox teardown {wt.name}` "
+                "— it clears both the directory and git's stale registration — then "
+                f"re-run. By hand: rm -rf {wt.path} && git -C {repo} worktree prune "
+                "(a bare rm -rf leaves the registration behind and re-create fails)."
+            )
+        else:
+            # Never registered with git: teardown only resolves registered
+            # worktrees, so it would exit NOT_FOUND here. Don't promise it.
+            conflict.hint = (
+                "The directory is not a registered worktree (a stray directory git "
+                "does not know about), so `treebox teardown` cannot see it. Remove "
+                f"it by hand: rm -rf {wt.path} — then re-run."
+            )
     return conflict
 
 

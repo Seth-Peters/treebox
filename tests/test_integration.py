@@ -1575,7 +1575,7 @@ def test_create_refuses_stray_unregistered_dir(repo: Path, root: str, hermetic_c
     assert res.exit_code == 5, res.output
     err = json.loads(res.stderr)
     assert err["error"]["code"] == "SLUG_CONFLICT"
-    assert "not a healthy registered worktree" in err["error"]["hint"]
+    assert "not a registered worktree" in err["error"]["hint"]
 
     # The main repo was never touched: no worktree-config extension, no
     # hooksPath hijack, no stray treebox state, and no worktree registered.
@@ -1650,18 +1650,49 @@ def test_enter_refuses_registered_worktree_missing_git_pointer(
 
 
 def test_create_refuse_hint_points_to_teardown_and_prune(repo: Path, root: str, hermetic_config):
-    """A bare rm -rf leaves git's registration behind, so the refuse hint must
-    steer to a recovery that clears BOTH: `treebox teardown <name>`, or a manual
-    rm -rf paired with `git worktree prune` — never a bare rm -rf that dead-ends
-    the next create."""
-    stray = Path(root) / "leftover"
-    stray.mkdir(parents=True)
+    """A bare rm -rf leaves git's registration behind, so the refuse hint for a
+    registered-but-corrupt worktree must steer to a recovery that clears BOTH:
+    `treebox teardown <name>`, or a manual rm -rf paired with `git worktree
+    prune`. The promised teardown must actually work."""
+    base = ["--repo", str(repo), "--root", root]
+    _run(["create", "leftover", *base, "--print"])
+    wt = Path(root) / "leftover"
+    (wt / ".git").unlink()
 
-    res = _run(["create", "leftover", "--repo", str(repo), "--root", root, "--print", "--json"])
+    res = _run(["create", "leftover", *base, "--print", "--json"])
     assert res.exit_code == 5, res.output
     hint = json.loads(res.stderr)["error"]["hint"]
     assert "treebox teardown leftover" in hint
     assert "worktree prune" in hint
+
+    res = _run(["teardown", "leftover", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert not wt.exists()
+
+
+def test_create_stray_dir_hint_does_not_promise_teardown(repo: Path, root: str, hermetic_config):
+    """teardown only resolves registered worktrees, so for a never-registered
+    stray dir it exits NOT_FOUND. The create hint must not recommend it (that
+    sent scripted agents looping exit 5 -> 3 -> 5) but the by-hand recovery it
+    does give must work."""
+    base = ["--repo", str(repo), "--root", root]
+    stray = Path(root) / "junk"
+    stray.mkdir(parents=True)
+
+    res = _run(["create", "junk", *base, "--print", "--json"])
+    assert res.exit_code == 5, res.output
+    hint = json.loads(res.stderr)["error"]["hint"]
+    assert "teardown junk" not in hint
+    assert f"rm -rf {stray}" in hint
+
+    res = _run(["teardown", "junk", *base, "--force", "--json"])
+    assert res.exit_code == 3, res.output
+
+    import shutil
+
+    shutil.rmtree(stray)
+    res = _run(["create", "junk", *base, "--print"])
+    assert res.exit_code == 0, res.output
 
 
 def test_create_self_heals_stale_registration_from_interrupted_teardown(
