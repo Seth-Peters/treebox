@@ -482,7 +482,7 @@ failure.
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `ERROR` | `1` | Unclassified runtime or setup failure. |
-| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
+| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |
