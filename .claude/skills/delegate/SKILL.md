@@ -9,6 +9,26 @@ The developer comes with the spec or plan already worked out. That's their
 job, not the factory's. Yours is to get it to the factory intact, then help
 them follow and steer the run.
 
+## Reading the request
+
+Developers invoke this as `/delegate ...` or in plain words. Map what they say
+to arguments before doing anything else:
+
+| They say | Arguments |
+|---|---|
+| "issue 38", "#38" | `--issue 38` (skip writing a brief: the issue body is the brief) |
+| "from my branch", "from my current branch", "on this branch" | `--ref $(git branch --show-current)` |
+| "dry run", "show me first" | `--dry-run` |
+| nothing about a branch | no `--ref`: the worker runs the factory from `main` |
+
+So `/delegate issue 38 from my current branch` is:
+
+```bash
+uv run --project factory factory delegate --issue 38 --ref "$(git branch --show-current)"
+```
+
+Run it directly; no confirmation is needed for an existing issue.
+
 ## Hand off a task
 
 1. **Confirm the spec.** Use what the developer wrote, verbatim where you can.
