@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A directory at `<worktree>/.env` or `<worktree>/.gitmodules` (a branch that
+  commits `.env/<file>`, or an agent that replaces the copy) no longer crashes
+  `create`/`enter` with a traceback and wedges the worktree: it is replaced by
+  the copied file. If it cannot be removed, the run fails with a classified
+  `COPY_FAILED` error (exit 1, with a hint) instead (#37).
+
 ## [1.0.1] - 2026-07-10
 
 ### Fixed

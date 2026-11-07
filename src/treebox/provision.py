@@ -72,6 +72,15 @@ class BranchConflictError(ProvisionError):
         self.hint = f"Resume it with `treebox create --checkout {branch}`, or pick another name."
 
 
+class HostCopyError(ProvisionError):
+    """A host-side file copy into the worktree could not complete because of
+    what is already at the destination (exit 1, COPY_FAILED)."""
+
+    def __init__(self, dest: Path, cause: OSError) -> None:
+        super().__init__(f"Could not write {dest}: {cause}")
+        self.hint = f"Remove {dest} by hand (it blocks the copy), then retry."
+
+
 @dataclass
 class Outcome:
     worktree: Worktree
@@ -191,18 +200,24 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
     meantime makes the open fail instead of redirecting the write. A directory
     at ``dest`` is removed recursively.
     """
-    if dest.is_symlink():
-        dest.unlink()
-    elif dest.is_dir():
-        # A branch can commit ``.env/<file>`` (or a boxed agent can swap the
-        # copy for a directory); ``unlink`` would raise and wedge the worktree.
-        # ``rmtree`` removes symlinks inside it without following them.
-        shutil.rmtree(dest)
-    elif dest.exists():
-        dest.unlink()
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
-        shutil.copyfileobj(fsrc, fdst)
+    try:
+        if dest.is_symlink():
+            dest.unlink()
+        elif dest.is_dir():
+            # A branch can commit ``.env/<file>`` (or a boxed agent can swap the
+            # copy for a directory); ``unlink`` would raise and wedge the
+            # worktree. ``rmtree`` removes nested symlinks without following
+            # them. Tracked files under it are deleted (the tree shows dirty).
+            shutil.rmtree(dest)
+        elif dest.exists():
+            dest.unlink()
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+            shutil.copyfileobj(fsrc, fdst)
+    except OSError as exc:
+        # Anything left at ``dest`` we cannot clear (e.g. a read-only subdir an
+        # agent planted) must surface as a classified error, never a traceback.
+        raise HostCopyError(dest, exc) from exc
 
 
 def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:

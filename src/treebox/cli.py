@@ -383,6 +383,8 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_CONFLICT, "BRANCH_IN_USE", exc.hint)
     if isinstance(exc, provision.BranchConflictError):
         return _ErrorInfo(EXIT_CONFLICT, "BRANCH_EXISTS", exc.hint)
+    if isinstance(exc, provision.HostCopyError):
+        return _ErrorInfo(EXIT_ERROR, "COPY_FAILED", exc.hint)
     if isinstance(exc, resolve.AmbiguousRefError):
         return _ErrorInfo(EXIT_USAGE, "AMBIGUOUS_REF", exc.hint)
     if isinstance(exc, provision.NotFoundError):

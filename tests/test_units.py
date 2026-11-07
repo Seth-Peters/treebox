@@ -1937,6 +1937,28 @@ def test_copy_submodules_replaces_a_gitmodules_directory(tmp_path: Path, monkeyp
     copy_submodules(str(repo), worktree, Reporter())
 
     assert (worktree / ".gitmodules").is_file()
+    assert (worktree / ".gitmodules").read_text() == "[submodule]\n"
+
+
+def test_copy_env_replaces_a_symlink_to_a_directory(tmp_path: Path):
+    from treebox.output import Reporter
+    from treebox.provision import copy_env
+
+    canonical = tmp_path / "canonical.env"
+    canonical.write_text("SECRET=canonical\n")
+    outside = tmp_path / "outdir"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep\n")
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".env").symlink_to(outside, target_is_directory=True)
+
+    assert copy_env(str(worktree), worktree, str(canonical), Reporter()) is True
+
+    assert (outside / "keep.txt").read_text() == "keep\n"
+    assert not (worktree / ".env").is_symlink()
+    assert (worktree / ".env").read_text() == "SECRET=canonical\n"
 
 
 def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):

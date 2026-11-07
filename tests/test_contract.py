@@ -292,6 +292,31 @@ def test_json_error_shape_is_pinned(repo: Path, root: str, hermetic_config):
     assert err["code"] == "DIRTY_WORKTREE"
 
 
+def test_unclearable_env_destination_is_a_classified_error(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A directory at <worktree>/.env that cannot be removed (e.g. a read-only
+    subdir a boxed agent planted) must exit 1 with COPY_FAILED and a hint,
+    never a raw traceback."""
+    from treebox import provision
+
+    r = ["--repo", str(repo), "--root", root]
+    (repo / ".env").write_text("SECRET=host\n")
+    assert _run(["create", "blocked", *r, "--print"]).exit_code == 0
+    (Path(root) / "blocked" / ".env").unlink()
+    (Path(root) / "blocked" / ".env").mkdir()
+
+    def boom(path, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(provision.shutil, "rmtree", boom)
+    res = _run(["enter", "blocked", *r, "--json"])
+    assert res.exit_code == EXIT_ERROR
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "COPY_FAILED"
+    assert err["hint"]
+
+
 # --- the exit-code / error.code matrix --------------------------------------------
 
 
