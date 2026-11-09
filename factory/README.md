@@ -33,12 +33,14 @@ merges and applies them.
 | `vaults/github-worker.yaml` | Vault holding the GitHub token the worker's MCP server uses |
 | `claude-lock.json` | Written by `ant apply`: resource IDs and agent versions. Commit it; never hand-edit |
 | `scorers/` | Outer-loop scorers. Empty for now |
+| `garden.md` | The gardener's queue: recurring mistake classes in the codebase, their evidence, and what enforces each |
 | `retros/` | One file per outer-loop run; history, never edited |
 | `src/factory_cli/` | The `factory` CLI |
 
 Skills live in the repo's `.claude/skills/`, loaded by the cloud worker and by
 your local Claude Code session: `delegate`, `implement`, `verify`, `review`,
-`improve-factory`, and `grilling` (vendored from Matt Pocock's skills, MIT).
+`improve-factory`, `garden`, and `grilling` (vendored from Matt Pocock's
+skills, MIT).
 
 ## One-time setup
 

@@ -223,7 +223,7 @@ needs path translation today, so building it would be indirection).
 ## Software factory
 
 `factory/` and the `delegate`, `implement`, `verify`, `review`,
-`improve-factory`, and `grilling` skills define a code-first software factory
+`improve-factory`, `garden`, and `grilling` skills define a code-first software factory
 that turns a developer's spec (one GitHub issue) into a verified, reviewed
 draft PR in a Claude Managed Agents session. It is separate
 from the treebox product: its own uv project (`factory/pyproject.toml`), never

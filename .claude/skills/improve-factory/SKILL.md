@@ -88,7 +88,15 @@ the engineer's prompt or skills is for steps, not standards.
 If `factory/scorers/` contains scorers, apply each to every run and include
 the scores. (It's empty for now: scoring is a planned addition.)
 
-## 4. Write the retro
+## 4. Garden
+
+Follow the `garden` skill with the runs you just read. It asks the other
+question: what about the *codebase* lets agents keep making the same mistake?
+It updates `factory/garden.md` and files `garden` issues for recurring
+classes; it never edits product code. Its findings go in the retro's
+"Garden" section. This step is separate from the one factory change in step 6.
+
+## 5. Write the retro
 
 Create `factory/retros/<YYYY-MM-DD>.md` (never edit an existing retro):
 
@@ -105,17 +113,22 @@ Reviewed <n> sessions (factory v<versions>): <every session id, including runs t
 <each finding: its kind (reproducible failure, or behavior pattern with its
 run count), the session ids that show it, and where its fix lands>
 
+## Garden
+<each mistake class: evidence, times seen, level picked; creep counts and how
+they changed; `garden` issues filed>
+
 ## Change proposed
 <the one change in this PR, the hypothesis behind it, and what you'd expect
 to see in the next retro if it worked>
 ```
 
-## 5. Change the factory, then open one PR
+## 6. Change the factory, then open one PR
 
 - Make **one** coherent change for the strongest finding: a reproducible
   failure, or a behavior pattern seen in 5 or more runs. Other findings go in
   the retro for next time. When no finding qualifies, the retro alone is the
-  PR: it marks the runs as reviewed.
+  PR: it marks the runs as reviewed. The `factory/garden.md` update from
+  step 4 rides in the same PR.
 - You may edit what `factory_code.editable` in `factory/factory.yaml` allows
   (`factory/`, `.claude/`), never what `factory_code.never` lists: no product
   source or tests, no past retros, no hand-edits to `claude-lock.json`.
