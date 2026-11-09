@@ -423,3 +423,17 @@ def test_cli_check_boundary(repo: Path, capsys: pytest.CaptureFixture[str]) -> N
     capsys.readouterr()
     assert cli.main(["check", "--boundary"]) == 1
     assert any("src/app.py" in p for p in json.loads(capsys.readouterr().out)["problems"])
+
+
+def test_missing_credentials_is_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from factory_cli.anthropic_api import AnthropicApi
+
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+    with pytest.raises(FactoryError, match="ant auth login"):
+        AnthropicApi().list_sessions("agent_x")

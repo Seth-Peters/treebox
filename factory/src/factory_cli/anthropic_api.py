@@ -32,6 +32,12 @@ def _call(action: str, fn: Callable[[], T]) -> T:
         raise FactoryError(f"{action} failed: {exc}") from exc
     except anthropic.AnthropicError as exc:  # e.g. no credentials found
         raise FactoryError(f"{action} failed: {exc} (run `ant auth login`)") from exc
+    except TypeError as exc:  # the SDK raises this when it finds no credentials at all
+        if "authentication method" not in str(exc):
+            raise
+        raise FactoryError(
+            f"{action} failed: no Anthropic credentials found (run `ant auth login`)"
+        ) from exc
 
 
 def _dump(model: Any) -> dict[str, Any]:
