@@ -686,9 +686,7 @@ def create(
         reporter,
         run,
         agent,
-        repo_path=repo_path,
-        root=cfg.root,
-        name=wt_name,
+        path=worktree_path(repo_path, cfg.root, wt_name),
         provision_call=_provision,
         json_out=json_out,
         print_only=print_only,
@@ -744,7 +742,7 @@ def enter(
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
     try:
-        cand = resolve.resolve_ref(repo_path, cfg.root, ref).under_root(repo_path, cfg.root)
+        cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
         # The branch may exist without a worktree (torn down, or never had
         # one): point at the command that materializes it instead of the
@@ -782,7 +780,6 @@ def enter(
             cfg,
             run,
             repo=repo_path,
-            name=cand.name,
             path=Path(cand.path),
             harness=agent,
             cold=cold,
@@ -794,9 +791,7 @@ def enter(
         reporter,
         run,
         agent,
-        repo_path=repo_path,
-        root=str(Path(cand.path).parent),
-        name=cand.name,
+        path=Path(cand.path),
         provision_call=_provision,
         json_out=json_out,
         print_only=print_only,
@@ -809,17 +804,15 @@ def _run_session(
     run: Runner,
     harness: Harness,
     *,
-    repo_path: str,
-    root: str,
-    name: str,
+    path: Path,
     provision_call: Callable[[], provision.Outcome],
     json_out: bool,
     print_only: bool,
     args: list[str],
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
-    the worktree lock (see ``locking.worktree_lock``), the provisioning step, one exception →
-    exit-code classification, then the ``--json`` / ``--print`` / launch fork.
+    the lock on the worktree at ``path``, the provisioning step, one exception
+    → exit-code classification, then the ``--json`` / ``--print`` / launch fork.
 
     Preflight runs first so runner-specific preconditions (a no-op for the
     host runner) fail fast with a clean error + hint — before any git state
@@ -830,7 +823,7 @@ def _run_session(
     started = time.monotonic()
     try:
         run.preflight(reporter)
-        with locking.worktree_lock(repo_path, root, name):
+        with locking.worktree_lock(path):
             outcome = provision_call()
             if json_out or print_only:
                 # The launch path makes the sandbox entry-ready inside
@@ -1045,10 +1038,11 @@ def _choose_worktrees(
 
     entries: list[_PickerEntry] = []
     for row, st in zip(rows, statuses, strict=True):
-        cand = resolve.Candidate(
-            name=row["name"],
-            branch=None if row["branch"] == "detached" else row["branch"],
-            path=row["path"],
+        cand = resolve.Candidate.registered(
+            repo_path,
+            cfg.root,
+            row["path"],
+            None if row["branch"] == "detached" else row["branch"],
         )
         age = format_age(time.time() - row["commit_epoch"]) if row["commit_epoch"] else "-"
         label = _branch_label(row)
@@ -1272,12 +1266,6 @@ def teardown(
         if delete_branch:
             branch_delete = {c.path for c in targets}
 
-    targets = [cand.under_root(repo_path, cfg.root) for cand in targets]
-    # Selection and branch deletion use the same path spelling.
-    branch_delete = {
-        cand.path for cand in targets if any(same_path(cand.path, path) for path in branch_delete)
-    }
-
     # Defense in depth: no resolved target may be the main working tree.
     # Enumeration already excludes it, but the branch-lingering fallback above
     # can still construct the repo's own path when the root contains the repo
@@ -1356,9 +1344,7 @@ def teardown(
                 # removal starts, so a held lock aborts the whole batch cleanly
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
-                    stack.enter_context(
-                        locking.worktree_lock(repo_path, str(Path(cand.path).parent), cand.name)
-                    )
+                    stack.enter_context(locking.worktree_lock(Path(cand.path)))
                 # Validate the isolation mode for EVERY target before removing
                 # anything: a mismatch or unknown recorded mode firing mid-batch
                 # would leave the earlier targets removed but unreported in the
@@ -1503,9 +1489,7 @@ def _teardown_one(
     """Tear down one resolved worktree; returns its --json record. ``run`` is
     the batch-validated runner from ``_teardown_runner``, or ``None`` under
     ``--skip-container`` (no container work, so no runner was resolved)."""
-    wt = Worktree(
-        repo=repo_path, name=cand.name, branch=cand.branch or "", base="", path=Path(cand.path)
-    )
+    wt = Worktree.at(repo_path, Path(cand.path), branch=cand.branch or "")
     exists = wt.path.is_dir()
     st = state.load_registered(repo_path, wt.path)
 

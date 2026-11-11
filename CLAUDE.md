@@ -119,9 +119,15 @@ Module map:
   through the repo's own worktree
   registration (`load_registered`) rather than the worktree's `.git` pointer,
   so a corrupt tree's recorded choices still drive container cleanup.
-- **`models.py`** holds the `Worktree` value object. For changes to worktree
-  selection, read the [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable)
-  and `resolve.Candidate.under_root` for root alias compatibility.
+- **`models.py`** holds the `Worktree` value object and the path-as-identity
+  rule: the registered *path* identifies a worktree (the *name* is only its
+  directory leaf, and can repeat under a nested root); the *branch* is a
+  mutable attribute read live from git. Only `create` derives a path from
+  root + name (`Worktree.locate`); everything acting on an existing worktree
+  carries the resolved path (`Worktree.at`), `locking.worktree_lock` is keyed
+  by that path, and `resolve.Candidate.registered` is the single place a git
+  registration becomes a candidate (it also owns root-alias spelling). See the
+  [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable).
   Branch-shaped inputs (`create feature/auth`,
   `create --checkout feature/auth`) derive the name by flattening slashes to
   `--` (`feature--auth`); generated names come from `names.py`. Also home to

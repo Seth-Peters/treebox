@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from treebox import state
 from treebox.cli import SCHEMA_VERSION, app
+from treebox.models import worktree_path
 
 runner = CliRunner()
 
@@ -552,7 +553,6 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         Config(root=root),
         _Recorder(),
         repo=str(repo),
-        name="fresh-creds",
         path=Path(root) / "fresh-creds",
         harness=get_harness("claude"),
         cold=False,
@@ -1093,7 +1093,7 @@ def test_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
     structured LOCK_HELD error, so scripted callers can branch on it."""
     from treebox import locking
 
-    with locking.worktree_lock(str(repo), root, "locked-x"):
+    with locking.worktree_lock(worktree_path(str(repo), root, "locked-x")):
         res = _run(["create", "locked-x", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5  # EXIT_CONFLICT
     err = json.loads(res.stderr)
@@ -1526,7 +1526,7 @@ def test_teardown_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
     _run(["create", "free", *base, "--print"])
     _run(["create", "busy", *base, "--print"])
 
-    with locking.worktree_lock(str(repo), root, "busy"):
+    with locking.worktree_lock(worktree_path(str(repo), root, "busy")):
         res = _run(["teardown", "free", "busy", *base, "--force", "--json"])
     assert res.exit_code == 5  # EXIT_CONFLICT
     assert json.loads(res.stderr)["error"]["code"] == "LOCK_HELD"
@@ -2585,7 +2585,7 @@ def test_enter_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
     from treebox import locking
 
     _run(["create", "busy-e", "--repo", str(repo), "--root", root, "--print"])
-    with locking.worktree_lock(str(repo), root, "busy-e"):
+    with locking.worktree_lock(worktree_path(str(repo), root, "busy-e")):
         res = _run(["enter", "busy-e", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5
     assert json.loads(res.stderr)["error"]["code"] == "LOCK_HELD"

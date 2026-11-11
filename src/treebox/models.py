@@ -133,8 +133,16 @@ class TemplateRow(TypedDict):
 class Worktree:
     """A provisioned (or to-be-provisioned) worktree.
 
-    For path identity and branch rules, see
-    docs/how-it-works.md#names-are-identity-branches-are-mutable.
+    ``path`` is the identity: the registered directory every command acts on,
+    what the lock, the runner's resources, and the state lookup all derive
+    from. It is never renamed - the docker runner bind-mounts the absolute
+    path and a live agent's CWD sits in it. ``name`` is its directory leaf,
+    the handle users type; it is unique under one parent but two parents (a
+    nested root) can each hold the same name, so never rebuild a path from a
+    root and a name once a worktree exists - carry the path (``Worktree.at``).
+    ``branch`` is a mutable attribute: the branch the worktree was
+    materialized on, expected to be renamed by the agent (``git branch -m``);
+    always read it live from git when it matters.
     """
 
     repo: str
@@ -144,7 +152,15 @@ class Worktree:
     path: Path
 
     @classmethod
+    def at(cls, repo: str, path: Path, *, branch: str = "", base: str = "") -> Worktree:
+        """An *existing* worktree, identified by its registered path (the
+        route for ``enter``/``teardown``, which resolve a ref to a path)."""
+        return cls(repo=repo, name=path.name, branch=branch, base=base, path=path)
+
+    @classmethod
     def locate(cls, repo: str, root: str, name: str, branch: str = "", base: str = "") -> Worktree:
+        """A worktree *to be created* directly under ``root`` (the route for
+        ``create``, the only command that derives a path from root + name)."""
         return cls(
             repo=repo,
             name=name,

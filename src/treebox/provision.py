@@ -608,7 +608,6 @@ def enter(
     runner: Runner,
     *,
     repo: str,
-    name: str,
     path: Path,
     harness: Harness,
     cold: bool,
@@ -619,9 +618,9 @@ def enter(
     lockfile changed since last setup or a prior setup never completed
     (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
-    # Discovery can select descendants of the configured root. Keep the exact
-    # registered path instead of reconstructing root/name from its leaf.
-    wt = Worktree(repo=repo, name=name, branch="", base="", path=path)
+    # ``path`` is the exact registered path the ref resolved to (possibly a
+    # descendant of the configured root), never a root/name reconstruction.
+    wt = Worktree.at(repo, path)
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 
@@ -634,9 +633,7 @@ def enter(
 
     prior = state.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
-    wt = Worktree(
-        repo=repo, name=name, branch=branch, base=prior.base if prior else "", path=wt.path
-    )
+    wt = Worktree.at(repo, path, branch=branch, base=prior.base if prior else "")
 
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential

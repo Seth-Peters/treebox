@@ -8,7 +8,7 @@ Ambiguity is a loud usage error, never a guess.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import git
@@ -34,25 +34,31 @@ class Candidate:
     branch: str | None
     path: str
 
-    def under_root(self, repo: str, root: str) -> Candidate:
-        """Keep the full registered suffix and the caller's root spelling.
+    @classmethod
+    def registered(cls, repo: str, root: str, path: str, branch: str | None) -> Candidate:
+        """The candidate for one git-registered worktree path under ``root``.
 
-        Git can canonicalize an alias such as /var to /private/var. Existing
-        runner resource names depend on the path spelling used at create, so
-        retain that prefix when it names the same root. Never reduce a nested
-        path to only its leaf name.
+        The one place a registration becomes a candidate, so every consumer
+        (ref resolution, the teardown chooser) agrees on two things: the name
+        is the directory leaf, and the path keeps its *full* registered suffix
+        below the root - a nested worktree is never reduced to ``root/leaf``,
+        which would name a different worktree.
+
+        The prefix is re-spelled the way the caller's root spells it: git may
+        canonicalize an alias (``/var`` -> ``/private/var``), while runner
+        resource names were derived from the spelling used at create.
         """
         base = worktree_root(repo, root)
-        path = Path(self.path)
+        registered = Path(path)
         for prefix in (base, base.resolve()):
             try:
-                relative = path.relative_to(prefix)
+                relative = registered.relative_to(prefix)
             except ValueError:
                 continue
-            return replace(self, path=str(base / relative))
-        # The registration can use another alias for the root. Retain it
+            return cls(name=registered.name, branch=branch, path=str(base / relative))
+        # The registration uses another alias for the root. Keep it verbatim
         # rather than resolving a possibly replaced target into another tree.
-        return self
+        return cls(name=registered.name, branch=branch, path=path)
 
 
 def candidates(repo: str, root: str) -> list[Candidate]:
@@ -67,7 +73,7 @@ def candidates(repo: str, root: str) -> list[Candidate]:
         # here would let enter/teardown act on the repo itself.
         if same_path(path, repo):
             continue
-        found.append(Candidate(name=path.name, branch=rec.branch, path=rec.path))
+        found.append(Candidate.registered(repo, root, rec.path, rec.branch))
     return found
 
 

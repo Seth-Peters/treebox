@@ -68,7 +68,7 @@ def test_teardown_nested_root_keeps_resolved_path(repo: Path, root: str, nested_
 def test_nested_root_uses_creation_lock(repo: Path, root: str, nested_worktrees, command: str):
     direct, nested = nested_worktrees
     extra = ["--force"] if command == "teardown" else []
-    with locking.worktree_lock(str(repo), str(nested.parent), nested.name):
+    with locking.worktree_lock(nested):
         result = _run(
             [command, "nested-branch", "--repo", str(repo), "--root", root, *extra, "--json"]
         )
@@ -79,7 +79,7 @@ def test_nested_root_uses_creation_lock(repo: Path, root: str, nested_worktrees,
 
 def test_nested_root_lock_does_not_block_other_root(repo: Path, root: str, nested_worktrees):
     direct, nested = nested_worktrees
-    with locking.worktree_lock(str(repo), str(direct.parent), direct.name):
+    with locking.worktree_lock(direct):
         result = _run(["enter", "nested-branch", "--repo", str(repo), "--root", root, "--json"])
     assert result.exit_code == 0, result.output
     assert Path(json.loads(result.stdout)["worktree_path"]) == nested
@@ -126,7 +126,7 @@ def test_nested_batch_preserves_distinct_paths(repo: Path, root: str, nested_wor
 def test_nested_batch_lock_conflict_removes_nothing(repo: Path, root: str, nested_worktrees):
     direct, nested = nested_worktrees
     subprocess.run(["git", "-C", str(direct), "branch", "-m", "direct-branch"], check=True)
-    with locking.worktree_lock(str(repo), str(nested.parent), nested.name):
+    with locking.worktree_lock(nested):
         result = _run(
             [
                 "teardown",
