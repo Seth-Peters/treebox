@@ -185,10 +185,18 @@ Under docker isolation, `enter` **preflights the Docker daemon first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
 `DOCKER_UNAVAILABLE` error and a start-docker hint rather than a misleading
 error deeper in launch. It also **re-stages the scoped credential copies**
-from the host on every entry — independent of the lockfile-hash skip — so a
+from the host on every entry - independent of the lockfile-hash skip - so a
 host logout/revocation drops the stale copies and a fresh login reaches the
-sandbox on the very next entry. A container that stopped since setup (host
-reboot, manual `docker stop`) is restarted with the firewall re-established
+sandbox on the very next entry. The same refresh runs during `create`.
+Each staged file is replaced atomically: staged symlinks and hardlinks cannot
+redirect credential writes or permission changes to host files. A symlink at
+the staged directory itself is rejected. Conflicting directories are preserved.
+Both conditions stop `create` or `enter` with an
+[`ERROR` failure](#scripting-against-treebox); inspect their contents before
+removing the conflict.
+
+A container that stopped since setup (host reboot, manual `docker stop`)
+is restarted with the firewall re-established
 before the agent launches - and before a `--print`/`--json` command is
 emitted - so a treebox-owned restart never leaves egress silently open.
 
@@ -393,7 +401,7 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 | `1`  | runtime failure, missing runner dependency, or failed doctor hard check |
 | `2`  | usage — invalid name/branch, ambiguous ref, bad option |
 | `3`  | not found — the worktree/branch/template doesn't exist |
-| `4`  | auth — fetch or credential problem                     |
+| `4`  | required fetch or its authentication failed             |
 | `5`  | conflict — name taken, dirty tree, or lock held        |
 
 The worktree commands and `doctor` take `--json`; payloads carry a
@@ -481,7 +489,7 @@ failure.
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
-| `ERROR` | `1` | Unclassified runtime or setup failure. |
+| `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |

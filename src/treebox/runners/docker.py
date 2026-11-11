@@ -329,9 +329,11 @@ class DockerRunner:
         return self._config_dir(wt) / _RESOURCE_MANIFEST
 
     def _creds_dir(self, wt: Worktree) -> Path:
-        """Per-worktree dir of scoped login-file copies (one subdir per harness).
-        This — never the operator's live ``~/.claude`` / ``~/.codex`` — is what
-        gets bind-mounted into the container."""
+        """Host-owned parent of the staged credential directories.
+
+        Each harness's child directory is bind-mounted; this parent stays
+        outside all sandbox mounts, as ``Harness.stage_credentials`` requires.
+        """
         return self._config_dir(wt) / _CREDS_SUBDIR
 
     def _id_label(self, wt: Worktree) -> str:
