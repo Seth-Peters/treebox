@@ -65,7 +65,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1  # generic / unexpected failure
 EXIT_USAGE = 2  # bad invocation (invalid name/branch, ambiguous ref, bad option)
 EXIT_NOTFOUND = 3  # the worktree/branch the command needs does not exist
-EXIT_PERMISSION = 4  # auth / fetch / credential problem
+EXIT_PERMISSION = 4
 EXIT_CONFLICT = 5  # already exists / uncommitted changes / lock held
 
 # Current JSON schema version. Payloads only ever *gain* fields within a
@@ -352,6 +352,10 @@ _GIT_MISSING_HINT = "Install git and ensure it is on PATH."
 
 def _classify(exc: Exception) -> _ErrorInfo:
     """Map a provisioning exception to its exit code / error code / hint."""
+    if isinstance(exc, provision.DestinationConflictError):
+        return _ErrorInfo(EXIT_CONFLICT, "DESTINATION_CONFLICT", exc.hint)
+    if isinstance(exc, provision.SubmoduleCopyFailedError):
+        return _ErrorInfo(EXIT_ERROR, "SUBMODULE_COPY_FAILED", exc.hint)
     if isinstance(exc, git.GitMissingError):
         # Before FetchError/GitError branches: the binary itself is absent, so
         # auth/repo hints would mislead.
@@ -377,8 +381,6 @@ def _classify(exc: Exception) -> _ErrorInfo:
                 "`glab auth login`, or a git credential helper), or pass --no-fetch."
             )
         return _ErrorInfo(EXIT_PERMISSION, "FETCH_FAILED", hint)
-    if isinstance(exc, provision.DestinationConflictError):
-        return _ErrorInfo(EXIT_CONFLICT, "DESTINATION_CONFLICT", exc.hint)
     if isinstance(exc, provision.SlugConflictError):
         return _ErrorInfo(EXIT_CONFLICT, "SLUG_CONFLICT", exc.hint)
     if isinstance(exc, provision.BranchInUseError):
@@ -423,7 +425,7 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         code=code,
         error_code=error_code,
         hint=hint,
-        path=str(exc.path) if isinstance(exc, provision.DestinationConflictError) else None,
+        path=str(exc.path) if isinstance(exc, provision.ProvisionError) and exc.path else None,
         json_out=json_out,
     )
 
@@ -468,6 +470,7 @@ def _dry_run(
     branch: str,
     *,
     fetch: bool,
+    cold: bool,
     json_out: bool,
     checkout: str | None,
 ) -> None:
@@ -481,6 +484,7 @@ def _dry_run(
             branch=branch,
             base=cfg.base,
             fetch=fetch,
+            cold=cold,
             existing_branch=checkout is not None,
         )
     except _PROVISION_ERRORS as exc:
@@ -643,6 +647,7 @@ def create(
             wt_name,
             target_branch,
             fetch=not no_fetch,
+            cold=cold,
             json_out=json_out,
             checkout=checkout,
         )
@@ -689,9 +694,7 @@ def create(
         reporter,
         run,
         agent,
-        repo_path=repo_path,
-        root=cfg.root,
-        name=wt_name,
+        path=worktree_path(repo_path, cfg.root, wt_name),
         provision_call=_provision,
         json_out=json_out,
         print_only=print_only,
@@ -785,7 +788,7 @@ def enter(
             cfg,
             run,
             repo=repo_path,
-            name=cand.name,
+            path=Path(cand.path),
             harness=agent,
             cold=cold,
             args=args or [],
@@ -796,9 +799,7 @@ def enter(
         reporter,
         run,
         agent,
-        repo_path=repo_path,
-        root=cfg.root,
-        name=cand.name,
+        path=Path(cand.path),
         provision_call=_provision,
         json_out=json_out,
         print_only=print_only,
@@ -811,17 +812,15 @@ def _run_session(
     run: Runner,
     harness: Harness,
     *,
-    repo_path: str,
-    root: str,
-    name: str,
+    path: Path,
     provision_call: Callable[[], provision.Outcome],
     json_out: bool,
     print_only: bool,
     args: list[str],
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
-    the per-name worktree lock, the provisioning step, one exception →
-    exit-code classification, then the ``--json`` / ``--print`` / launch fork.
+    the lock on the worktree at ``path``, the provisioning step, one exception
+    → exit-code classification, then the ``--json`` / ``--print`` / launch fork.
 
     Preflight runs first so runner-specific preconditions (a no-op for the
     host runner) fail fast with a clean error + hint — before any git state
@@ -832,7 +831,7 @@ def _run_session(
     started = time.monotonic()
     try:
         run.preflight(reporter)
-        with locking.worktree_lock(repo_path, root, name):
+        with locking.worktree_lock(path):
             outcome = provision_call()
             if json_out or print_only:
                 # The launch path makes the sandbox entry-ready inside
@@ -993,7 +992,8 @@ def _worktree_status(
     branch: str | None = None if row["branch"] == "detached" else row["branch"]
     ab = git.ahead_behind(path)
     base = row["base"] or default_base
-    merged_ancestor = git.is_merged_into(repo_path, branch, base) if branch else False
+    current_oid = git.head_oid(path)
+    merged_ancestor = git.is_merged_into(repo_path, current_oid, base) if current_oid else False
     pr = None
     if provider is not None and branch and not row["unnamed"]:
         pr = provider.pr_status(repo_path, branch)
@@ -1004,6 +1004,7 @@ def _worktree_status(
         ahead=ab.ahead if ab else 0,
         merged_ancestor=merged_ancestor,
         pr=pr,
+        current_oid=current_oid,
     )
 
 
@@ -1047,10 +1048,11 @@ def _choose_worktrees(
 
     entries: list[_PickerEntry] = []
     for row, st in zip(rows, statuses, strict=True):
-        cand = resolve.Candidate(
-            name=row["name"],
-            branch=None if row["branch"] == "detached" else row["branch"],
-            path=row["path"],
+        cand = resolve.Candidate.registered(
+            repo_path,
+            cfg.root,
+            row["path"],
+            None if row["branch"] == "detached" else row["branch"],
         )
         age = format_age(time.time() - row["commit_epoch"]) if row["commit_epoch"] else "-"
         label = _branch_label(row)
@@ -1346,13 +1348,13 @@ def teardown(
     if targets:
         try:
             with contextlib.ExitStack() as stack:
-                # The same per-name lock create/enter hold: a teardown must not
+                # The same worktree lock create/enter hold: a teardown must not
                 # delete the tree or its container out from under a concurrent
-                # provision of the same name. Every lock is taken before any
+                # provision of the same target. Every lock is taken before any
                 # removal starts, so a held lock aborts the whole batch cleanly
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
-                    stack.enter_context(locking.worktree_lock(repo_path, cfg.root, cand.name))
+                    stack.enter_context(locking.worktree_lock(Path(cand.path)))
                 # Validate the isolation mode for EVERY target before removing
                 # anything: a mismatch or unknown recorded mode firing mid-batch
                 # would leave the earlier targets removed but unreported in the
@@ -1497,7 +1499,7 @@ def _teardown_one(
     """Tear down one resolved worktree; returns its --json record. ``run`` is
     the batch-validated runner from ``_teardown_runner``, or ``None`` under
     ``--skip-container`` (no container work, so no runner was resolved)."""
-    wt = Worktree.locate(repo_path, cfg.root, cand.name, cand.branch or "")
+    wt = Worktree.at(repo_path, Path(cand.path), branch=cand.branch or "")
     exists = wt.path.is_dir()
     st = state.load_registered(repo_path, wt.path)
 

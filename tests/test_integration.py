@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from treebox import state
 from treebox.cli import SCHEMA_VERSION, app
+from treebox.models import worktree_path
 
 runner = CliRunner()
 
@@ -366,76 +367,94 @@ def test_create_b_remote_only_branch_is_tracked(repo: Path, root: str, hermetic_
     assert upstream == "origin/teammate/topic"
 
 
-def test_env_directory_collision_is_classified_on_create_retry_and_enter(
+def test_env_directory_on_branch_is_kept_and_does_not_block_create_or_enter(
     repo: Path, root: str, hermetic_config
 ):
-    """A branch-owned .env directory must survive every failed copy attempt.
+    """A branch that commits ``.env/`` as a directory stays provisionable.
 
-    Create, its resume path, and enter must give the same stable conflict. JSON
-    mode writes only the error object to stderr. Forced teardown remains the
-    explicit way to discard the half-built worktree.
+    The host ``.env`` cannot be copied over a directory, and treebox never
+    removes worktree content to make room. So the copy is skipped with a
+    warning, the directory survives byte-for-byte, the worktree stays clean,
+    and both ``create`` and every later ``enter`` succeed (issue #37: this
+    used to crash with a traceback and wedge the worktree).
     """
     _push_branch_with_directory(repo, "envdir", ".env")
     base = ["--repo", str(repo), "--root", root]
     wt = Path(root) / "envdir"
-    collision = wt / ".env"
+    kept = wt / ".env"
 
-    first = _run(["create", "--checkout", "envdir", *base, "--print"])
-    assert first.exit_code == 5
-    assert "Traceback" not in first.output
-    assert str(collision) in first.stderr
-    assert "treebox teardown envdir --force" in first.stderr
-    assert (collision / "keep.txt").read_text() == "must survive\n"
-
-    retry = _run(["create", "--checkout", "envdir", *base, "--json"])
-    assert retry.exit_code == 5
-    assert retry.stdout == ""
-    retry_error = json.loads(retry.stderr)["error"]
-    assert retry_error["code"] == "DESTINATION_CONFLICT"
-    assert retry_error["path"] == str(collision)
-    assert "treebox teardown envdir --force" in retry_error["hint"]
-    assert "Traceback" not in retry.stderr
-    assert (collision / "keep.txt").read_text() == "must survive\n"
+    created = _run(["create", "--checkout", "envdir", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    assert "Traceback" not in created.output
+    assert ".env not copied" in created.stderr
+    assert str(kept) in created.stderr.replace("\n", "")
+    assert (kept / "keep.txt").read_text() == "must survive\n"
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
     entered = _run(["enter", "envdir", *base, "--json"])
-    assert entered.exit_code == 5
-    assert entered.stdout == ""
-    enter_error = json.loads(entered.stderr)["error"]
-    assert enter_error == retry_error
-    assert (collision / "keep.txt").read_text() == "must survive\n"
+    assert entered.exit_code == 0, entered.output
+    assert json.loads(entered.stdout)["created"] is False
+    assert (kept / "keep.txt").read_text() == "must survive\n"
 
-    torn_down = _run(["teardown", "envdir", *base, "--force", "--json"])
-    assert torn_down.exit_code == 0, torn_down.output
-    assert json.loads(torn_down.stdout)["worktrees"][0]["removed"] is True
-    assert not wt.exists()
+    # A completed create is a normal conflict again, not a crash loop.
+    again = _run(["create", "--checkout", "envdir", *base, "--json"])
+    assert again.exit_code == 5
+    assert json.loads(again.stderr)["error"]["code"] in {"SLUG_CONFLICT", "BRANCH_IN_USE"}
+
+    # Scripts can see that the secrets file is not there.
+    listed = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert next(w for w in listed if w["name"] == "envdir")["env"] == "absent"
     assert (repo / ".env").read_text() == "SECRET=canonical\n"
 
 
-def test_gitmodules_directory_collision_is_classified_on_create_retry_and_enter(
+def test_gitmodules_directory_on_branch_is_kept_and_does_not_block_create_or_enter(
     repo: Path, root: str, hermetic_config
 ):
-    """The shared safe-copy path also protects a .gitmodules directory."""
+    """The same managed-file rule covers a ``.gitmodules`` directory."""
     _push_branch_with_directory(repo, "gitmodules-dir", ".gitmodules")
     base = ["--repo", str(repo), "--root", root]
     wt = Path(root) / "gitmodules-dir"
-    collision = wt / ".gitmodules"
+    kept = wt / ".gitmodules"
 
-    first = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
-    retry = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    created = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    assert created.exit_code == 0, created.output
+    assert json.loads(created.stdout)["created"] is True
     entered = _run(["enter", "gitmodules-dir", *base, "--json"])
-    retry_after_enter = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    assert entered.exit_code == 0, entered.output
 
-    results = (first, retry, entered, retry_after_enter)
-    errors = [json.loads(result.stderr)["error"] for result in results]
-    for result, error in zip(results, errors, strict=True):
-        assert result.exit_code == 5
-        assert result.stdout == ""
-        assert error["code"] == "DESTINATION_CONFLICT"
-        assert error["path"] == str(collision)
-        assert "treebox teardown gitmodules-dir --force" in error["hint"]
-        assert "Traceback" not in result.stderr
-    assert errors == [errors[0]] * len(errors)
-    assert (collision / "keep.txt").read_text() == "must survive\n"
+    assert "Traceback" not in created.output + entered.output
+    assert (kept / "keep.txt").read_text() == "must survive\n"
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+
+def test_managed_file_copy_refuses_a_directory_planted_mid_copy(tmp_path: Path, monkeypatch):
+    """A directory swapped in between the unlink and the create is a refusal,
+    not a traceback: the safe copy asks the filesystem, not the errno."""
+    import os
+
+    from treebox import provision
+
+    src = tmp_path / "src.env"
+    src.write_text("SECRET=canonical\n")
+    dest = tmp_path / "wt" / ".env"
+    dest.parent.mkdir()
+    dest.write_text("stale\n")
+
+    real_open = os.open
+
+    def plant_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == dest and not dest.exists():
+            dest.mkdir()
+            (dest / "keep.txt").write_text("must survive\n")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(provision.os, "open", plant_then_open)
+    with pytest.raises(provision.DestinationConflictError) as error:
+        provision._copyfile_no_follow(src, dest)
+    assert error.value.path == dest
+    assert (dest / "keep.txt").read_text() == "must survive\n"
 
 
 def test_create_replaces_destination_symlink_without_write_through(
@@ -672,7 +691,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         def refresh(self, wt, *, reporter):
             calls.append("refresh")
 
-        def dry_run_setup(self, wt):
+        def dry_run_setup(self, wt, *, cold, source_ref):
             return []
 
         def entry_command(self, wt, *, harness, args):
@@ -690,7 +709,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         Config(root=root),
         _Recorder(),
         repo=str(repo),
-        name="fresh-creds",
+        path=Path(root) / "fresh-creds",
         harness=get_harness("claude"),
         cold=False,
         args=[],
@@ -1063,7 +1082,8 @@ def test_teardown_corrupt_worktree_prompts_instead_of_inheriting_main_dirty(
     _run(["create", "corrupt-prompt", *base, "--print"])
     wt = repo / root / "corrupt-prompt"
     (wt / "setup.log").unlink()
-    assert _git(wt, "status", "--porcelain").stdout == ""
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
     (wt / ".git").unlink()
     main_dirty = repo / "main-untracked.txt"
@@ -1099,7 +1119,8 @@ def test_teardown_corrupt_worktree_force_removes_without_touching_main(repo: Pat
     _run(["create", "corrupt-force", *base, "--print"])
     wt = repo / root / "corrupt-force"
     (wt / "setup.log").unlink()
-    assert _git(wt, "status", "--porcelain").stdout == ""
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
     (wt / ".git").unlink()
     main_dirty = repo / "main-untracked.txt"
@@ -1230,7 +1251,7 @@ def test_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
     structured LOCK_HELD error, so scripted callers can branch on it."""
     from treebox import locking
 
-    with locking.worktree_lock(str(repo), root, "locked-x"):
+    with locking.worktree_lock(worktree_path(str(repo), root, "locked-x")):
         res = _run(["create", "locked-x", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5  # EXIT_CONFLICT
     err = json.loads(res.stderr)
@@ -1663,7 +1684,7 @@ def test_teardown_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
     _run(["create", "free", *base, "--print"])
     _run(["create", "busy", *base, "--print"])
 
-    with locking.worktree_lock(str(repo), root, "busy"):
+    with locking.worktree_lock(worktree_path(str(repo), root, "busy")):
         res = _run(["teardown", "free", "busy", *base, "--force", "--json"])
     assert res.exit_code == 5  # EXIT_CONFLICT
     assert json.loads(res.stderr)["error"]["code"] == "LOCK_HELD"
@@ -2685,6 +2706,254 @@ def test_dry_run_human_rendering(repo: Path, root: str, hermetic_config):
     assert not (Path(root) / "planned-h").exists()
 
 
+def _configure_pnpm_dry_run(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, str]:
+    """Make dry-run cache assertions deterministic and independent of user state."""
+    (repo / "uv.lock").unlink()
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (repo / "package.json").write_text('{"name":"cold-dry-run","private":true}\n')
+    _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-m",
+            "test: use pnpm fixture",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    pushed = _git(repo, "push", "origin", "main")
+    assert pushed.returncode == 0, pushed.stderr
+    caches = {
+        name: str(tmp_path / "shared" / name) for name in ("uv", "pnpm", "npm", "go", "cargo")
+    }
+    config = tmp_path / "cold-dry-run.toml"
+    config.write_text(
+        "[caches]\n" + "".join(f"{name} = {json.dumps(path)}\n" for name, path in caches.items())
+    )
+    monkeypatch.setenv("TREEBOX_CONFIG", str(config))
+    return caches
+
+
+@pytest.mark.parametrize("isolation", ["host", "docker"])
+def test_cold_dry_run_human_matches_real_cache_isolation(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolation: str
+):
+    """Human dry-run is an honest, side-effect-free audit of --cold."""
+    if isolation == "docker":
+        from treebox.runners.docker import DockerRunner
+
+        monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
+    caches = _configure_pnpm_dry_run(repo, tmp_path, monkeypatch)
+    root = tmp_path / "wts"
+    base = [
+        "create",
+        f"cold-human-{isolation}",
+        "--repo",
+        str(repo),
+        "--root",
+        str(root),
+        "--isolation",
+        isolation,
+        "--dry-run",
+    ]
+
+    warm = _run(base)
+    cold = _run([*base, "--cold"])
+
+    assert warm.exit_code == cold.exit_code == 0
+    assert warm.stdout == cold.stdout == ""
+    assert warm.stderr != cold.stderr  # issue #39: these were byte-identical
+    warm_plan = " ".join(warm.stderr.split())
+    cold_plan = " ".join(cold.stderr.split())
+    if isolation == "host":
+        assert f"--store-dir {caches['pnpm']}" in warm_plan
+        assert f"--store-dir {caches['pnpm']}" not in cold_plan
+        assert "--store-dir " in cold_plan
+        assert "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm" in cold_plan
+    else:
+        assert "docker run" in warm_plan
+        assert "docker run" in cold_plan
+        for name, env_var in (
+            ("uv", "UV_CACHE_DIR"),
+            ("pnpm", "npm_config_store_dir"),
+            ("npm", "npm_config_cache"),
+            ("go", "GOMODCACHE"),
+            ("cargo", "CARGO_HOME"),
+        ):
+            assert f"source={caches[name]},target=/caches/{name}" in warm_plan
+            assert f"{env_var}=/caches/{name}" in warm_plan
+            assert f"target=/caches/{name}" not in cold_plan
+            assert f"{env_var}=/caches/{name}" not in cold_plan
+    assert not root.exists()
+    assert not (tmp_path / "shared").exists()
+
+
+@pytest.mark.parametrize("isolation", ["host", "docker"])
+def test_cold_dry_run_json_preserves_schema_and_command_order(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolation: str
+):
+    """JSON plans change only cache routing and keep schemaVersion 1."""
+    if isolation == "docker":
+        from treebox.runners.docker import DockerRunner
+
+        monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
+    caches = _configure_pnpm_dry_run(repo, tmp_path, monkeypatch)
+    root = tmp_path / "wts"
+    base = [
+        "create",
+        f"cold-json-{isolation}",
+        "--repo",
+        str(repo),
+        "--root",
+        str(root),
+        "--isolation",
+        isolation,
+        "--dry-run",
+        "--json",
+    ]
+
+    warm_result = _run(base)
+    cold_result = _run([*base, "--cold"])
+
+    assert warm_result.exit_code == cold_result.exit_code == 0
+    assert warm_result.stderr == cold_result.stderr == ""
+    assert warm_result.stdout != cold_result.stdout  # issue #39: byte-identical before the fix
+    warm = json.loads(warm_result.stdout)
+    cold = json.loads(cold_result.stdout)
+    assert (
+        set(warm)
+        == set(cold)
+        == {
+            "schemaVersion",
+            "dry_run",
+            "name",
+            "worktree_path",
+            "branch",
+            "commands",
+        }
+    )
+    assert warm["schemaVersion"] == cold["schemaVersion"] == 1
+    assert len(warm["commands"]) == len(cold["commands"])
+    if isolation == "host":
+        assert warm["commands"][:-1] == cold["commands"][:-1]
+        assert warm["commands"][-1] == (
+            f"pnpm install --frozen-lockfile --store-dir {caches['pnpm']}"
+        )
+        assert caches["pnpm"] not in cold["commands"][-1]
+        assert cold["commands"][-1].endswith("'<temporary-dir>/treebox-cold-XXXXXXXX/pnpm'")
+    else:
+        warm_run_index = next(
+            index
+            for index, command in enumerate(warm["commands"])
+            if command.startswith("docker run")
+        )
+        cold_run_index = next(
+            index
+            for index, command in enumerate(cold["commands"])
+            if command.startswith("docker run")
+        )
+        assert warm_run_index == cold_run_index
+        assert warm["commands"][:warm_run_index] == cold["commands"][:cold_run_index]
+        assert warm["commands"][warm_run_index + 1 :] == cold["commands"][cold_run_index + 1 :]
+        warm_run = warm["commands"][warm_run_index]
+        cold_run = cold["commands"][cold_run_index]
+        for name, env_var in (
+            ("uv", "UV_CACHE_DIR"),
+            ("pnpm", "npm_config_store_dir"),
+            ("npm", "npm_config_cache"),
+            ("go", "GOMODCACHE"),
+            ("cargo", "CARGO_HOME"),
+        ):
+            assert f"source={caches[name]},target=/caches/{name}" in warm_run
+            assert f"{env_var}=/caches/{name}" in warm_run
+            assert f"target=/caches/{name}" not in cold_run
+            assert f"{env_var}=/caches/{name}" not in cold_run
+    assert not root.exists()
+    assert not (tmp_path / "shared").exists()
+
+
+@pytest.mark.parametrize("checkout", [False, True])
+def test_host_dry_run_detects_manifests_from_planned_revision(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkout: bool,
+):
+    """Setup planning reads the tree that create will check out, not current HEAD."""
+    caches = {
+        name: str(tmp_path / "shared" / name) for name in ("uv", "pnpm", "npm", "go", "cargo")
+    }
+    config = tmp_path / "planned-revision.toml"
+    config.write_text(
+        "[caches]\n" + "".join(f"{name} = {json.dumps(path)}\n" for name, path in caches.items())
+    )
+    monkeypatch.setenv("TREEBOX_CONFIG", str(config))
+    _git(repo, "checkout", "dev")
+    (repo / "uv.lock").unlink()
+    (repo / "uv.lock").mkdir()
+    (repo / "uv.lock" / "not-a-lockfile").write_text("directory entry\n")
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (repo / "package.json").write_text('{"name":"planned-revision","private":true}\n')
+    _git(repo, "add", "uv.lock", "pnpm-lock.yaml", "package.json")
+    committed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-m",
+            "test: use pnpm on dev",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    pushed = _git(repo, "push", "origin", "dev")
+    assert pushed.returncode == 0, pushed.stderr
+    _git(repo, "checkout", "main")
+    # Restore the current checkout's uv-only tree. The helper changed files in
+    # dev before committing them, but main must stay different for this test.
+    assert (repo / "uv.lock").is_file()
+    assert not (repo / "pnpm-lock.yaml").exists()
+
+    args = [
+        "create",
+        "planned-revision",
+        "--repo",
+        str(repo),
+        "--root",
+        str(tmp_path / "wts"),
+        "--dry-run",
+        "--json",
+        "--no-fetch",
+    ]
+    if checkout:
+        args += ["--checkout", "dev"]
+    else:
+        args += ["--base", "dev"]
+
+    result = _run(args)
+
+    assert result.exit_code == 0, result.output
+    commands = json.loads(result.stdout)["commands"]
+    assert commands[-1] == f"pnpm install --frozen-lockfile --store-dir {caches['pnpm']}"
+    assert "uv sync" not in commands
+
+
 def test_template_flag_reaches_the_docker_runner(
     repo: Path, root: str, hermetic_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2722,7 +2991,7 @@ def test_enter_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
     from treebox import locking
 
     _run(["create", "busy-e", "--repo", str(repo), "--root", root, "--print"])
-    with locking.worktree_lock(str(repo), root, "busy-e"):
+    with locking.worktree_lock(worktree_path(str(repo), root, "busy-e")):
         res = _run(["enter", "busy-e", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5
     assert json.loads(res.stderr)["error"]["code"] == "LOCK_HELD"

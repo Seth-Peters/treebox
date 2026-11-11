@@ -25,6 +25,7 @@ from .harnesses import Harness
 from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
 from .output import Reporter
 from .runners.base import Runner
+from .submodule_copy import SubmoduleCopyError, UnsafeDestinationError, copy_submodule
 
 
 class ProvisionError(RuntimeError):
@@ -32,6 +33,34 @@ class ProvisionError(RuntimeError):
     CLI error / in the --json error object."""
 
     hint: str | None = None
+    # Set by path-specific failures; surfaced as ``error.path`` under --json.
+    path: Path | None = None
+
+
+class DestinationConflictError(ProvisionError):
+    """A host-side copy into the worktree was refused because of what already
+    sits at its destination. Nothing is ever removed to make room: the worktree
+    tree is untrusted, and the entry may be the user's (or the branch's) own
+    content. A submodule copy surfaces this as exit 5, DESTINATION_CONFLICT;
+    the managed-file copies (``.env``, ``.gitmodules``) catch it and skip."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.hint = (
+            "Inspect this path and move any conflicting entry aside, then retry create. "
+            "Treebox does not remove conflicting directories."
+        )
+
+
+class SubmoduleCopyFailedError(ProvisionError):
+    """An I/O or permission failure stopped a submodule copy (exit 1,
+    SUBMODULE_COPY_FAILED)."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.hint = "Check permissions and free space at this path, then retry create."
 
 
 class NotFoundError(ProvisionError):
@@ -71,19 +100,6 @@ class BranchConflictError(ProvisionError):
     def __init__(self, branch: str, where: str) -> None:
         super().__init__(f"Branch '{branch}' already exists {where}.")
         self.hint = f"Resume it with `treebox create --checkout {branch}`, or pick another name."
-
-
-class DestinationConflictError(ProvisionError):
-    """A safe file copy found a directory at its destination."""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__(f"Cannot replace directory with file: {path}")
-        self.path = path
-        self.hint = (
-            "Treebox did not remove the directory or its contents. Rename or remove "
-            "the directory on the branch, then retry. To discard this worktree and "
-            f"its contents, run `treebox teardown {path.parent.name} --force`."
-        )
 
 
 @dataclass
@@ -151,13 +167,14 @@ def dry_run_plan(
     branch: str,
     base: str,
     fetch: bool,
+    cold: bool,
     existing_branch: bool = False,
 ) -> tuple[Worktree, list[str]]:
-    """The exact git/runner commands ``create`` would run, without side effects.
+    """A stable git/runner command plan for ``create``, without side effects.
 
-    Enforces the same read-only preconditions as a real ``create`` - raising the
-    same conflict/not-found errors rather than returning a plan a real run would
-    refuse - judged against locally available refs (a dry run never fetches).
+    Checks use locally available refs because this plan must not fetch or write.
+    See ``docs/usage.md#dry-run-checks`` for the preflight contract. Runners
+    represent disposable paths with stable placeholders.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
@@ -170,6 +187,7 @@ def dry_run_plan(
         _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
         _check_base_exists(repo, base=base, existing_branch=existing_branch)
     cmds: list[str] = []
+    source_ref: str | None = None
     if resuming:
         cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
     else:
@@ -178,8 +196,10 @@ def dry_run_plan(
         plan = git.resolve_branch(repo, branch, base)
         if plan.kind == "local":
             cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
+            source_ref = plan.name
         else:
             cmds.append(f"git -C {repo} worktree add -b {plan.name} {wt.path} {plan.start_point}")
+            source_ref = plan.start_point
     cmds.append(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
@@ -187,7 +207,7 @@ def dry_run_plan(
     if git.has_gitmodules(repo):
         cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
-    cmds.extend(runner.dry_run_setup(wt))
+    cmds.extend(runner.dry_run_setup(wt, cold=cold, source_ref=source_ref))
     return wt, cmds
 
 
@@ -200,44 +220,57 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
     ``dest`` lives inside a freshly checked-out worktree whose tree is untrusted
     (a malicious branch can commit a symlink there, or a boxed agent can plant
     one). ``shutil.copyfile`` would follow such a symlink and write through it to
-    an arbitrary host path. A regular file or symlink can be unlinked without
-    write-through. A directory is a conflict because removing it could destroy
-    user data. Create the destination with ``O_NOFOLLOW | O_EXCL`` so a symlink
-    re-planted in the meantime makes the open fail instead of redirecting the
-    write.
+    an arbitrary host path. Remove any existing file or symlink first (an
+    unlink never writes through), then create the destination with
+    ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the meantime makes the
+    open fail instead of redirecting the write.
+
+    A *directory* at ``dest`` is never removed - it may be the branch's own
+    tracked content - and raises ``DestinationConflictError`` instead, whether
+    it was there all along or swapped in mid-copy. Callers decide what a
+    refused copy means for them (``_copy_managed_file`` skips it).
     """
     try:
-        existing = dest.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        if stat.S_ISDIR(existing.st_mode):
-            raise DestinationConflictError(dest)
-        try:
-            dest.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            if _is_directory_no_follow(dest):
-                raise DestinationConflictError(dest) from exc
-            raise
-
-    try:
+        dest.unlink(missing_ok=True)
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
+        # unlink() on a directory fails with IsADirectoryError on Linux and
+        # PermissionError on macOS; ask the filesystem rather than the errno.
         if _is_directory_no_follow(dest):
-            raise DestinationConflictError(dest) from exc
+            raise DestinationConflictError(
+                dest, f"Cannot replace directory with file: {dest}"
+            ) from exc
         raise
     with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
         shutil.copyfileobj(fsrc, fdst)
 
 
 def _is_directory_no_follow(path: Path) -> bool:
-    """Return True only when ``path`` itself is a directory, not a symlink."""
+    """True only when ``path`` itself is a directory (a symlink to one is not)."""
     try:
         return stat.S_ISDIR(path.lstat().st_mode)
-    except FileNotFoundError:
+    except OSError:
         return False
+
+
+def _copy_managed_file(src: Path, dest: Path, reporter: Reporter) -> bool:
+    """Copy a file treebox manages (``.env``, ``.gitmodules``) into the
+    worktree; False when the worktree keeps a directory at that name.
+
+    A branch can commit ``.env/`` or ``.gitmodules/`` as a directory, and a
+    boxed agent can create one. That must neither crash provisioning nor cost
+    the branch its content, so the copy is skipped with a warning and the
+    worktree stays usable: the directory is left exactly as it is.
+    """
+    try:
+        _copyfile_no_follow(src, dest)
+    except DestinationConflictError:
+        reporter.warn(
+            f"{dest.name} not copied: {dest} is a directory in this worktree "
+            "(left untouched). Rename or remove it on the branch to get the copy."
+        )
+        return False
+    return True
 
 
 def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:
@@ -298,41 +331,29 @@ def resolve_env_file(repo: str | Path, env_file: str) -> Path:
     return src
 
 
-def _validate_managed_file_destinations(repo: str, worktree: Path, env_file: str) -> None:
-    destinations: list[Path] = []
-    if git.has_gitmodules(repo):
-        destinations.append(worktree / ".gitmodules")
-    if resolve_env_file(repo, env_file).is_file():
-        destinations.append(worktree / ".env")
-    for destination in destinations:
-        if _is_directory_no_follow(destination):
-            raise DestinationConflictError(destination)
-
-
 def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bool:
     """Overwrite ``<worktree>/.env`` from the canonical path. Returns True when copied."""
     src = resolve_env_file(repo, env_file)
     if not src.is_file():
         reporter.note("secrets", f"none at {src}")
         return False
-    dest = worktree / ".env"
-    _copyfile_no_follow(src, dest)
+    if not _copy_managed_file(src, worktree / ".env", reporter):
+        reporter.note("secrets", "not copied · .env is a directory here")
+        return False
     _ensure_env_ignored(worktree)
     reporter.ok("secrets", "copied")
     return True
 
 
-def _resolve_submodule_copy(
-    repo: Path, worktree: Path, rel: str, reporter: Reporter
-) -> tuple[Path, Path] | None:
-    """Validate an untrusted ``.gitmodules`` path; ``(src, dest)`` or None to skip.
+def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | None:
+    """Validate an untrusted ``.gitmodules`` path; the repo-relative path to
+    copy, or None to skip.
 
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
     absolute and ``..``-escaping values, never follow a source that is itself a
-    symlink, and require both endpoints to resolve inside their roots — else a
-    malicious repo can pull host trees into the agent mount (``vendor -> /home``)
-    or copy outside the worktree entirely.
+    symlink, and require the source to resolve inside its root - else a
+    malicious repo can pull host trees into the agent mount (``vendor -> /home``).
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
@@ -344,36 +365,32 @@ def _resolve_submodule_copy(
         return None
     if not src.is_dir():
         return None  # not checked out in the source repo; nothing to copy
-    dest = worktree / p
-    if not src.resolve().is_relative_to(repo.resolve()) or not dest.resolve().is_relative_to(
-        worktree.resolve()
-    ):
+    if not src.resolve().is_relative_to(repo.resolve()):
         reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
         return None
-    return src, dest
+    return p
 
 
 def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
     """Copy submodule working trees from the source repo (copy only, no linkage)."""
     if not git.has_gitmodules(repo):
         return 0
-    _copyfile_no_follow(Path(repo) / ".gitmodules", worktree / ".gitmodules")
+    _copy_managed_file(Path(repo) / ".gitmodules", worktree / ".gitmodules", reporter)
     copied = 0
     for rel in git.submodule_paths(repo):
-        resolved = _resolve_submodule_copy(Path(repo), worktree, rel, reporter)
-        if resolved is None:
+        relative = _safe_submodule_path(Path(repo), rel, reporter)
+        if relative is None:
             continue
-        src, dest = resolved
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # Exclude .git pointers/dirs: a copied pointer's relative gitdir path
-        # breaks every git command in the linked worktree (issue #16).
-        shutil.copytree(
-            src,
-            dest,
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git"),
-        )
+        # The source side is validated above; ``copy_submodule`` owns the
+        # destination side (the worktree tree is untrusted) and skips ``.git``
+        # pointers, whose relative gitdir would break git in the linked
+        # worktree (issue #16).
+        try:
+            copy_submodule(Path(repo), worktree, relative)
+        except UnsafeDestinationError as exc:
+            raise DestinationConflictError(exc.path, str(exc)) from exc
+        except SubmoduleCopyError as exc:
+            raise SubmoduleCopyFailedError(exc.path, str(exc)) from exc
         copied += 1
     reporter.ok("submodules", f"copied {copied}")
     return copied
@@ -570,8 +587,7 @@ def create(
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
 
-    # The name is the identity, so an existing directory is a conflict — loud,
-    # with the ways out — EXCEPT the crash-recovery case: a prior run created
+    # An existing target directory is a conflict except when a prior run created
     # the dir on this exact branch but died before setup finished (state is
     # recorded only after runner.setup completes). Launching into that
     # half-built tree would be the "said Ready, then failed" bug; finish it.
@@ -663,7 +679,7 @@ def enter(
     runner: Runner,
     *,
     repo: str,
-    name: str,
+    path: Path,
     harness: Harness,
     cold: bool,
     args: list[str],
@@ -673,7 +689,9 @@ def enter(
     lockfile changed since last setup or a prior setup never completed
     (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
-    wt = Worktree.locate(repo, config.root, name)
+    # ``path`` is the exact registered path the ref resolved to (possibly a
+    # descendant of the configured root), never a root/name reconstruction.
+    wt = Worktree.at(repo, path)
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 
@@ -686,11 +704,8 @@ def enter(
 
     prior = state.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
-    wt = Worktree(
-        repo=repo, name=name, branch=branch, base=prior.base if prior else "", path=wt.path
-    )
+    wt = Worktree.at(repo, path, branch=branch, base=prior.base if prior else "")
 
-    _validate_managed_file_destinations(repo, wt.path, config.env_file)
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential
     # copies here so host logins/logouts propagate on every entry — auth must

@@ -60,13 +60,9 @@ For an existing worktree, `enter` and `teardown` also read the worktree's
 recorded creation-time state. Recorded isolation wins over the config default,
 and a conflicting explicit `--isolation` exits `5`; `enter` always reuses the
 recorded firewall, while recorded harness and template beat config defaults
-unless `--harness` or `--template` is passed. `teardown` removes the docker
-volumes recorded in the runner-owned
-`<worktree-root>/.containers/<worktree>/treebox-resources.json` manifest at create time.
-Worktree state under `.git` is sandbox-writable and never authorizes volume
-deletion. Older worktrees without a manifest, or worktrees whose
-`<worktree-root>/.containers/<worktree>` directory was manually deleted, skip volume removal
-with a warning instead of guessing.
+unless `--harness` or `--template` is passed. For Docker teardown ownership and
+missing-manifest behavior, see the
+[runner-owned resource manifest](how-it-works.md#freshness-is-enforced-not-hoped-for).
 
 | Key        | Default              | What it controls                                          |
 | ---------- | -------------------- | --------------------------------------------------------- |
@@ -194,3 +190,12 @@ Secrets stay in files: treebox copies your repo's `.env` (or the configured
 `env_file`) into each worktree and mounts it into containers. Host isolation
 uses your live subscription login; docker isolation mounts scoped copies of the
 login files each harness declares and refreshes them on every entry.
+
+The `.env` copy replaces a file or symlink at `<worktree>/.env` (a symlink is
+removed, never written through). If the worktree has a **directory** there -
+the branch commits `.env/`, or an agent created one - treebox leaves it
+untouched and skips the copy with a warning (`.env not copied: ... is a
+directory in this worktree`); `create` and `enter` still succeed, and
+`treebox list --json` reports `"env": "absent"` for that worktree. Rename or
+remove the directory on the branch to get the copy back. `.gitmodules` follows
+the same rule.

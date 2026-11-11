@@ -83,7 +83,7 @@ from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 if TYPE_CHECKING:
     from ..config import Config
 
-# Sibling of the worktree root that holds each worktree's operator-owned
+# Host-side directory that holds each worktree's operator-owned
 # container config + build context. The config/build files themselves are NEVER
 # mounted into the container (only the worktree, its git common dir, and the
 # scoped credential copies below), so a boxed agent can't reach them.
@@ -318,8 +318,10 @@ class DockerRunner:
     # --- locations & identity --------------------------------------------------
 
     def _config_dir(self, wt: Worktree) -> Path:
-        """Host-side dir holding this worktree's container config + build
-        context. A sibling of the worktree root, so it is never mounted in."""
+        """Keep container config and build files outside the worktree mount.
+
+        See the safety invariant at ``_CONFIG_ROOT``.
+        """
         return wt.path.parent / _CONFIG_ROOT / wt.name
 
     def _config_file(self, wt: Worktree) -> Path:
@@ -329,9 +331,11 @@ class DockerRunner:
         return self._config_dir(wt) / _RESOURCE_MANIFEST
 
     def _creds_dir(self, wt: Worktree) -> Path:
-        """Per-worktree dir of scoped login-file copies (one subdir per harness).
-        This — never the operator's live ``~/.claude`` / ``~/.codex`` — is what
-        gets bind-mounted into the container."""
+        """Host-owned parent of the staged credential directories.
+
+        Each harness's child directory is bind-mounted; this parent stays
+        outside all sandbox mounts, as ``Harness.stage_credentials`` requires.
+        """
         return self._config_dir(wt) / _CREDS_SUBDIR
 
     def _id_label(self, wt: Worktree) -> str:
@@ -648,36 +652,41 @@ class DockerRunner:
 
     # --- setup -------------------------------------------------------------------
 
+    def _existing_container(self, wt: Worktree) -> tuple[str, ContainerState] | None:
+        ids = self._container_ids(wt)
+        if not ids:
+            return None
+        container_id = ids[0]
+        state = self._container_state(container_id)
+        self._require_own_container(wt, state.name)
+        if self.config.firewall and not state.firewall:
+            raise RuntimeError(
+                "The firewall was requested, but this worktree's container "
+                "was created without it. Re-create the sandbox: "
+                f"treebox teardown {wt.name} && "
+                f"treebox create {wt.name} --isolation {self.name} --firewall"
+            )
+        return container_id, state
+
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
         with reporter.task("sandbox files", "templates written (outside worktree)"):
             config = self._write_config(wt, cold=cold)
         with reporter.task("credentials", "scoped copies staged (outside worktree)"):
             self._refresh_credentials(wt)
 
-        existing = self._container_ids(wt)
+        existing = self._existing_container(wt)
         if existing:
-            name, running, firewall = self._container_state(existing[0])
-            self._require_own_container(wt, name)
-            # Capabilities can't be added to an existing container: a firewall
-            # request the container can't honor must fail loudly, or workspace
-            # setup would run with open egress while claiming lockdown.
-            if self.config.firewall and not firewall:
-                raise RuntimeError(
-                    "The firewall was requested, but this worktree's container "
-                    "was created without it. Re-create the sandbox: "
-                    f"treebox teardown {wt.name} && "
-                    f"treebox create {wt.name} --isolation {self.name} --firewall"
-                )
+            container_id, (_, running, firewall) = existing
             if cold:
                 reporter.warn(
                     "existing container keeps its creation-time cache mounts; "
                     "teardown and re-create for a fully cold sandbox"
                 )
             if running:
-                reporter.note("container", f"reusing {existing[0]}")
+                reporter.note("container", f"reusing {container_id}")
             else:
                 with reporter.task("container", "started (existing)"):
-                    self._engine_check(["start", existing[0]])
+                    self._engine_check(["start", container_id])
         else:
             firewall = self.config.firewall
             if not cold:
@@ -718,17 +727,45 @@ class DockerRunner:
 
     # --- launch / teardown ---------------------------------------------------
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
-        config = self._merged_config(wt, cold=False)
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
+        config = self._merged_config(wt, cold=cold)
         cmds = [
             f"# render {self.config.template} template into {self._config_dir(wt)} "
             "(operator-owned, outside the worktree)",
             f"# stage scoped login-file copies into {self._creds_dir(wt)} "
             "(the live ~/.claude / ~/.codex are never mounted)",
-            shlex.join(self._build_command(wt, config)),
-            shlex.join(self._run_command(wt, config)),
         ]
-        if self.config.firewall:
+        # Real setup reuses a container that already exists for this worktree
+        # (an interrupted create left one behind), warm or cold; the plan
+        # says so whenever the engine can be asked. A read-only query.
+        existing = self._existing_container(wt) if self._available() else None
+
+        firewall = self.config.firewall
+        if existing:
+            container_id, (_, running, firewall) = existing
+            if cold:
+                cmds.append(
+                    "# existing container keeps its creation-time cache mounts; "
+                    "teardown and re-create for a fully cold sandbox"
+                )
+            if running:
+                cmds.append(f"# reuse existing container {container_id}")
+            else:
+                cmds.append(shlex.join(["docker", "start", container_id]))
+        else:
+            cmds.extend(
+                [
+                    shlex.join(self._build_command(wt, config)),
+                    shlex.join(self._run_command(wt, config)),
+                ]
+            )
+        if firewall:
             cmds.append(shlex.join(self._firewall_command(wt)))
         post_create = config.get("postCreate")
         if post_create:
