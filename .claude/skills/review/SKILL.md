@@ -12,7 +12,7 @@ reasoning tries to prove the change wrong. Protect that.
 
 Delegate to the `reviewer` subagent. Give it only:
 
-- the repository path and the base ref (`origin/main`)
+- the repository path and the base ref (`origin/<PR base>` from your footer)
 - the spec, verbatim (your first message without the footer), plus any
   developer messages that changed it
 - your verification evidence block, so it can judge whether the evidence
@@ -25,11 +25,20 @@ you think it's correct. The reviewer reads the diff itself.
 Use a fresh reviewer for the first review. For re-reviews, follow up with the
 same reviewer so it can check its earlier findings were fixed.
 
+The verdict arrives as a message from the reviewer. To wait for it, end your
+turn. Do not run placeholder commands (`echo waiting`, `sleep`) to pass the time.
+
 ## Act on the verdict
 
-- **approve**: go open the PR.
+- **approve**, and you change nothing: go open the PR.
 - **changes-requested**: fix every `blocking` finding (and `minor` ones that are
   cheap), commit, follow the `verify` skill again, then review again.
+- **approve** with `minor` findings that you fix: this is also a fix round.
+  Commit, follow the `verify` skill again, then review again.
+
+The reviewer's last verdict must cover the final commit. Never push a commit
+the reviewer has not seen, and never report a verdict for a diff that it
+did not review. This rule applies to docs-only fixes too.
 - If you disagree with a finding, don't silently skip it: say why in your
   reply to the reviewer and let it rule.
 

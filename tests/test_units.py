@@ -441,7 +441,11 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     alias_wt = alias_root / "feature-smoke"
     assert git.branch_for_path(repo, str(alias_wt)) == "treebox/feature-smoke"
     assert git.worktree_registered(repo, str(alias_wt))
-    assert resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke").path == str(wt)
+    # The candidate is the same directory, spelled under the caller's root:
+    # runner resource names were derived from that spelling at create.
+    resolved = resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke")
+    assert resolved.path == str(alias_wt)
+    assert Path(resolved.path).resolve() == wt.resolve()
 
     rows = _collect_rows(str(repo), Config(root=str(alias_root)))
     assert [row["name"] for row in rows] == ["feature-smoke"]
@@ -507,6 +511,11 @@ def test_setup_steps_expand_tilde_cache_config(tmp_path: Path, monkeypatch: pyte
     uv = next(s for s in steps if s.name == "uv")
     assert uv.env["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
     assert ecosystems.cache_env(cfg.caches)["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    # Planning is pure (a dry run renders the same plan); only a real run
+    # creates the cache, through the one explicit effect.
+    assert uv.cache_dir == str(home / "tilde-uv-cache")
+    assert not (home / "tilde-uv-cache").exists()
+    ecosystems.ensure_cache_dirs(step.cache_dir for step in steps)
     assert (home / "tilde-uv-cache").is_dir()
 
 
@@ -1080,13 +1089,13 @@ def test_worktree_lock_is_exclusive(tmp_path: Path):
 
     repo = str(tmp_path)
     with (
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
         pytest.raises(locking.LockError),
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
     ):
         pass
     # Released after the first block: re-acquiring now succeeds.
-    with locking.worktree_lock(repo, "wts", "feature-x"):
+    with locking.worktree_lock(worktree_path(repo, "wts", "feature-x")):
         pass
 
 
@@ -1458,18 +1467,54 @@ def test_docker_rejects_unknown_template_keys(
         runner._merged_config(_boxed_worktree(tmp_path), cold=True)
 
 
-def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir):
+@pytest.mark.parametrize("cold", [False, True])
+def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, cold: bool):
     """--dry-run must change nothing: rendering the plan may not create the
     configured cache directories (that happens in setup, before docker run)."""
     cache = tmp_path / "not-yet" / "uv"
-    runner = DockerRunner(Config(isolation="docker", caches={"uv": str(cache)}))
+    runner = DockerRunner(
+        Config(isolation="docker", caches={"uv": str(cache)}),
+        docker=_FakeDocker(),
+    )
     wt = _boxed_worktree(tmp_path)
 
-    cmds = runner.dry_run_setup(wt)
+    cmds = runner.dry_run_setup(wt, cold=cold, source_ref=None)
 
     assert not cache.exists()
     assert any(c.startswith("docker build") for c in cmds)
     assert any(c.startswith("docker run") for c in cmds)
+
+
+def test_docker_cold_dry_run_reports_orphaned_container_cache_mounts(
+    tmp_path: Path, fake_common_dir
+):
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    wt.path.rmdir()
+    fake = _FakeDocker(
+        ids="abc123\n",
+        name=DockerRunner(cfg)._slug(wt),
+        running=True,
+    )
+
+    cmds = DockerRunner(cfg, docker=fake).dry_run_setup(wt, cold=True, source_ref=None)
+
+    assert any("creation-time cache mounts" in command for command in cmds)
+    assert any("reuse existing container abc123" in command for command in cmds)
+    assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
+
+
+def test_docker_cold_dry_run_without_daemon_plans_a_new_container(tmp_path: Path, fake_common_dir):
+    runner = DockerRunner(
+        Config(isolation="docker"),
+        docker=_FakeDocker(info_rc=1),
+    )
+
+    cmds = runner.dry_run_setup(_boxed_worktree(tmp_path), cold=True, source_ref=None)
+
+    assert not any("container state is unavailable" in command for command in cmds)
+    assert any(command.startswith("docker build") for command in cmds)
+    assert any(command.startswith("docker run") for command in cmds)
 
 
 def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_common_dir):
@@ -1896,11 +1941,12 @@ def test_copy_env_does_not_follow_a_planted_symlink(tmp_path: Path):
     assert (worktree / ".env").read_text() == "SECRET=canonical\n"
 
 
-def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
+def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(tmp_path: Path):
     """``.gitmodules`` is untrusted: ``..``/absolute paths and symlinks must
     never make the copy read outside the repo or write outside the worktree."""
     from treebox.output import Reporter
-    from treebox.provision import copy_submodules
+    from treebox.provision import DestinationConflictError, copy_submodules
+    from treebox.submodule_copy import UnsafeDestinationError
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1925,10 +1971,20 @@ def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
+    with pytest.raises(DestinationConflictError) as error:
+        copy_submodules(str(repo), worktree, Reporter())
+    assert isinstance(error.value.__cause__, UnsafeDestinationError)
+    assert error.value.path is not None
+    assert error.value.path == worktree / "pkg"
+    assert "retry create" in error.value.hint
+    assert (worktree / "pkg").is_symlink()
+    assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+    (worktree / "pkg").unlink()
     copied = copy_submodules(str(repo), worktree, Reporter())
 
-    # Only the honest submodule is copied; every escape vector is skipped.
-    assert copied == 1
+    assert copied == 2
+    assert (worktree / "pkg" / "inner").is_dir()
     assert (worktree / "sub" / "lib.txt").read_text() == "legit\n"
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.
@@ -1975,6 +2031,24 @@ def test_git_argv_uses_end_of_options_separator(monkeypatch: pytest.MonkeyPatch)
     assert local[-3:] == ["--", "/wt", "b"]
     assert new[-5:] == ["-b", "b", "--", "/wt", "--detach"]
     assert delete[-2:] == ["--", "b"]
+
+
+def test_files_at_revision_excludes_trees_and_gitlinks(monkeypatch: pytest.MonkeyPatch):
+    from treebox import git
+
+    monkeypatch.setattr(
+        git,
+        "_run",
+        lambda args: (
+            "100644 blob 1111111111111111111111111111111111111111\tuv.lock\n"
+            "040000 tree 2222222222222222222222222222222222222222\tpackage-lock.json\n"
+            "160000 commit 3333333333333333333333333333333333333333\tCargo.lock\n"
+        ),
+    )
+
+    assert git.files_at_revision(
+        "/repo", "dev", ("uv.lock", "package-lock.json", "Cargo.lock")
+    ) == {"uv.lock"}
 
 
 def test_state_provisioned_roundtrips(tmp_path, monkeypatch):
@@ -2597,7 +2671,8 @@ def test_status_compute_pr_overrides_squash_merge():
         has_upstream=True,
         ahead=2,
         merged_ancestor=False,
-        pr=PRStatus(state="merged", number=42),
+        pr=PRStatus(state="merged", number=42, head_oid="a" * 40),
+        current_oid="a" * 40,
     )
     assert s.safe and "merged" in s.label and "#42" in s.label
 
@@ -2785,6 +2860,21 @@ def test_registry_vocabularies_cannot_drift():
     assert tuple(h.name for h in HARNESSES) == VALID_HARNESSES
     assert set(VALID_ISOLATION) == set(get_args(config.Isolation))
     assert set(VALID_HARNESSES) == set(get_args(config.Harness))
+
+
+def test_runner_dry_run_setup_protocol_cannot_drift():
+    """Every runner must accept the cold choice as a required keyword."""
+    from inspect import Parameter, signature
+
+    from treebox.runners import DockerRunner, HostRunner, Runner
+
+    for owner in (Runner, HostRunner, DockerRunner):
+        params = signature(owner.dry_run_setup).parameters
+        assert tuple(params) == ("self", "wt", "cold", "source_ref")
+        assert params["cold"].kind is Parameter.KEYWORD_ONLY
+        assert params["cold"].default is Parameter.empty
+        assert params["source_ref"].kind is Parameter.KEYWORD_ONLY
+        assert params["source_ref"].default is Parameter.empty
 
 
 def test_runner_facts_pin_doctor_vocabulary():
@@ -3661,16 +3751,112 @@ def test_host_dry_run_setup_lists_ecosystem_commands(tmp_path: Path):
     repo.mkdir()
     (repo / "uv.lock").write_text("")
     wt = Worktree(str(repo), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    assert HostRunner(Config()).dry_run_setup(wt) == ["uv sync"]
+    assert HostRunner(Config()).dry_run_setup(wt, cold=False, source_ref=None) == ["uv sync"]
 
     empty = tmp_path / "bare"
     empty.mkdir()
     bare_wt = Worktree(str(empty), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt)
+    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt, cold=False, source_ref=None)
     assert plan.startswith("#") and "no-op" in plan
 
     hooked = HostRunner(Config(setup_hook=["echo hi"]))
-    assert hooked.dry_run_setup(wt) == ["sh -c 'echo hi'"]
+    assert hooked.dry_run_setup(wt, cold=False, source_ref=None) == ["sh -c 'echo hi'"]
+
+
+def test_host_dry_run_setup_uses_resumed_worktree_manifests(tmp_path: Path):
+    """A resumed create plans setup from its existing worktree, not the repo HEAD."""
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("")
+    wt_path = tmp_path / "wts" / "wt"
+    wt_path.mkdir(parents=True)
+    (wt_path / "Cargo.lock").write_text("")
+    wt = Worktree(str(repo), "wt", "wt", "main", wt_path)
+
+    commands = HostRunner(Config()).dry_run_setup(wt, cold=False, source_ref=None)
+
+    assert commands == ["cargo fetch"]
+
+
+def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Cold planning shows its isolated store, stays stable, and writes nothing."""
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    shared = tmp_path / "shared" / "pnpm"
+    wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
+    runner = HostRunner(Config(caches={"pnpm": str(shared)}))
+    monkeypatch.setattr(
+        "treebox.runners.host.tempfile.gettempdir",
+        lambda: pytest.fail("dry-run probed the temporary directory"),
+    )
+
+    warm = runner.dry_run_setup(wt, cold=False, source_ref=None)
+    cold = runner.dry_run_setup(wt, cold=True, source_ref=None)
+
+    expected_cold = "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm"
+    assert warm == [f"pnpm install --frozen-lockfile --store-dir {shared}"]
+    assert cold == [f"pnpm install --frozen-lockfile --store-dir '{expected_cold}'"]
+    assert cold == runner.dry_run_setup(wt, cold=True, source_ref=None)
+    assert not shared.exists()
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "command", "env_var", "cache_name"),
+    [
+        ("uv.lock", "uv sync", "UV_CACHE_DIR", "uv"),
+        ("package-lock.json", "npm ci", "npm_config_cache", "npm"),
+        ("go.sum", "go mod download", "GOMODCACHE", "go"),
+        ("Cargo.lock", "cargo fetch", "CARGO_HOME", "cargo"),
+    ],
+)
+def test_host_cold_dry_run_renders_environment_cache_routing(
+    tmp_path: Path,
+    lockfile: str,
+    command: str,
+    env_var: str,
+    cache_name: str,
+):
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / lockfile).write_text("")
+    shared = tmp_path / "shared" / cache_name
+    wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
+    runner = HostRunner(Config(caches={cache_name: str(shared)}))
+
+    assert runner.dry_run_setup(wt, cold=False, source_ref=None) == [command]
+    assert runner.dry_run_setup(wt, cold=True, source_ref=None) == [
+        f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{cache_name}' {command}"
+    ]
+    assert not shared.exists()
+
+
+def test_host_cold_dry_run_renders_setup_hook_cache_environment(tmp_path: Path):
+    from treebox.runners.host import HostRunner
+
+    shared = {name: str(tmp_path / "shared" / name) for name in ("uv", "npm", "go", "cargo")}
+    runner = HostRunner(Config(caches=shared, setup_hook=["echo hi"]))
+    wt = Worktree("/repo", "wt", "wt", "main", tmp_path / "wts" / "wt")
+
+    assert runner.dry_run_setup(wt, cold=False, source_ref=None) == ["sh -c 'echo hi'"]
+    (cold,) = runner.dry_run_setup(wt, cold=True, source_ref=None)
+    for name, env_var in (
+        ("uv", "UV_CACHE_DIR"),
+        ("npm", "npm_config_cache"),
+        ("go", "GOMODCACHE"),
+        ("cargo", "CARGO_HOME"),
+    ):
+        assert f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{name}'" in cold
+    assert cold.endswith("sh -c 'echo hi'")
+    assert not (tmp_path / "shared").exists()
 
 
 def test_worktree_status_missing_row_never_shells_out():

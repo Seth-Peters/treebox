@@ -29,6 +29,10 @@ uv run --project factory factory delegate --issue 38 --ref "$(git branch --show-
 
 Run it directly; no confirmation is needed for an existing issue.
 
+`--ref` also sets the PR base: the worker branches from that ref and opens its
+PR against it, not against `main`. When you report back after a `--ref` run,
+say which branch the PR will target.
+
 ## Hand off a task
 
 1. **Confirm the spec.** Use what the developer wrote, verbatim where you can.

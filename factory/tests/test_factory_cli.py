@@ -117,7 +117,11 @@ class FakeApi:
         }
 
     def threads(self, session_id: str) -> list[dict[str, Any]]:
-        return [{"id": "sthr_rev", "parent_thread_id": "sthr_main"}]
+        # The real API lists the primary thread too; it repeats the session's events.
+        return [
+            {"id": "sthr_main", "parent_thread_id": None},
+            {"id": "sthr_rev", "parent_thread_id": "sthr_main"},
+        ]
 
     def thread_events(self, session_id: str, thread_id: str) -> Iterator[dict[str, Any]]:
         yield {"type": "agent.tool_use", "name": "read"}
@@ -276,14 +280,17 @@ def test_steer_errors_without_active_session(manifest: Manifest) -> None:
 # --- transcript --------------------------------------------------------------
 
 
-def test_export_writes_events_threads_and_summary(tmp_path: Path) -> None:
+def test_export_writes_main_once_and_subagent_threads_separately(tmp_path: Path) -> None:
     summary = export(FakeApi(), "sesn_1", tmp_path)
     root = tmp_path / "sesn_1"
     assert len((root / "events.jsonl").read_text().splitlines()) == 3
-    assert (root / "threads" / "sthr_rev.jsonl").is_file()
+    assert sorted(p.name for p in (root / "threads").iterdir()) == ["sthr_rev.jsonl"]
+    assert summary.main.tool_calls == 2
+    assert summary.subagents["sthr_rev"].tool_calls == 1
     assert summary.tool_calls == 3
-    assert summary.tools["github:create_pull_request"] == 1
-    assert json.loads((root / "summary.json").read_text())["threads"] == {"sthr_rev": 1}
+    data = json.loads((root / "summary.json").read_text())
+    assert data["main"]["tools"]["github:create_pull_request"] == 1
+    assert data["subagents"]["sthr_rev"]["tools"] == {"read": 1}
 
 
 # --- CLI end to end (throwaway origin, fake GitHub + API) ---------------------
@@ -416,3 +423,17 @@ def test_cli_check_boundary(repo: Path, capsys: pytest.CaptureFixture[str]) -> N
     capsys.readouterr()
     assert cli.main(["check", "--boundary"]) == 1
     assert any("src/app.py" in p for p in json.loads(capsys.readouterr().out)["problems"])
+
+
+def test_missing_credentials_is_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from factory_cli.anthropic_api import AnthropicApi
+
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+    with pytest.raises(FactoryError, match="ant auth login"):
+        AnthropicApi().list_sessions("agent_x")

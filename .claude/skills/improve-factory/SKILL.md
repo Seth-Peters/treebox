@@ -11,19 +11,24 @@ defined made this run go the way it did?"
 
 Run this locally, from the repo root, in a session with `ant` and `gh`
 authenticated. It's triggered by a human when enough runs have accumulated.
+Factory skills and agent prompts are documents agents read: load the
+`writing-for-agents` skill first when it is available.
 
-## 1. Find the runs since the last retro
+## 1. Find the unreviewed runs
 
-- The newest file in `factory/retros/` names the factory version it reviewed.
-  Runs to review are the factory issues and sessions since then.
+- A run is **reviewed** when a file in `factory/retros/` lists its session ID.
+  List the reviewed IDs with
+  `grep -rhoE 'sesn_[A-Za-z0-9]+' factory/retros/ | sort -u`.
+  Every other session of a `factory` issue is unreviewed, whatever its
+  factory version or base ref.
 - Factory tasks are GitHub issues labelled `factory`:
   `gh issue list --label factory --state all --json number,title,state,createdAt,closedAt`.
 - Each issue's sessions (one per attempt) come from
   `uv run --project factory factory status --issue <n>`. Every session's
   metadata carries `factory_version`, `factory_sha`, `agent_version`, `issue`,
   `branch`, and `requested_by`.
-- If fewer than **5** new runs exist, say so and stop. Patterns need more than
-  a couple of data points.
+- If fewer than **5** unreviewed runs exist, say so in your reply and in the
+  retro, then continue. The count limits only one kind of finding (step 3).
 
 ## 2. Read each run
 
@@ -55,33 +60,75 @@ Things worth finding, each tied to specific sessions:
 
 Ignore one-off product bugs that say nothing about the factory.
 
+Sort every finding into one of two kinds:
+
+- **Reproducible failure**: an environment, tool, script, or skill step that
+  fails the same way on every run (a missing interpreter, a broken command).
+  One run is enough evidence. Reproduce it before you change anything, for
+  example with a probe session in the worker environment.
+- **Behavior pattern**: how the engineer or reviewer chose to act (misread a
+  spec, skipped a verify step, missed a bug). One run is an anecdote. With
+  fewer than 5 runs showing it, record it as **seen once** and leave the
+  factory unchanged for it.
+
+For each finding, the fix lands where it can fail loudly:
+
+| The run shows | The fix |
+|---|---|
+| A mistake a deterministic check could catch | A check: a `factory check` rule, a test, a `validate.sh` step. First look for an existing check that is unwired or broken; wiring it is the fix. |
+| The reviewer missed a judgement-call problem | A rule in `agents/reviewer.md`. The reviewer gets only a diff, so it has room for standards; the engineer has the most context pressure. |
+| The engineer could not find a file or fact | A pointer in a file the engineer already reads (`implement`, `CLAUDE.md`). |
+| The engineer needed information it could not reach | Wider access: a package in `environments/`, a host in `allowed_hosts`, a tool. |
+| A tool call cost much for what it returned | A cheaper command or tool. |
+| A skill or prompt line did not change behavior | Delete the line (a **no-op**). |
+
+A mechanical rule written as prose is a weak fix: prefer the check. Prose in
+the engineer's prompt or skills is for steps, not standards.
+
 If `factory/scorers/` contains scorers, apply each to every run and include
 the scores. (It's empty for now: scoring is a planned addition.)
 
-## 4. Write the retro
+## 4. Garden
+
+Follow the `garden` skill with the runs you just read. It asks the other
+question: what about the *codebase* lets agents keep making the same mistake?
+It updates `factory/garden.md` and files `garden` issues for recurring
+classes; it never edits product code. Its findings go in the retro's
+"Garden" section. This step is separate from the one factory change in step 6.
+
+## 5. Write the retro
 
 Create `factory/retros/<YYYY-MM-DD>.md` (never edit an existing retro):
 
 ```markdown
 # Factory retro <date>
 
-Reviewed factory v<version>, <n> sessions: <session ids>
+Reviewed <n> sessions (factory v<versions>): <every session id, including runs that showed nothing>
+<if n < 5: "Below 5 runs: behavior patterns are seen once.">
 
 ## What happened
 <per run, one line: slug, outcome, notable friction>
 
-## Patterns
-<each pattern, with the session ids that show it>
+## Findings
+<each finding: its kind (reproducible failure, or behavior pattern with its
+run count), the session ids that show it, and where its fix lands>
+
+## Garden
+<each mistake class: evidence, times seen, level picked; creep counts and how
+they changed; `garden` issues filed>
 
 ## Change proposed
 <the one change in this PR, the hypothesis behind it, and what you'd expect
 to see in the next retro if it worked>
 ```
 
-## 5. Change the factory, then open one PR
+## 6. Change the factory, then open one PR
 
-- Make **one** coherent change addressing the strongest pattern. Other
-  patterns go in the retro for next time.
+- Make **one** coherent change for the strongest finding: a reproducible
+  failure, or a behavior pattern seen in 5 or more runs. Other findings go in
+  the retro for next time. When no finding qualifies, the retro alone is the
+  PR: it marks the runs as reviewed. The `factory/garden.md` update from
+  step 4 rides in the same PR.
 - You may edit what `factory_code.editable` in `factory/factory.yaml` allows
   (`factory/`, `.claude/`), never what `factory_code.never` lists: no product
   source or tests, no past retros, no hand-edits to `claude-lock.json`.
@@ -96,3 +143,6 @@ to see in the next retro if it worked>
 
 Never apply the change (`ant apply`) yourself. A human merges the PR and
 applies it.
+
+The fix-routing table and the reproducible-versus-pattern split adapt Matt
+Pocock's `retro` skill (github.com/mattpocock/skills, MIT).

@@ -34,6 +34,32 @@ class Candidate:
     branch: str | None
     path: str
 
+    @classmethod
+    def registered(cls, repo: str, root: str, path: str, branch: str | None) -> Candidate:
+        """The candidate for one git-registered worktree path under ``root``.
+
+        The one place a registration becomes a candidate, so every consumer
+        (ref resolution, the teardown chooser) agrees on two things: the name
+        is the directory leaf, and the path keeps its *full* registered suffix
+        below the root - a nested worktree is never reduced to ``root/leaf``,
+        which would name a different worktree.
+
+        The prefix is re-spelled the way the caller's root spells it: git may
+        canonicalize an alias (``/var`` -> ``/private/var``), while runner
+        resource names were derived from the spelling used at create.
+        """
+        base = worktree_root(repo, root)
+        registered = Path(path)
+        for prefix in (base, base.resolve()):
+            try:
+                relative = registered.relative_to(prefix)
+            except ValueError:
+                continue
+            return cls(name=registered.name, branch=branch, path=str(base / relative))
+        # The registration uses another alias for the root. Keep it verbatim
+        # rather than resolving a possibly replaced target into another tree.
+        return cls(name=registered.name, branch=branch, path=path)
+
 
 def candidates(repo: str, root: str) -> list[Candidate]:
     base = worktree_root(repo, root)
@@ -47,7 +73,7 @@ def candidates(repo: str, root: str) -> list[Candidate]:
         # here would let enter/teardown act on the repo itself.
         if same_path(path, repo):
             continue
-        found.append(Candidate(name=path.name, branch=rec.branch, path=rec.path))
+        found.append(Candidate.registered(repo, root, rec.path, rec.branch))
     return found
 
 

@@ -64,6 +64,15 @@ Module map:
   pre-push guard (`extensions.worktreeConfig` + `core.hooksPath` into the
   private git dir), which rejects `treebox/*` refs — so placeholders are
   un-pushable until renamed, real branches unaffected.
+- **`submodule_copy.py`** is the one host-side copy that writes *into* an
+  untrusted tree: `copy_submodule(repo, worktree, relative)` walks the
+  destination through `O_NOFOLLOW` directory descriptors and publishes files
+  by rename, so a symlink or hardlink a branch (or a boxed agent) planted can
+  never redirect the write. It raises `UnsafeDestinationError` /
+  `SubmoduleCopyError`; `provision.copy_submodules` translates those into the
+  CLI-facing `DestinationConflictError` (exit 5, `DESTINATION_CONFLICT`) and
+  `SubmoduleCopyFailedError` (exit 1, `SUBMODULE_COPY_FAILED`). `cli.py`
+  classifies `ProvisionError`s only and reads `error.path` off the base class.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
   hides its autonomous launch argv, host login dir, staged login files, and
   login advice behind a small method interface; `VALID_HARNESSES` and the
@@ -91,7 +100,7 @@ Module map:
   into the package. `enter`/`teardown` resolve a ref as
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
   `create` and `enter` share `_run_session` for runner preflight, the
-  per-name lock, provision error classification, and the final
+  worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
   so the printed `entry_command` is never dead on replay).
   `_reconcile_with_state` folds recorded
@@ -106,7 +115,11 @@ Module map:
   branch on these, so don't change their meanings casually.
 - **`ecosystems.py`** detects package managers (uv, npm, pnpm, go, cargo),
   drives their cache-backed setup, and defines which manifest files feed the
-  SHA-256 hash. "Warmth" lives in shared host caches, not the tree.
+  SHA-256 hash. "Warmth" lives in shared host caches, not the tree. Its
+  planners (`setup_steps`, `cache_env`) are pure, so `--dry-run` renders the
+  same plan a real run executes; `ensure_cache_dirs` is the one filesystem
+  effect and only real setup calls it. `detect` reads a checked-out tree,
+  `detect_revision` reads a git revision (what a dry run plans against).
 - **`state.py`** stores per-worktree state (lockfile hash + provisioning
   choices) inside the worktree's private git dir (`.git/worktrees/<id>/`), so it
   never appears in `git status` and is pruned with the worktree. The lockfile
@@ -119,10 +132,16 @@ Module map:
   through the repo's own worktree
   registration (`load_registered`) rather than the worktree's `.git` pointer,
   so a corrupt tree's recorded choices still drive container cleanup.
-- **`models.py`** holds the `Worktree` value object and the name-as-identity
-  rule: the *name* is the directory leaf and lock key, never renamed; the
-  *branch* is a mutable attribute read live from git (the agent renames it
-  with `git branch -m`). Branch-shaped inputs (`create feature/auth`,
+- **`models.py`** holds the `Worktree` value object and the path-as-identity
+  rule: the registered *path* identifies a worktree (the *name* is only its
+  directory leaf, and can repeat under a nested root); the *branch* is a
+  mutable attribute read live from git. Only `create` derives a path from
+  root + name (`Worktree.locate`); everything acting on an existing worktree
+  carries the resolved path (`Worktree.at`), `locking.worktree_lock` is keyed
+  by that path, and `resolve.Candidate.registered` is the single place a git
+  registration becomes a candidate (it also owns root-alias spelling). See the
+  [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable).
+  Branch-shaped inputs (`create feature/auth`,
   `create --checkout feature/auth`) derive the name by flattening slashes to
   `--` (`feature--auth`); generated names come from `names.py`. Also home to
   `expand_user`, the tolerant `~`-expansion helper every path-consuming module
@@ -198,8 +217,7 @@ What a backend may **assume** (host locality):
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
   bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, the lockfile hash stats host files, and the
-  name-is-permanent rule in `models.py` presumes the absolute-path mount.
+  host-side private git dir, and the lockfile hash stats host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud
@@ -223,7 +241,7 @@ needs path translation today, so building it would be indirection).
 ## Software factory
 
 `factory/` and the `delegate`, `implement`, `verify`, `review`,
-`improve-factory`, and `grilling` skills define a code-first software factory
+`improve-factory`, `garden`, and `grilling` skills define a code-first software factory
 that turns a developer's spec (one GitHub issue) into a verified, reviewed
 draft PR in a Claude Managed Agents session. It is separate
 from the treebox product: its own uv project (`factory/pyproject.toml`), never
