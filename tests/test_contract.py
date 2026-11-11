@@ -31,6 +31,7 @@ from treebox.cli import (
     SCHEMA_VERSION,
     app,
 )
+from treebox.models import worktree_path as _lock_path
 
 cli_runner = CliRunner()
 
@@ -347,7 +348,7 @@ def test_exit_and_error_code_matrix(
         assert err["schemaVersion"] == SCHEMA_VERSION
 
     # LOCK_HELD (exit 5) needs the lock held around the invocation.
-    with locking.worktree_lock(str(repo), root, "locked"):
+    with locking.worktree_lock(_lock_path(str(repo), root, "locked")):
         res = _run(["create", "locked", *r, "--json"])
     assert res.exit_code == EXIT_CONFLICT
     assert json.loads(res.stderr)["error"]["code"] == "LOCK_HELD"

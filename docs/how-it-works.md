@@ -39,11 +39,16 @@ Docker isolation builds and starts the sandbox with plain `docker build` /
 host paths — mirrored 1:1 — so in-container `git` resolves the worktree's
 pointers exactly as the host does, with no extra tooling.
 
-## Names are identity; branches are mutable
+## Worktree paths are identity; branches are mutable { #names-are-identity-branches-are-mutable }
 
-The worktree **name** (the directory leaf) is the permanent identity: the
-docker sandbox bind-mounts the absolute path and a live agent's CWD sits in
-it, so the directory is never renamed. The **branch** is just an attribute.
+The full registered **path** identifies a worktree. Its **name** is the fixed
+directory leaf; different parent directories can contain the same name.
+After selection, `enter` and `teardown` keep that full path for provisioning,
+state access, runner operations, and reporting. See
+[worktree selection](usage.md#enter-come-back-to-a-worktree) for ref matching.
+The Docker sandbox mounts the absolute path and a live agent's working
+directory is there, so the worktree directory is never renamed. The
+**branch** is a mutable attribute.
 An explicit `create NAME` starts on the branch `NAME` itself (slashes kept in
 the branch, flattened to `--` in the directory); a nameless `create` starts
 on a `treebox/<petname>` placeholder expected to be renamed (`git branch -m`)
@@ -83,19 +88,22 @@ harness override is passed. That state is sandbox-writable because the Docker
 runner mounts the git common directory, so it never authorizes destructive
 host cleanup. Before first Docker setup, the runner writes exact per-workspace
 image and volume ownership to
-`<worktree-root>/.containers/<worktree>/treebox-resources.json`, outside every
-sandbox mount. `teardown --remove-volumes` validates and trusts only that
+`<worktree-parent>/.containers/<name>/treebox-resources.json`, outside every
+sandbox mount. Here, `<worktree-parent>` is the selected worktree's immediate
+parent, which can be below the configured discovery root.
+`teardown --remove-volumes` validates and trusts only that
 manifest, so it can still remove volumes when the container and user template
 are both gone.
-`teardown` reads that record through the repo's own worktree registration
-rather than the worktree's `.git` pointer, so the recorded choices survive
-even a corrupt worktree whose pointer file is gone.
+To recover creation-time choices, `teardown` reads worktree state through the
+repo's own worktree registration rather than the worktree's `.git` pointer,
+so the recorded choices survive even a corrupt worktree whose pointer file
+is gone.
 An explicit `--isolation` that disagrees with the recorded mode is a conflict,
 not an override.
 
 Older worktrees without a resource manifest remain tear-downable, but volume
 removal is skipped with a warning. The same safe behavior applies if an
-operator manually deletes the `.containers/<worktree>` directory: treebox
+operator manually deletes the rendered config directory: treebox
 does not guess ownership from volume names, current templates, container
 mounts, or sandbox-writable state.
 
@@ -151,6 +159,6 @@ treebox assumes the caller is often another program:
   entry-ready: a stopped docker sandbox is restarted (firewall re-applied)
   before the command is printed, never dead on replay.
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
-  so racing operations on one name — two `create fix-auth` calls, or a
-  `teardown fix-auth` against a concurrent provision — conflict cleanly (`5`)
-  instead of corrupting or half-removing a worktree.
+  so concurrent operations on the same worktree conflict (exit `5`). Separate
+  worktrees with the same name have separate locks. Explicit batch teardown
+  acquires all target locks before removal; a lock conflict removes nothing.

@@ -441,7 +441,11 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     alias_wt = alias_root / "feature-smoke"
     assert git.branch_for_path(repo, str(alias_wt)) == "treebox/feature-smoke"
     assert git.worktree_registered(repo, str(alias_wt))
-    assert resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke").path == str(wt)
+    # The candidate is the same directory, spelled under the caller's root:
+    # runner resource names were derived from that spelling at create.
+    resolved = resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke")
+    assert resolved.path == str(alias_wt)
+    assert Path(resolved.path).resolve() == wt.resolve()
 
     rows = _collect_rows(str(repo), Config(root=str(alias_root)))
     assert [row["name"] for row in rows] == ["feature-smoke"]
@@ -1080,13 +1084,13 @@ def test_worktree_lock_is_exclusive(tmp_path: Path):
 
     repo = str(tmp_path)
     with (
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
         pytest.raises(locking.LockError),
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
     ):
         pass
     # Released after the first block: re-acquiring now succeeds.
-    with locking.worktree_lock(repo, "wts", "feature-x"):
+    with locking.worktree_lock(worktree_path(repo, "wts", "feature-x")):
         pass
 
 
