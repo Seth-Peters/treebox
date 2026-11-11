@@ -741,9 +741,10 @@ class DockerRunner:
             f"# stage scoped login-file copies into {self._creds_dir(wt)} "
             "(the live ~/.claude / ~/.codex are never mounted)",
         ]
-        existing: tuple[str, ContainerState] | None = None
-        if cold and self._available():
-            existing = self._existing_container(wt)
+        # Real setup reuses a container that already exists for this worktree
+        # (an interrupted create left one behind), warm or cold; the plan
+        # says so whenever the engine can be asked. A read-only query.
+        existing = self._existing_container(wt) if self._available() else None
 
         firewall = self.config.firewall
         if existing:

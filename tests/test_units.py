@@ -511,6 +511,11 @@ def test_setup_steps_expand_tilde_cache_config(tmp_path: Path, monkeypatch: pyte
     uv = next(s for s in steps if s.name == "uv")
     assert uv.env["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
     assert ecosystems.cache_env(cfg.caches)["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    # Planning is pure (a dry run renders the same plan); only a real run
+    # creates the cache, through the one explicit effect.
+    assert uv.cache_dir == str(home / "tilde-uv-cache")
+    assert not (home / "tilde-uv-cache").exists()
+    ecosystems.ensure_cache_dirs(step.cache_dir for step in steps)
     assert (home / "tilde-uv-cache").is_dir()
 
 

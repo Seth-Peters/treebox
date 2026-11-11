@@ -115,7 +115,11 @@ Module map:
   branch on these, so don't change their meanings casually.
 - **`ecosystems.py`** detects package managers (uv, npm, pnpm, go, cargo),
   drives their cache-backed setup, and defines which manifest files feed the
-  SHA-256 hash. "Warmth" lives in shared host caches, not the tree.
+  SHA-256 hash. "Warmth" lives in shared host caches, not the tree. Its
+  planners (`setup_steps`, `cache_env`) are pure, so `--dry-run` renders the
+  same plan a real run executes; `ensure_cache_dirs` is the one filesystem
+  effect and only real setup calls it. `detect` reads a checked-out tree,
+  `detect_revision` reads a git revision (what a dry run plans against).
 - **`state.py`** stores per-worktree state (lockfile hash + provisioning
   choices) inside the worktree's private git dir (`.git/worktrees/<id>/`), so it
   never appears in `git status` and is pruned with the worktree. The lockfile

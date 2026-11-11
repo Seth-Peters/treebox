@@ -180,9 +180,14 @@ setup without creating its disposable cache. A host plan uses the stable
 `<temporary-dir>/treebox-cold-XXXXXXXX` placeholder in cache environment
 values and package-manager cache flags. A plan for a new docker container
 omits the shared package-cache mounts that treebox injects and their cache
-environment variables. If an interrupted create already has a docker
-container, the plan reports that the container keeps its creation-time mounts,
-as real setup does.
+environment variables.
+
+If an interrupted create already left a docker container behind and the Docker
+daemon is reachable, the plan shows what real setup will do with it - reuse it
+(or `docker start` it) instead of building and running a new one - warm or
+cold. Under `--cold` it also notes that the existing container keeps its
+creation-time cache mounts. This is a read-only engine query; with the daemon
+down, the plan falls back to the build-and-run commands.
 
 ## `enter` — come back to a worktree
 

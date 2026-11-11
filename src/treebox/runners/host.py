@@ -76,6 +76,7 @@ class HostRunner:
             reporter.note("setup", "no package manifests")
             return
         steps = ecosystems.setup_steps(ecos, self.config.caches, cold_cache_root=cold_root)
+        ecosystems.ensure_cache_dirs(step.cache_dir for step in steps)
         for step in steps:
             if not have(step.argv[0]):
                 reporter.note(f"setup · {step.name}", f"{step.argv[0]} not found; skipped")
@@ -91,8 +92,10 @@ class HostRunner:
                 reporter.warn(f"{step.name} setup failed; continuing")
 
     def _run_override(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
+        cache_env = ecosystems.cache_env(self.config.caches, cold_cache_root=cold_root)
+        ecosystems.ensure_cache_dirs(cache_env.values())
         env = dict(os.environ)
-        env.update(ecosystems.cache_env(self.config.caches, cold_cache_root=cold_root))
+        env.update(cache_env)
         for i, command in enumerate(self.config.setup_hook or []):
             try:
                 reporter.step(
@@ -116,11 +119,7 @@ class HostRunner:
             commands = [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
             if not cold:
                 return commands
-            env = ecosystems.cache_env(
-                self.config.caches,
-                cold_cache_root=_DRY_RUN_COLD_ROOT,
-                create_cache_dirs=False,
-            )
+            env = ecosystems.cache_env(self.config.caches, cold_cache_root=_DRY_RUN_COLD_ROOT)
             return [_render_cache_env(command, env) for command in commands]
         # A new worktree may come from a different --base/--checkout revision
         # than the current repo checkout. A resumed worktree already has the
@@ -136,7 +135,6 @@ class HostRunner:
             ecos,
             self.config.caches,
             cold_cache_root=_DRY_RUN_COLD_ROOT if cold else None,
-            create_cache_dirs=False,
         )
         if not cold:
             return [" ".join(step.argv) for step in steps]
