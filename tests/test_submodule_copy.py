@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from treebox.cli import app
-from treebox.submodule_copy import SubmoduleCopyError, copy_submodule
+from treebox.submodule_copy import SubmoduleCopyError, UnsafeDestinationError, copy_submodule
 
 
 def _create_link_checkout(repo: Path, tmp_path: Path, link_path: str, target: Path) -> None:
@@ -154,9 +154,8 @@ def test_readonly_directory_modes_are_restored_after_conflict_and_retry(
     for path, mode in directories.items():
         path.chmod(mode)
     try:
-        with pytest.raises(SubmoduleCopyError) as error:
+        with pytest.raises(UnsafeDestinationError) as error:
             copy_submodule(repo, worktree, Path("sub"))
-        assert error.value.conflict
         assert error.value.path == dest / "entry"
         for path, mode in directories.items():
             assert path.stat().st_mode & 0o777 == mode
@@ -235,9 +234,8 @@ def test_nonempty_destination_directory_is_not_deleted(tmp_path: Path, source_ki
         (source / "entry").write_text("source")
     else:
         (source / "entry").symlink_to("other")
-    with pytest.raises(SubmoduleCopyError) as error:
+    with pytest.raises(UnsafeDestinationError) as error:
         copy_submodule(repo, worktree, Path("sub"))
-    assert error.value.conflict
     assert error.value.path == dest / "entry"
     assert sentinel.read_text() == "user data"
     assert not list(dest.glob(".treebox-copy-*"))

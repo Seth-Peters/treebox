@@ -1904,8 +1904,8 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
     """``.gitmodules`` is untrusted: ``..``/absolute paths and symlinks must
     never make the copy read outside the repo or write outside the worktree."""
     from treebox.output import Reporter
-    from treebox.provision import copy_submodules
-    from treebox.submodule_copy import SubmoduleCopyError
+    from treebox.provision import DestinationConflictError, copy_submodules
+    from treebox.submodule_copy import UnsafeDestinationError
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1930,9 +1930,10 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
-    with pytest.raises(SubmoduleCopyError) as error:
+    with pytest.raises(DestinationConflictError) as error:
         copy_submodules(str(repo), worktree, Reporter())
-    assert error.value.conflict
+    assert isinstance(error.value.__cause__, UnsafeDestinationError)
+    assert error.value.path is not None
     assert error.value.path == worktree / "pkg"
     assert "retry create" in error.value.hint
     assert (worktree / "pkg").is_symlink()

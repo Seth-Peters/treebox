@@ -19,14 +19,25 @@ from pathlib import Path
 
 
 class SubmoduleCopyError(RuntimeError):
-    def __init__(self, path: Path, reason: str, *, conflict: bool = True) -> None:
+    """The copy could not complete (an I/O or permission failure at ``path``)."""
+
+    def __init__(self, path: Path, reason: str) -> None:
         super().__init__(f"Cannot safely copy submodule at {path}: {reason}.")
         self.path = path
-        self.conflict = conflict
-        self.hint = (
-            "Inspect this path and move any conflicting entry aside, then retry create. "
-            "Treebox does not remove conflicting directories."
-        )
+
+
+class UnsafeDestinationError(SubmoduleCopyError):
+    """The destination holds an entry the copy must not write through or
+    replace: a symlink, a non-directory where a directory is needed, or a
+    path that changed while it was being copied. Nothing was removed."""
+
+
+def _error(path: Path, reason: str, *, conflict: bool) -> SubmoduleCopyError:
+    return (UnsafeDestinationError if conflict else SubmoduleCopyError)(path, reason)
+
+
+def _from_os_error(path: Path, exc: OSError) -> SubmoduleCopyError:
+    return _error(path, str(exc), conflict=exc.errno in _CONFLICT_ERRNOS)
 
 
 @dataclass
@@ -50,7 +61,7 @@ class _Directory:
             opened.st_dev,
             opened.st_ino,
         ):
-            raise SubmoduleCopyError(self.path, "directory changed during copying")
+            raise UnsafeDestinationError(self.path, "directory changed during copying")
 
 
 @contextlib.contextmanager
@@ -68,7 +79,7 @@ def _directory(
     try:
         fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     except OSError as exc:
-        raise SubmoduleCopyError(path, str(exc), conflict=exc.errno in _CONFLICT_ERRNOS) from exc
+        raise _from_os_error(path, exc) from exc
     try:
         directory = _Directory(fd, path, parent, name)
         directory.check()
@@ -95,7 +106,7 @@ def _copy_leaf(source: _Directory, dest: _Directory, name: str, mode: int) -> No
             with os.fdopen(source_fd, "rb") as src:
                 metadata = os.fstat(src.fileno())
                 if not stat.S_ISREG(metadata.st_mode):
-                    raise SubmoduleCopyError(source.path / name, "source is no longer a file")
+                    raise UnsafeDestinationError(source.path / name, "source is no longer a file")
                 dest.check()
                 dest_fd = os.open(
                     temporary,
@@ -110,7 +121,7 @@ def _copy_leaf(source: _Directory, dest: _Directory, name: str, mode: int) -> No
                     os.fchmod(dst.fileno(), stat.S_IMODE(metadata.st_mode))
                     os.utime(dst.fileno(), ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
         else:
-            raise SubmoduleCopyError(source.path / name, "source is not a regular file or link")
+            raise UnsafeDestinationError(source.path / name, "source is not a regular file or link")
         dest.check()
         os.replace(temporary, name, src_dir_fd=dest.fd, dst_dir_fd=dest.fd)
         created = False
@@ -142,9 +153,7 @@ def _copy_contents(source: _Directory, dest: _Directory) -> None:
                 else:
                     _copy_leaf(source, dest, name, metadata.st_mode)
             except OSError as exc:
-                raise SubmoduleCopyError(
-                    dest.path / name, str(exc), conflict=exc.errno in _CONFLICT_ERRNOS
-                ) from exc
+                raise _from_os_error(dest.path / name, exc) from exc
         dest.check()
         metadata = os.fstat(source.fd)
         os.utime(dest.fd, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
@@ -160,7 +169,7 @@ def copy_submodule(repo: Path, worktree: Path, relative: Path) -> None:
         or not relative.parts
         or any(part in {"..", ".git"} for part in relative.parts)
     ):
-        raise SubmoduleCopyError(worktree / relative, "invalid submodule path")
+        raise UnsafeDestinationError(worktree / relative, "invalid submodule path")
     try:
         with contextlib.ExitStack() as stack:
             source = stack.enter_context(_directory(repo))
@@ -170,6 +179,4 @@ def copy_submodule(repo: Path, worktree: Path, relative: Path) -> None:
                 dest = stack.enter_context(_directory(dest.path / name, parent=dest, create=True))
             _copy_contents(source, dest)
     except OSError as exc:
-        raise SubmoduleCopyError(
-            worktree / relative, str(exc), conflict=exc.errno in _CONFLICT_ERRNOS
-        ) from exc
+        raise _from_os_error(worktree / relative, exc) from exc

@@ -64,6 +64,15 @@ Module map:
   pre-push guard (`extensions.worktreeConfig` + `core.hooksPath` into the
   private git dir), which rejects `treebox/*` refs — so placeholders are
   un-pushable until renamed, real branches unaffected.
+- **`submodule_copy.py`** is the one host-side copy that writes *into* an
+  untrusted tree: `copy_submodule(repo, worktree, relative)` walks the
+  destination through `O_NOFOLLOW` directory descriptors and publishes files
+  by rename, so a symlink or hardlink a branch (or a boxed agent) planted can
+  never redirect the write. It raises `UnsafeDestinationError` /
+  `SubmoduleCopyError`; `provision.copy_submodules` translates those into the
+  CLI-facing `DestinationConflictError` (exit 5, `DESTINATION_CONFLICT`) and
+  `SubmoduleCopyFailedError` (exit 1, `SUBMODULE_COPY_FAILED`). `cli.py`
+  classifies `ProvisionError`s only and reads `error.path` off the base class.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
   hides its autonomous launch argv, host login dir, staged login files, and
   login advice behind a small method interface; `VALID_HARNESSES` and the
