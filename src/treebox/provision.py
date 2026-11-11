@@ -506,8 +506,7 @@ def create(
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
 
-    # The name is the identity, so an existing directory is a conflict — loud,
-    # with the ways out — EXCEPT the crash-recovery case: a prior run created
+    # An existing target directory is a conflict except when a prior run created
     # the dir on this exact branch but died before setup finished (state is
     # recorded only after runner.setup completes). Launching into that
     # half-built tree would be the "said Ready, then failed" bug; finish it.
@@ -599,7 +598,7 @@ def enter(
     runner: Runner,
     *,
     repo: str,
-    name: str,
+    path: Path,
     harness: Harness,
     cold: bool,
     args: list[str],
@@ -609,7 +608,9 @@ def enter(
     lockfile changed since last setup or a prior setup never completed
     (recorded provisioned=False). The branch is read live — the agent may
     have renamed it since create."""
-    wt = Worktree.locate(repo, config.root, name)
+    # ``path`` is the exact registered path the ref resolved to (possibly a
+    # descendant of the configured root), never a root/name reconstruction.
+    wt = Worktree.at(repo, path)
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 
@@ -622,9 +623,7 @@ def enter(
 
     prior = state.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
-    wt = Worktree(
-        repo=repo, name=name, branch=branch, base=prior.base if prior else "", path=wt.path
-    )
+    wt = Worktree.at(repo, path, branch=branch, base=prior.base if prior else "")
 
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential
