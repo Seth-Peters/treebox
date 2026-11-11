@@ -1,0 +1,4 @@
+# Holds the GitHub token the engineer's GitHub MCP server uses to open PRs.
+# `ant apply` manages only the vault itself; the credential inside it is set
+# once, out of band, with `factory vault set-github-token` (never committed).
+display_name: treebox-factory-github
