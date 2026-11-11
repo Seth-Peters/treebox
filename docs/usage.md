@@ -88,7 +88,7 @@ treebox create fix-auth --isolation docker
 | `--no-fetch`     | Opt out of the required `origin` fetch and accept possibly stale refs.    |
 | `--firewall/--no-firewall` | Enable/disable the container firewall (docker isolation). Unset: the config default applies. |
 | `--template NAME`| Operator-owned sandbox template to render.                                |
-| `--dry-run, -n`  | Print the exact commands that would run; change nothing.                  |
+| `--dry-run, -n`  | Print a stable command plan; change nothing.                              |
 | `--print`        | Provision, then print the launch command instead of launching.            |
 | `--json`         | Provision, then print a JSON result instead of launching.                 |
 
@@ -135,8 +135,8 @@ one-checkout-per-branch rule never triggers. The base resolves as the freshly
 fetched `origin/feature/auth` (falling back to the local branch only if it was
 never pushed), so push the base first if its latest commits only exist locally.
 
-Not sure what it will do? Ask first — `--dry-run` (`-n`) prints the exact
-`git` / setup commands:
+Not sure what it will do? Ask first: `--dry-run` (`-n`) prints a stable plan
+of the `git` / setup commands:
 
 ```console
 $ treebox create fix-auth --dry-run
@@ -167,10 +167,27 @@ doesn't resolve, `TEMPLATE_INVALID` for one that resolves but whose
 As with real `create`, a half-built worktree from an interrupted run previews
 finishing setup (no fetch, no `worktree add`) instead of conflicting. Dry-run
 verdicts reflect the refs already available locally; run `git fetch origin`
-first when exact parity with create's normal fetch is required. A dry run does
-not copy submodules or inspect their destination paths, so it cannot detect
+first when exact parity with create's normal fetch is required. The setup plan
+detects package manifests from the exact locally available `--base` or
+`--checkout` revision that it will materialize; when it resumes an interrupted
+create, it detects them from the existing worktree. A dry run does not copy
+submodules or inspect their destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
 Nothing on disk or in git changes.
+
+With `--cold --dry-run`, the cache part of the plan also matches the real cold
+setup without creating its disposable cache. A host plan uses the stable
+`<temporary-dir>/treebox-cold-XXXXXXXX` placeholder in cache environment
+values and package-manager cache flags. A plan for a new docker container
+omits the shared package-cache mounts that treebox injects and their cache
+environment variables.
+
+If an interrupted create already left a docker container behind and the Docker
+daemon is reachable, the plan shows what real setup will do with it - reuse it
+(or `docker start` it) instead of building and running a new one - warm or
+cold. Under `--cold` it also notes that the existing container keeps its
+creation-time cache mounts. This is a read-only engine query; with the daemon
+down, the plan falls back to the build-and-run commands.
 
 ## `enter` — come back to a worktree
 

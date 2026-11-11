@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import git
 from .models import expand_user
 
 # Root under which shared host caches are bind-mounted inside the sandbox container.
@@ -123,15 +124,25 @@ ECOSYSTEMS: tuple[Ecosystem, ...] = (
 )
 
 
-def detect(worktree: str | Path) -> list[Ecosystem]:
-    """Active ecosystems, in a stable order. pnpm wins over npm when both
-    lockfiles exist (pnpm-lock.yaml present implies a pnpm project)."""
-    root = Path(worktree)
-    found = [eco for eco in ECOSYSTEMS if any((root / lf).is_file() for lf in eco.lockfiles)]
+def _detect(present: Callable[[str], bool]) -> list[Ecosystem]:
+    found = [eco for eco in ECOSYSTEMS if any(present(lf) for lf in eco.lockfiles)]
     names = {e.name for e in found}
     if "pnpm" in names and "npm" in names:
         found = [e for e in found if e.name != "npm"]
     return found
+
+
+def detect(worktree: str | Path) -> list[Ecosystem]:
+    """Active ecosystems in a filesystem tree, in stable order."""
+    root = Path(worktree)
+    return _detect(lambda lockfile: (root / lockfile).is_file())
+
+
+def detect_revision(repo: str | Path, revision: str) -> list[Ecosystem]:
+    """Active ecosystems in a Git revision, without checking it out."""
+    lockfiles = tuple(lockfile for eco in ECOSYSTEMS for lockfile in eco.lockfiles)
+    present = git.files_at_revision(repo, revision, lockfiles)
+    return _detect(present.__contains__)
 
 
 @dataclass
@@ -139,12 +150,15 @@ class SetupStep:
     name: str
     argv: list[str]
     env: dict[str, str] = field(default_factory=dict)
+    # The cache this step reads and writes (None: no cache). Planning never
+    # touches disk; a real run creates it via ``ensure_cache_dirs``.
+    cache_dir: str | None = None
 
 
 def _cache_dir_for(
     eco: Ecosystem, caches: dict[str, str], cold_cache_root: str | None
 ) -> str | None:
-    """Resolve (and create) the cache dir feeding ``eco``'s setup.
+    """Resolve the cache dir feeding ``eco``'s setup, without creating it.
 
     The single place the cold-vs-warm routing lives: with ``cold_cache_root``
     set the cache is a throwaway dir under it (never the shared store — the
@@ -159,9 +173,19 @@ def _cache_dir_for(
         cache_dir = caches.get(eco.cache_key)
     if not cache_dir:
         return None
-    cache_path = expand_user(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
-    return str(cache_path)
+    return str(expand_user(cache_dir))
+
+
+def ensure_cache_dirs(cache_dirs: Iterable[str | None]) -> None:
+    """Create the cache dirs a real setup run is about to use.
+
+    The one filesystem effect of cache wiring, kept apart from the planners
+    (``setup_steps`` / ``cache_env``) so ``--dry-run`` can render the exact
+    same plan with no way to leave directories behind.
+    """
+    for cache_dir in cache_dirs:
+        if cache_dir:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
 
 def setup_steps(
@@ -170,7 +194,7 @@ def setup_steps(
     *,
     cold_cache_root: str | None,
 ) -> list[SetupStep]:
-    """Build cache-backed setup commands.
+    """Plan the cache-backed setup commands (pure: nothing is created).
 
     When ``cold_cache_root`` is set, every ecosystem's cache is redirected into
     a throwaway directory under it, giving a clean from-source resolution that
@@ -186,13 +210,15 @@ def setup_steps(
                 env[eco.cache_env_var] = cache_dir
             if eco.cache_flag:
                 argv += [eco.cache_flag, cache_dir]
-        steps.append(SetupStep(eco.name, argv, env))
+        steps.append(SetupStep(eco.name, argv, env, cache_dir))
     return steps
 
 
 def cache_env(caches: dict[str, str], *, cold_cache_root: str | None = None) -> dict[str, str]:
     """Env vars wiring every env-driven ecosystem cache to the shared store
-    (or a throwaway dir under ``cold_cache_root``). Used by custom setup hooks."""
+    (or a throwaway dir under ``cold_cache_root``). Used by custom setup hooks.
+    Pure, like ``setup_steps``: every value is a cache dir for
+    ``ensure_cache_dirs`` to create before a real run."""
     env: dict[str, str] = {}
     for eco in ECOSYSTEMS:
         if not eco.cache_env_var:

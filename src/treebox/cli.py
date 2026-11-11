@@ -470,6 +470,7 @@ def _dry_run(
     branch: str,
     *,
     fetch: bool,
+    cold: bool,
     json_out: bool,
     checkout: str | None,
 ) -> None:
@@ -483,6 +484,7 @@ def _dry_run(
             branch=branch,
             base=cfg.base,
             fetch=fetch,
+            cold=cold,
             existing_branch=checkout is not None,
         )
     except _PROVISION_ERRORS as exc:
@@ -645,6 +647,7 @@ def create(
             wt_name,
             target_branch,
             fetch=not no_fetch,
+            cold=cold,
             json_out=json_out,
             checkout=checkout,
         )
