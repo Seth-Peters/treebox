@@ -36,9 +36,9 @@ lockfile hash, and launches the agent.
 An explicit `NAME` is intentional, so it **is the branch**, created fresh
 from `origin/<base>`: slug tokens joined by slashes
 (`fix-auth`, `feature/user-auth`), with the slashes flattened to `--` in the
-directory. The flattened form is the worktree's **permanent identity**: the
-directory (`.treebox/worktrees/<name>`), the lock key, and what `enter` /
-`teardown` address. The `treebox/` prefix is reserved for generated
+directory. Use the flattened name when
+[selecting a worktree](#enter-come-back-to-a-worktree).
+The `treebox/` prefix is reserved for generated
 placeholders and rejected as a name.
 
 You never *have* to invent a branch name up front, though. Omit `NAME` and
@@ -99,6 +99,27 @@ after registering the worktree but before setup completed, running the same
 `create` again finishes setup instead; a fully provisioned same-name worktree
 is still a conflict.
 
+### Submodule copies and recovery
+
+During `create`, including retries, treebox merges checked-out submodule
+contents from the source repo into the worktree. It preserves regular file
+contents and permissions, including executable bits. Source symlinks, including
+dangling links, are copied as links. Entries named `.git` are excluded at every
+depth, and `.git` cannot be a submodule path component. Destination entries
+that have no matching source entry are kept.
+
+Existing destination symlinks and hardlinks at file locations are replaced
+without writing to their targets. Paths to destination directories must contain
+real directories. A symlink or file in a directory path, a directory blocking a
+source file or link, or a directory that changes during copying stops creation.
+Treebox does not remove conflicting directories.
+
+A copy failure identifies the affected path and gives a recovery hint. Inspect
+that path, move any conflicting entry aside, then retry `create` with the same
+worktree name and branch. Files copied before the failure can remain; the retry
+merges the contents again. `enter` does not copy submodules. See the
+[scripting contract](#scripting-against-treebox) for error codes and JSON fields.
+
 ### Stacking on another branch
 
 `--base` isn't limited to `main`. Point it at `dev`, a release branch, or an
@@ -133,22 +154,26 @@ $ treebox create fix-auth --dry-run
     $ uv sync
 ```
 
-A dry run is also a real preflight: it enforces the same read-only
-preconditions as `create` and fails with the identical exit code and JSON
-error - `BRANCH_EXISTS` for a name whose branch already exists,
+<a id="dry-run-checks"></a>
+
+A dry run checks repository, worktree registration, and template preconditions.
+It reports the corresponding `create` exit code and JSON error -
+`BRANCH_EXISTS` for a name whose branch already exists,
 `SLUG_CONFLICT` for an occupied worktree directory, `NOT_FOUND` for a missing
 `--checkout` or base branch, `BRANCH_IN_USE` for a `--checkout` branch already
 backing another worktree, `TEMPLATE_NOT_FOUND` for a docker `--template` that
 doesn't resolve, `TEMPLATE_INVALID` for one that resolves but whose
-`container.json` (or `firewall.json` with `--firewall`) is broken - rather
-than printing a plan a real run would refuse. The one exception mirrors real
-`create`: a half-built worktree from an interrupted run previews finishing
-setup (no fetch, no `worktree add`) instead of conflicting. Dry-run verdicts reflect the refs already available locally;
-run `git fetch origin` first when exact parity with create's normal fetch is
-required. The setup plan detects package manifests from the exact locally
-available `--base` or `--checkout` revision that it will materialize. When it
-resumes an interrupted create, it detects them from the existing worktree.
-Either way, nothing on disk or in git changes.
+`container.json` (or `firewall.json` with `--firewall`) is broken.
+As with real `create`, a half-built worktree from an interrupted run previews
+finishing setup (no fetch, no `worktree add`) instead of conflicting. Dry-run
+verdicts reflect the refs already available locally; run `git fetch origin`
+first when exact parity with create's normal fetch is required. The setup plan
+detects package manifests from the exact locally available `--base` or
+`--checkout` revision that it will materialize; when it resumes an interrupted
+create, it detects them from the existing worktree. A dry run does not copy
+submodules or inspect their destination paths, so it cannot detect
+[submodule copy conflicts](#submodule-copies-and-recovery).
+Nothing on disk or in git changes.
 
 With `--cold --dry-run`, the cache part of the plan also matches the real cold
 setup without creating its disposable cache. A host plan uses the stable
@@ -166,11 +191,16 @@ treebox enter fix-auth --harness claude
 treebox enter fix-auth --harness codex -- --resume
 ```
 
-`enter` (and `teardown`) take a **ref**: the worktree name, its *current*
-branch, or a unique substring of either — resolved live from git, so a branch
-the agent renamed five minutes ago still works. An ambiguous ref is a loud
-exit `2` listing the matches, never a guess. If the ref names a branch that
-exists but has no worktree (never materialized, or torn down), the `NOT_FOUND`
+`enter` and `teardown` select from registered linked worktrees below the
+configured root, including nested directories. The main checkout is excluded.
+They take a **ref**, matched in this order: exact worktree name, exact current
+branch, then a unique substring of either. Branches are read live from git,
+so a renamed branch still works. An ambiguous ref exits `2` and lists the
+matches. If nested worktrees share a name, use their distinct branch refs or
+set `--root` to the target's parent directory. Operations then follow the
+[selected worktree path](how-it-works.md#names-are-identity-branches-are-mutable).
+If the ref names a branch that exists but has no worktree (never materialized,
+or torn down), the `NOT_FOUND`
 error hints at `treebox create --checkout REF` instead of the generic advice.
 
 Re-enters the worktree and launches the agent. By default it reuses the
@@ -197,10 +227,18 @@ Under docker isolation, `enter` **preflights the Docker daemon first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
 `DOCKER_UNAVAILABLE` error and a start-docker hint rather than a misleading
 error deeper in launch. It also **re-stages the scoped credential copies**
-from the host on every entry — independent of the lockfile-hash skip — so a
+from the host on every entry - independent of the lockfile-hash skip - so a
 host logout/revocation drops the stale copies and a fresh login reaches the
-sandbox on the very next entry. A container that stopped since setup (host
-reboot, manual `docker stop`) is restarted with the firewall re-established
+sandbox on the very next entry. The same refresh runs during `create`.
+Each staged file is replaced atomically: staged symlinks and hardlinks cannot
+redirect credential writes or permission changes to host files. A symlink at
+the staged directory itself is rejected. Conflicting directories are preserved.
+Both conditions stop `create` or `enter` with an
+[`ERROR` failure](#scripting-against-treebox); inspect their contents before
+removing the conflict.
+
+A container that stopped since setup (host reboot, manual `docker stop`)
+is restarted with the firewall re-established
 before the agent launches - and before a `--print`/`--json` command is
 emitted - so a treebox-owned restart never leaves egress silently open.
 
@@ -226,9 +264,9 @@ committed. The **name** is the stable handle; the **branch** is read live.
 A worktree's **isolation** is read from its recorded creation-time state;
 legacy worktrees or registrations whose state is unavailable show `unknown`
 instead of being mislabeled with the current config default. The muted
-**Root** footer combines with each stable name to identify its directory
-without repeating long paths in every row; `list --json` carries each full
-`path`. On a narrow terminal, the commit-subject column is omitted first so
+**Root** footer shows the discovery root. It does not show the intermediate
+directories of nested worktrees; use `list --json` for each full `path`.
+On a narrow terminal, the commit-subject column is omitted first so
 identity, isolation, age, dependency freshness, and `.env` state stay legible.
 If name and branch still cannot fit side by side, the branch moves below its
 stable name instead of either value being truncated.
@@ -252,11 +290,12 @@ Takes one or more refs (name, branch, or unique substring). Every ref is
 resolved before anything is removed — a typo among three targets removes
 nothing. Refuses to remove a worktree with uncommitted changes unless you pass
 `--force`. For docker-sandboxed worktrees, `--remove-volumes` also removes
-per-workspace volumes authorized by the runner-owned manifest written outside
+per-workspace volumes authorized by the
+[runner-owned manifest](how-it-works.md#freshness-is-enforced-not-hoped-for) written outside
 the sandbox mount at create time, so they are still removed when the container
 and user template were already deleted. If that manifest is missing or
 invalid, including on older worktrees or after manual deletion of the
-`<worktree-root>/.containers/<worktree>` directory, treebox warns and skips volume removal
+rendered config directory, treebox warns and skips volume removal
 instead of guessing. `--skip-container` leaves containers/images untouched.
 `--json` prints a structured record of what was removed (and never blocks on
 a prompt).
@@ -303,16 +342,25 @@ $ treebox teardown
   Removed 1 worktree · kept 1 with uncommitted changes.
 ```
 
-The badge is pure local git — dirty tree, ahead/behind, merged into your base,
-never-pushed — so it works on **any** remote (GitHub, GitLab, Bitbucket, plain
-git) and any auth. A freshly created worktree with no commits of its own reads
-`⚠ empty` (safe to delete, but not to be mistaken for a landed branch) rather
-than `✓ merged`, since a placeholder sitting exactly at your base trivially
-counts as "merged into" it. If a forge CLI you're already logged into is present
+The badge starts with local Git facts: uncommitted changes, commits ahead of
+the upstream, whether the current commit is in the base, and whether an
+upstream is set. These checks work with **any** remote (GitHub, GitLab,
+Bitbucket, plain git) and any auth. A freshly created worktree with no commits
+of its own shows `⚠ empty` (safe to delete when clean). Its tip is already in
+the base, but no work has been merged. If a forge CLI you're already logged into is present
 (`gh` for GitHub, `glab` for GitLab), the picker also shows the branch's PR/MR
-state — which is the only reliable way to spot a **squash** merge. Everything
-degrades cleanly: no CLI, an unknown host, or offline just falls back to the
-local badge.
+state. With no CLI, an unknown host, or no connection, the picker falls back
+to the local badge.
+
+A merged PR/MR proves a squash merge only when its recorded head commit
+matches the worktree's current commit. New local or pushed commits on a reused
+branch do not inherit the old request's green badge. If a merged request is
+found but the current commit cannot be read, the commits differ, or the
+request has no complete, valid head commit ID, the picker shows
+`merge not verified for current tip` unless local Git independently proves
+the current commit is already in the base. GitLab uses the newest request for
+the branch, so an old merged request does not hide a newer open one. Dirty
+worktrees remain unsafe even when their committed work has merged.
 
 The branch question is per-worktree, not one switch for the batch — drop a
 merged branch and keep an in-progress one in the same pass, so
@@ -405,26 +453,20 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 | `1`  | runtime failure, missing runner dependency, or failed doctor hard check |
 | `2`  | usage — invalid name/branch, ambiguous ref, bad option |
 | `3`  | not found — the worktree/branch/template doesn't exist |
-| `4`  | auth — fetch or credential problem                     |
+| `4`  | required fetch or its authentication failed             |
 | `5`  | conflict — name taken, dirty tree, or lock held        |
 
 The worktree commands and `doctor` take `--json`; payloads carry a
 `schemaVersion` — fields are only ever added within a version, and a breaking
 reshape or rename bumps it. Agents branch on these payloads, so treat the shape
-as a contract:
+as a contract. Request JSON output with:
 
 ```console
 $ treebox create fix-auth --json
-{
-  "schemaVersion": 1,
-  "name": "fix-auth",
-  "worktree_path": "/home/you/code/myapp/.treebox/worktrees/fix-auth",
-  "branch": "treebox/fix-auth",
-  "base": "main",
-  "entry_command": ["sh", "-c", "cd /home/you/code/myapp/.treebox/worktrees/fix-auth && exec claude --dangerously-skip-permissions"],
-  "created": true
-}
 ```
+
+For a complete result, see the generated
+[`create --json` snapshot](https://github.com/Seth-Peters/treebox/blob/main/tests/golden/create-host-json.txt).
 
 With `--json` (or `--print`) treebox provisions but does **not** launch the
 agent — it hands you the launch command instead, so your script decides when
@@ -477,7 +519,7 @@ JSON errors are emitted to stderr as:
 
 `error.code` and `error.message` are always present; `error.hint` and
 `error.path` appear when treebox has useful remediation or a path-specific
-failure.
+failure. Both submodule copy errors include `error.path` and `error.hint`.
 
 `error.code` and the exit code are the scripting contract:
 
@@ -493,7 +535,9 @@ failure.
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
-| `ERROR` | `1` | Unclassified runtime or setup failure. |
+| `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
+| `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
+| `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |

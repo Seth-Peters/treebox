@@ -441,7 +441,11 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     alias_wt = alias_root / "feature-smoke"
     assert git.branch_for_path(repo, str(alias_wt)) == "treebox/feature-smoke"
     assert git.worktree_registered(repo, str(alias_wt))
-    assert resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke").path == str(wt)
+    # The candidate is the same directory, spelled under the caller's root:
+    # runner resource names were derived from that spelling at create.
+    resolved = resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke")
+    assert resolved.path == str(alias_wt)
+    assert Path(resolved.path).resolve() == wt.resolve()
 
     rows = _collect_rows(str(repo), Config(root=str(alias_root)))
     assert [row["name"] for row in rows] == ["feature-smoke"]
@@ -1080,13 +1084,13 @@ def test_worktree_lock_is_exclusive(tmp_path: Path):
 
     repo = str(tmp_path)
     with (
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
         pytest.raises(locking.LockError),
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
     ):
         pass
     # Released after the first block: re-acquiring now succeeds.
-    with locking.worktree_lock(repo, "wts", "feature-x"):
+    with locking.worktree_lock(worktree_path(repo, "wts", "feature-x")):
         pass
 
 
@@ -1932,11 +1936,12 @@ def test_copy_env_does_not_follow_a_planted_symlink(tmp_path: Path):
     assert (worktree / ".env").read_text() == "SECRET=canonical\n"
 
 
-def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
+def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(tmp_path: Path):
     """``.gitmodules`` is untrusted: ``..``/absolute paths and symlinks must
     never make the copy read outside the repo or write outside the worktree."""
     from treebox.output import Reporter
-    from treebox.provision import copy_submodules
+    from treebox.provision import DestinationConflictError, copy_submodules
+    from treebox.submodule_copy import UnsafeDestinationError
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1961,10 +1966,20 @@ def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
+    with pytest.raises(DestinationConflictError) as error:
+        copy_submodules(str(repo), worktree, Reporter())
+    assert isinstance(error.value.__cause__, UnsafeDestinationError)
+    assert error.value.path is not None
+    assert error.value.path == worktree / "pkg"
+    assert "retry create" in error.value.hint
+    assert (worktree / "pkg").is_symlink()
+    assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+    (worktree / "pkg").unlink()
     copied = copy_submodules(str(repo), worktree, Reporter())
 
-    # Only the honest submodule is copied; every escape vector is skipped.
-    assert copied == 1
+    assert copied == 2
+    assert (worktree / "pkg" / "inner").is_dir()
     assert (worktree / "sub" / "lib.txt").read_text() == "legit\n"
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.
@@ -2651,7 +2666,8 @@ def test_status_compute_pr_overrides_squash_merge():
         has_upstream=True,
         ahead=2,
         merged_ancestor=False,
-        pr=PRStatus(state="merged", number=42),
+        pr=PRStatus(state="merged", number=42, head_oid="a" * 40),
+        current_oid="a" * 40,
     )
     assert s.safe and "merged" in s.label and "#42" in s.label
 

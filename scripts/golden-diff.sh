@@ -129,8 +129,14 @@ export GD_UID GD_GID
 
 normalize() {
   perl -0pe '
-    s/\Q$ENV{GD_PRIVROOT}\E/__ROOT__/g;
-    s/\Q$ENV{GD_ROOT}\E/__ROOT__/g;
+    # Rich can wrap a long fixture root across terminal lines. Normalize
+    # that machine-specific wrapping along with the root itself, without
+    # changing the worktree suffix or other output.
+    for my $root ($ENV{GD_PRIVROOT}, $ENV{GD_ROOT}) {
+      my $wrapped = join q{(?:\n[ ]*)?}, map { quotemeta($_) } split //, $root;
+      s/$wrapped/__ROOT__/g;
+    }
+    s/^(    worktree +)\n(__ROOT__)/$1$2/gm;
     s/\Q$ENV{GD_GITVER_PARSED}\E/__GITVER__/g;
     s/\Q$ENV{GD_GITVER}\E/__GITVER__/g;
     s/\bUSER_UID=\Q$ENV{GD_UID}\E\b/USER_UID=__UID__/g;
