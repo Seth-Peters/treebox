@@ -526,12 +526,21 @@ def ahead_behind(worktree: str | Path) -> AheadBehind | None:
     return AheadBehind(ahead=ahead, behind=behind)
 
 
+def head_oid(worktree: str | Path) -> str | None:
+    """Snapshot the current commit, or return unknown if it cannot be read."""
+    try:
+        return _run(["-C", str(worktree), "rev-parse", "--verify", "HEAD^{commit}"]).strip()
+    except GitError:
+        return None
+
+
 def is_merged_into(repo: str | Path, branch: str, base: str) -> bool:
-    """Whether ``branch`` is an ancestor of ``origin/<base>`` (its commits are
-    already contained there). Catches merge-commit / fast-forward / rebase
-    merges against whatever ``origin/<base>`` was last fetched. A *squash* merge
-    rewrites history and is NOT detected here — the forge PR/MR state is the
-    authority for that."""
+    """Check whether a branch or commit is contained in the last fetched base.
+
+    Uses ``origin/<base>`` when available, otherwise the local base. Squash
+    merges rewrite history and need the separate evidence check in
+    ``status.compute``.
+    """
     target = f"origin/{base}" if remote_branch_exists(repo, base) else base
     proc = _spawn(
         _git(["-C", str(repo), "merge-base", "--is-ancestor", branch, target]),
