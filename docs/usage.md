@@ -543,7 +543,7 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
-| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover with `treebox teardown <name>`. |
+| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |
