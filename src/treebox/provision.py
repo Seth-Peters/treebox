@@ -24,6 +24,7 @@ from .harnesses import Harness
 from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
 from .output import Reporter
 from .runners.base import Runner
+from .submodule_copy import SubmoduleCopyError, UnsafeDestinationError, copy_submodule
 
 
 class ProvisionError(RuntimeError):
@@ -31,6 +32,33 @@ class ProvisionError(RuntimeError):
     CLI error / in the --json error object."""
 
     hint: str | None = None
+    # Set by path-specific failures; surfaced as ``error.path`` under --json.
+    path: Path | None = None
+
+
+class DestinationConflictError(ProvisionError):
+    """A host-side copy into the worktree was refused because of what already
+    sits at its destination (exit 5, DESTINATION_CONFLICT). Nothing is ever
+    removed to make room: the worktree tree is untrusted, and the entry may be
+    the user's (or the branch's) own content."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.hint = (
+            "Inspect this path and move any conflicting entry aside, then retry create. "
+            "Treebox does not remove conflicting directories."
+        )
+
+
+class SubmoduleCopyFailedError(ProvisionError):
+    """An I/O or permission failure stopped a submodule copy (exit 1,
+    SUBMODULE_COPY_FAILED)."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.hint = "Check permissions and free space at this path, then retry create."
 
 
 class NotFoundError(ProvisionError):
@@ -141,9 +169,8 @@ def dry_run_plan(
 ) -> tuple[Worktree, list[str]]:
     """The exact git/runner commands ``create`` would run, without side effects.
 
-    Enforces the same read-only preconditions as a real ``create`` - raising the
-    same conflict/not-found errors rather than returning a plan a real run would
-    refuse - judged against locally available refs (a dry run never fetches).
+    Checks use locally available refs because this plan must not fetch or write.
+    See ``docs/usage.md#dry-run-checks`` for the preflight contract.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
@@ -268,17 +295,15 @@ def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bo
     return True
 
 
-def _resolve_submodule_copy(
-    repo: Path, worktree: Path, rel: str, reporter: Reporter
-) -> tuple[Path, Path] | None:
-    """Validate an untrusted ``.gitmodules`` path; ``(src, dest)`` or None to skip.
+def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | None:
+    """Validate an untrusted ``.gitmodules`` path; the repo-relative path to
+    copy, or None to skip.
 
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
     absolute and ``..``-escaping values, never follow a source that is itself a
-    symlink, and require both endpoints to resolve inside their roots — else a
-    malicious repo can pull host trees into the agent mount (``vendor -> /home``)
-    or copy outside the worktree entirely.
+    symlink, and require the source to resolve inside its root - else a
+    malicious repo can pull host trees into the agent mount (``vendor -> /home``).
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
@@ -290,13 +315,10 @@ def _resolve_submodule_copy(
         return None
     if not src.is_dir():
         return None  # not checked out in the source repo; nothing to copy
-    dest = worktree / p
-    if not src.resolve().is_relative_to(repo.resolve()) or not dest.resolve().is_relative_to(
-        worktree.resolve()
-    ):
+    if not src.resolve().is_relative_to(repo.resolve()):
         reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
         return None
-    return src, dest
+    return p
 
 
 def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
@@ -306,20 +328,19 @@ def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
     _copyfile_no_follow(Path(repo) / ".gitmodules", worktree / ".gitmodules")
     copied = 0
     for rel in git.submodule_paths(repo):
-        resolved = _resolve_submodule_copy(Path(repo), worktree, rel, reporter)
-        if resolved is None:
+        relative = _safe_submodule_path(Path(repo), rel, reporter)
+        if relative is None:
             continue
-        src, dest = resolved
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # Exclude .git pointers/dirs: a copied pointer's relative gitdir path
-        # breaks every git command in the linked worktree (issue #16).
-        shutil.copytree(
-            src,
-            dest,
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git"),
-        )
+        # The source side is validated above; ``copy_submodule`` owns the
+        # destination side (the worktree tree is untrusted) and skips ``.git``
+        # pointers, whose relative gitdir would break git in the linked
+        # worktree (issue #16).
+        try:
+            copy_submodule(Path(repo), worktree, relative)
+        except UnsafeDestinationError as exc:
+            raise DestinationConflictError(exc.path, str(exc)) from exc
+        except SubmoduleCopyError as exc:
+            raise SubmoduleCopyFailedError(exc.path, str(exc)) from exc
         copied += 1
     reporter.ok("submodules", f"copied {copied}")
     return copied
