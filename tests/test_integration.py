@@ -37,6 +37,51 @@ def _git(wt: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True)
 
 
+def _push_branch_with_directory(repo: Path, branch: str, entry: str) -> None:
+    """Push a branch that changes a root file into a non-empty directory."""
+    assert _git(repo, "checkout", "-b", branch).returncode == 0
+    path = repo / entry
+    path.unlink()
+    path.mkdir()
+    (path / "keep.txt").write_text("must survive\n")
+    assert _git(repo, "add", "-A").returncode == 0
+    commit = _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@e",
+        "commit",
+        "-m",
+        f"commit {entry} directory",
+    )
+    assert commit.returncode == 0, commit.stderr
+    assert _git(repo, "push", "-u", "origin", branch).returncode == 0
+    assert _git(repo, "checkout", "main").returncode == 0
+
+
+def _push_branch_with_symlink(repo: Path, branch: str, entry: str, target: Path) -> None:
+    """Push a branch that changes a root file into an absolute symlink."""
+    assert _git(repo, "checkout", "-b", branch).returncode == 0
+    path = repo / entry
+    path.unlink()
+    path.symlink_to(target)
+    assert _git(repo, "add", "-A").returncode == 0
+    commit = _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@e",
+        "commit",
+        "-m",
+        f"commit {entry} symlink",
+    )
+    assert commit.returncode == 0, commit.stderr
+    assert _git(repo, "push", "-u", "origin", branch).returncode == 0
+    assert _git(repo, "checkout", "main").returncode == 0
+
+
 def test_create_provisions_everything(repo: Path, root: str, hermetic_config):
     from treebox import git
 
@@ -320,6 +365,117 @@ def test_create_b_remote_only_branch_is_tracked(repo: Path, root: str, hermetic_
         text=True,
     ).stdout.strip()
     assert upstream == "origin/teammate/topic"
+
+
+def test_env_directory_on_branch_is_kept_and_does_not_block_create_or_enter(
+    repo: Path, root: str, hermetic_config
+):
+    """A branch that commits ``.env/`` as a directory stays provisionable.
+
+    The host ``.env`` cannot be copied over a directory, and treebox never
+    removes worktree content to make room. So the copy is skipped with a
+    warning, the directory survives byte-for-byte, the worktree stays clean,
+    and both ``create`` and every later ``enter`` succeed (issue #37: this
+    used to crash with a traceback and wedge the worktree).
+    """
+    _push_branch_with_directory(repo, "envdir", ".env")
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "envdir"
+    kept = wt / ".env"
+
+    created = _run(["create", "--checkout", "envdir", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    assert "Traceback" not in created.output
+    assert ".env not copied" in created.stderr
+    assert str(kept) in created.stderr.replace("\n", "")
+    assert (kept / "keep.txt").read_text() == "must survive\n"
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+    entered = _run(["enter", "envdir", *base, "--json"])
+    assert entered.exit_code == 0, entered.output
+    assert json.loads(entered.stdout)["created"] is False
+    assert (kept / "keep.txt").read_text() == "must survive\n"
+
+    # A completed create is a normal conflict again, not a crash loop.
+    again = _run(["create", "--checkout", "envdir", *base, "--json"])
+    assert again.exit_code == 5
+    assert json.loads(again.stderr)["error"]["code"] in {"SLUG_CONFLICT", "BRANCH_IN_USE"}
+
+    # Scripts can see that the secrets file is not there.
+    listed = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert next(w for w in listed if w["name"] == "envdir")["env"] == "absent"
+    assert (repo / ".env").read_text() == "SECRET=canonical\n"
+
+
+def test_gitmodules_directory_on_branch_is_kept_and_does_not_block_create_or_enter(
+    repo: Path, root: str, hermetic_config
+):
+    """The same managed-file rule covers a ``.gitmodules`` directory."""
+    _push_branch_with_directory(repo, "gitmodules-dir", ".gitmodules")
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "gitmodules-dir"
+    kept = wt / ".gitmodules"
+
+    created = _run(["create", "--checkout", "gitmodules-dir", *base, "--json"])
+    assert created.exit_code == 0, created.output
+    assert json.loads(created.stdout)["created"] is True
+    entered = _run(["enter", "gitmodules-dir", *base, "--json"])
+    assert entered.exit_code == 0, entered.output
+
+    assert "Traceback" not in created.output + entered.output
+    assert (kept / "keep.txt").read_text() == "must survive\n"
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+
+def test_managed_file_copy_refuses_a_directory_planted_mid_copy(tmp_path: Path, monkeypatch):
+    """A directory swapped in between the unlink and the create is a refusal,
+    not a traceback: the safe copy asks the filesystem, not the errno."""
+    import os
+
+    from treebox import provision
+
+    src = tmp_path / "src.env"
+    src.write_text("SECRET=canonical\n")
+    dest = tmp_path / "wt" / ".env"
+    dest.parent.mkdir()
+    dest.write_text("stale\n")
+
+    real_open = os.open
+
+    def plant_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == dest and not dest.exists():
+            dest.mkdir()
+            (dest / "keep.txt").write_text("must survive\n")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(provision.os, "open", plant_then_open)
+    with pytest.raises(provision.DestinationConflictError) as error:
+        provision._copyfile_no_follow(src, dest)
+    assert error.value.path == dest
+    assert (dest / "keep.txt").read_text() == "must survive\n"
+
+
+def test_create_replaces_destination_symlink_without_write_through(
+    repo: Path, root: str, hermetic_config
+):
+    """A branch symlink is replaced with the source file, never followed."""
+    entry = ".env"
+    expected = (repo / entry).read_text()
+    outside = repo.parent / f"outside-{entry.removeprefix('.')}"
+    outside.write_text("outside must survive\n")
+    branch = f"symlink-{entry.removeprefix('.')}"
+    _push_branch_with_symlink(repo, branch, entry, outside)
+
+    result = _run(["create", "--checkout", branch, "--repo", str(repo), "--root", root, "--print"])
+
+    assert result.exit_code == 0, result.output
+    destination = Path(root) / branch / entry
+    assert not destination.is_symlink()
+    assert destination.is_file()
+    assert destination.read_text() == expected
+    assert outside.read_text() == "outside must survive\n"
 
 
 def test_create_b_collision_on_derived_name_is_conflict(repo: Path, root: str, hermetic_config):
@@ -926,7 +1082,8 @@ def test_teardown_corrupt_worktree_prompts_instead_of_inheriting_main_dirty(
     _run(["create", "corrupt-prompt", *base, "--print"])
     wt = repo / root / "corrupt-prompt"
     (wt / "setup.log").unlink()
-    assert _git(wt, "status", "--porcelain").stdout == ""
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
     (wt / ".git").unlink()
     main_dirty = repo / "main-untracked.txt"
@@ -962,7 +1119,8 @@ def test_teardown_corrupt_worktree_force_removes_without_touching_main(repo: Pat
     _run(["create", "corrupt-force", *base, "--print"])
     wt = repo / root / "corrupt-force"
     (wt / "setup.log").unlink()
-    assert _git(wt, "status", "--porcelain").stdout == ""
+    # No tracked content was deleted or modified to make room.
+    assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
     (wt / ".git").unlink()
     main_dirty = repo / "main-untracked.txt"

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -38,9 +39,10 @@ class ProvisionError(RuntimeError):
 
 class DestinationConflictError(ProvisionError):
     """A host-side copy into the worktree was refused because of what already
-    sits at its destination (exit 5, DESTINATION_CONFLICT). Nothing is ever
-    removed to make room: the worktree tree is untrusted, and the entry may be
-    the user's (or the branch's) own content."""
+    sits at its destination. Nothing is ever removed to make room: the worktree
+    tree is untrusted, and the entry may be the user's (or the branch's) own
+    content. A submodule copy surfaces this as exit 5, DESTINATION_CONFLICT;
+    the managed-file copies (``.env``, ``.gitmodules``) catch it and skip."""
 
     def __init__(self, path: Path, message: str) -> None:
         super().__init__(message)
@@ -218,15 +220,57 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
     ``dest`` lives inside a freshly checked-out worktree whose tree is untrusted
     (a malicious branch can commit a symlink there, or a boxed agent can plant
     one). ``shutil.copyfile`` would follow such a symlink and write through it to
-    an arbitrary host path. Remove any existing entry first, then create the
-    destination with ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the
-    meantime makes the open fail instead of redirecting the write.
+    an arbitrary host path. Remove any existing file or symlink first (an
+    unlink never writes through), then create the destination with
+    ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the meantime makes the
+    open fail instead of redirecting the write.
+
+    A *directory* at ``dest`` is never removed - it may be the branch's own
+    tracked content - and raises ``DestinationConflictError`` instead, whether
+    it was there all along or swapped in mid-copy. Callers decide what a
+    refused copy means for them (``_copy_managed_file`` skips it).
     """
-    if dest.is_symlink() or dest.exists():
-        dest.unlink()
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        dest.unlink(missing_ok=True)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        # unlink() on a directory fails with IsADirectoryError on Linux and
+        # PermissionError on macOS; ask the filesystem rather than the errno.
+        if _is_directory_no_follow(dest):
+            raise DestinationConflictError(
+                dest, f"Cannot replace directory with file: {dest}"
+            ) from exc
+        raise
     with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
         shutil.copyfileobj(fsrc, fdst)
+
+
+def _is_directory_no_follow(path: Path) -> bool:
+    """True only when ``path`` itself is a directory (a symlink to one is not)."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _copy_managed_file(src: Path, dest: Path, reporter: Reporter) -> bool:
+    """Copy a file treebox manages (``.env``, ``.gitmodules``) into the
+    worktree; False when the worktree keeps a directory at that name.
+
+    A branch can commit ``.env/`` or ``.gitmodules/`` as a directory, and a
+    boxed agent can create one. That must neither crash provisioning nor cost
+    the branch its content, so the copy is skipped with a warning and the
+    worktree stays usable: the directory is left exactly as it is.
+    """
+    try:
+        _copyfile_no_follow(src, dest)
+    except DestinationConflictError:
+        reporter.warn(
+            f"{dest.name} not copied: {dest} is a directory in this worktree "
+            "(left untouched). Rename or remove it on the branch to get the copy."
+        )
+        return False
+    return True
 
 
 def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:
@@ -293,8 +337,9 @@ def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bo
     if not src.is_file():
         reporter.note("secrets", f"none at {src}")
         return False
-    dest = worktree / ".env"
-    _copyfile_no_follow(src, dest)
+    if not _copy_managed_file(src, worktree / ".env", reporter):
+        reporter.note("secrets", "not copied · .env is a directory here")
+        return False
     _ensure_env_ignored(worktree)
     reporter.ok("secrets", "copied")
     return True
@@ -330,7 +375,7 @@ def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
     """Copy submodule working trees from the source repo (copy only, no linkage)."""
     if not git.has_gitmodules(repo):
         return 0
-    _copyfile_no_follow(Path(repo) / ".gitmodules", worktree / ".gitmodules")
+    _copy_managed_file(Path(repo) / ".gitmodules", worktree / ".gitmodules", reporter)
     copied = 0
     for rel in git.submodule_paths(repo):
         relative = _safe_submodule_path(Path(repo), rel, reporter)
