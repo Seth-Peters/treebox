@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stand up an isolated end-to-end fixture for exercising the treebox CLI:
-# a throwaway bare origin, a clone with a real uv project + .env, and a
-# scratch TREEBOX_HOME so nothing touches the user's ~/.treebox or this repo.
+# a throwaway bare origin, a clone with a real uv project + an untracked .env,
+# and a scratch TREEBOX_HOME so nothing touches the user's ~/.treebox or this repo.
 #
 # Usage:  source .claude/skills/treebox-e2e/fixture.sh     (from bash)
 # After sourcing: $SBX (sandbox root), $REPO (clone), $ROOT (worktree root),
@@ -43,6 +43,11 @@ git clone -q "$SBX/origin.git" "$REPO"
   git config user.name treebox-e2e
   printf '[project]\nname="demo"\nversion="0.1.0"\nrequires-python=">=3.14"\ndependencies=[]\n' > pyproject.toml
   uv lock -q
+  # .env is the host's secrets file: untracked and ignored, as in a real repo.
+  # Committing it would make every later worktree "dirty" as soon as a scenario
+  # rotates the host copy (C2), silently steering teardown scenarios that need a
+  # clean tree (E1) down the uncommitted-changes path instead.
+  printf '.env\n' > .gitignore
   printf 'SECRET=canonical\n' > .env
   git add -A && git commit -qm init && git push -q origin main
   # A second branch so --base and --checkout scenarios have a target.

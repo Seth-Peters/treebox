@@ -177,6 +177,9 @@ Prereq: `fix-auth` worktree from B1 exists.
 - [ ] **E1 non-TTY refusal** — precondition: a **clean** worktree (create a
       throwaway `e2e-clean-td`; do *not* reuse `fix-auth`, which C3 left dirty — a
       dirty tree takes the uncommitted-changes branch below and hides this path).
+      Confirm the precondition before judging: `git -C "$ROOT/e2e-clean-td" status
+      --porcelain` must print nothing. (The fixture keeps `.env` untracked, so the
+      secret C2 rotated does not dirty a fresh worktree.)
       `tb teardown e2e-clean-td --repo "$REPO" --root "$ROOT"` (no `--force`, stdin
       not a TTY)
       Expect: exit 5; worktree untouched; message says confirmation/`--force` is
@@ -261,19 +264,17 @@ one behind on purpose.
       Expect: the rendered container config/build context (and staged credential
       copies) live under `$ROOT/.containers/<branch>/`, **not** inside the worktree
       — the boxed agent must not be able to edit its own sandbox definition.
-- [ ] **H3 unknown template is loud** — `tb create e2e-tpl-ghost … --isolation docker --template ghost`
-      Expect: a loud non-zero exit (no fallback to the bundled default) whose
-      message names the missing template. Note the exit code is `1` here (the
-      failure surfaces mid-provision, after the worktree is added host-side), not
-      the `3` that `template path ghost` / `template init --from ghost` return — an
-      inconsistency worth flagging, but not itself a failure of this scenario.
-      Because provisioning is host-side and completes `worktree add` before the
-      docker step fails, `$ROOT/e2e-tpl-ghost/` is **left on disk** (a re-run would
-      then hit SLUG_CONFLICT); the sandbox files under `.containers/` are not
-      written. That leftover worktree is expected given the provision-then-run
-      architecture — record it, don't fail on it. Note: under *host* isolation an
-      unknown `--template` is currently accepted silently (templates are
-      docker-only) — also expected.
+- [ ] **H3 unknown template is loud** — `tb create e2e-tpl-ghost … --isolation docker --template ghost --json`
+      Expect: exit `3` with a JSON error `TEMPLATE_NOT_FOUND` whose message names
+      the missing template - the same code `template path ghost` and
+      `template init --from ghost` return, and never a fallback to the bundled
+      default. The template is checked **before** anything is provisioned, so
+      nothing is left behind: no `$ROOT/e2e-tpl-ghost/`, no `e2e-tpl-ghost`
+      branch, no `$ROOT/.containers/` entry, no container. Run the same command
+      a second time and expect the identical `TEMPLATE_NOT_FOUND` (a leftover
+      worktree would turn the re-run into `SLUG_CONFLICT`). Note: under *host*
+      isolation an unknown `--template` is accepted silently (templates are
+      docker-only) - expected.
 - [ ] **H4 recorded isolation reused** — `tb enter e2e-dockered … --print` with no
       `--isolation` flag
       Expect: exit 0; still docker (recorded at create), even if the config

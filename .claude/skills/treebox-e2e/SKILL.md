@@ -54,7 +54,7 @@ a full e2e report requires `validate.sh`.
 source .claude/skills/treebox-e2e/fixture.sh   # from the treebox repo root, in bash
 ```
 
-This creates a throwaway bare origin + clone (real uv project, `.env`, `main`
+This creates a throwaway bare origin + clone (real uv project, an untracked `.env`, `main`
 and `dev` branches), a scratch `TREEBOX_HOME`/`TREEBOX_CONFIG`, and defines:
 
 - `$SBX` `$REPO` `$ROOT` — sandbox root, fixture clone, worktree root
