@@ -1019,6 +1019,29 @@ def test_firewall_template_fails_closed():
     assert "touch" in init_fw and "/run/treebox-firewall-ready" in init_fw
 
 
+def test_firewall_opens_no_host_service_by_default():
+    """The Docker host (the default gateway) is not a blanket exception: the
+    bundled rules accept it only for TCP ports the operator lists in the
+    template's allowlist, and the bundled allowlist lists none (issue #59)."""
+    import treebox.assets as assets
+
+    tpl = assets.template_dir("default")
+    init_fw = (tpl / "init-firewall.sh").read_text()
+    host_rules = [
+        line.strip()
+        for line in init_fw.splitlines()
+        if "iptables -A OUTPUT" in line and "HOST_IP" in line
+    ]
+    assert host_rules == ['iptables -A OUTPUT -d "$HOST_IP" -p tcp --dport "$port" -j ACCEPT']
+    # The skip that leaves live rules alone needs the flag AND the live
+    # policy: a flag that survived `docker restart` alone is not proof.
+    skip = next(line for line in init_fw.splitlines() if line.startswith('if [[ -f "$READY_FLAG"'))
+    assert "iptables -S OUTPUT" in skip and "-P OUTPUT DROP" in skip
+
+    allowlist = (tpl / "allowed-domains.sh").read_text()
+    assert re.search(r"^ALLOWED_HOST_PORTS=\(\)$", allowlist, re.MULTILINE)
+
+
 def test_template_dir_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import treebox.assets as assets
 
@@ -1289,7 +1312,14 @@ def test_docker_prepare_entry_restarts_stopped_container_and_relocks_egress(
     assert start < firewall
 
 
-def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fake_common_dir):
+def test_docker_prepare_entry_relocks_egress_of_a_running_container(
+    tmp_path: Path, fake_common_dir
+):
+    """A container restarted outside treebox (`docker restart`) is already
+    running when the operator enters, but its rules are gone (issue #59). So
+    every entry runs the guarded firewall init - the script itself skips the
+    rebuild only when the ready flag AND the live DROP policy are present -
+    and never restarts a running container."""
     cfg = Config(isolation="docker")
     wt = _boxed_worktree(tmp_path)
     slug = DockerRunner(cfg)._slug(wt)
@@ -1297,7 +1327,60 @@ def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fak
 
     DockerRunner(cfg, docker=fake).prepare_entry(wt)
 
-    assert not any(c[0] == "start" or "init-firewall.sh" in " ".join(c) for c in fake.calls)
+    assert not any(c[0] == "start" for c in fake.calls)
+    firewall = [c for c in fake.calls if "init-firewall.sh" in " ".join(c)]
+    assert len(firewall) == 1
+    assert firewall[0][firewall[0].index("-u") + 1] == "root"
+    # The treebox side never reads the ready flag: the decision to skip the
+    # rebuild is the script's alone, and it also checks the live policy.
+    assert not any("treebox-firewall-ready" in " ".join(c) for c in fake.calls)
+
+
+def test_docker_prepare_entry_firewall_failure_is_classified(tmp_path: Path, fake_common_dir):
+    """A failed firewall init blocks the entry with a typed error the CLI
+    classifies (FIREWALL_FAILED), carrying the script's own diagnostics."""
+    from treebox.runners.base import FirewallError
+
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    runner = DockerRunner(cfg)
+    firewall_args = tuple(runner._firewall_command(wt)[1:])
+    fake = _FakeDocker(
+        ids="abc123\n",
+        name=runner._slug(wt),
+        running=True,
+        failures={firewall_args: "ERROR: Failed to fetch GitHub IP ranges"},
+    )
+
+    with pytest.raises(FirewallError, match="Failed to fetch GitHub IP ranges") as raised:
+        DockerRunner(cfg, docker=fake).prepare_entry(wt)
+    # Fail-closed rules block the allowlist fetch, so another entry cannot
+    # recover: the hint points at a fresh container.
+    assert raised.value.hint is not None
+    assert f"treebox teardown {wt.name}" in raised.value.hint
+
+
+def test_docker_setup_firewall_failure_is_classified(tmp_path: Path, fake_common_dir):
+    """The setup-time lockdown fails the same typed way, and post-create (the
+    first workspace-derived code) never runs."""
+    from treebox.output import StepError
+    from treebox.runners.base import FirewallError
+
+    class _FailingFirewall(_RecordingReporter):
+        def step(self, label, detail, argv, *, cwd=None, env=None):
+            super().step(label, detail, argv, cwd=cwd, env=env)
+            if "init-firewall.sh" in " ".join(argv):
+                raise StepError(label, 1, "ERROR: Invalid host port: 99999")
+            return ""
+
+    fake = _FakeDocker(ids="")
+    runner = DockerRunner(Config(isolation="docker", firewall=True), docker=fake)
+    rep = _FailingFirewall()
+
+    with pytest.raises(FirewallError, match="Invalid host port"):
+        runner.setup(_boxed_worktree(tmp_path), cold=True, reporter=rep)
+
+    assert not any("post-create.sh" in " ".join(a) for a in rep.steps)
 
 
 def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
