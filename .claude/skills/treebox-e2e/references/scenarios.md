@@ -1,11 +1,18 @@
 # Treebox end-to-end scenario matrix
 
 Run every scenario against the sandbox fixture (`source fixture.sh`), never
-against a real repo or the user's `~/.treebox`. `tb` is the fixture's wrapper
-for `uv run treebox`; always pass `--repo "$REPO" --root "$ROOT"` on commands
-that touch worktrees. Judge **behavior** (exit code, JSON fields, filesystem
+against a real repo or the user's `~/.treebox`. `tb` is the fixture's
+treebox, with a scratch `HOME` and the stub agent first on `PATH`; always pass
+`--repo "$REPO" --root "$ROOT"` on commands that touch worktrees. Judge **behavior** (exit code, JSON fields, filesystem
 effects, stream separation) — exact human-output strings are locked by
 `tests/golden/` and are not this checklist's job.
+
+Every scenario here has an executable twin with the same id in
+`tests/e2e/scenarios.py`; `uv run python tests/e2e/run.py evidence --out DIR`
+runs them all and writes the evidence bundle (see `SKILL.md`). This file is the
+prose: the command, the intent, the pass criterion. The code is the checks.
+Where a route lives in the source, and which scenario covers it, is in
+`feature-map.md`.
 
 Conventions used below:
 
@@ -15,8 +22,8 @@ Conventions used below:
   integer `schemaVersion` (currently `1`), and diagnostics must all be on stderr.
 - "JSON error" — in `--json` mode a failure prints one object on **stderr** with
   `error.code` / `error.message` (usually `error.hint`).
-- Reset state between groups when noted; scenarios within a group may build on
-  each other in order. **Watch for hidden preconditions**: a scenario that needs a
+- Each group starts on a fresh fixture, with the setup named under its heading;
+  scenarios within a group may build on each other in order. **Watch for hidden preconditions**: a scenario that needs a
   *clean* worktree or *≥2 matching* worktrees will silently exercise the wrong
   branch if earlier scenarios changed that state (e.g. C3 dirties `fix-auth`
   before E1 wants it clean). Where a precondition matters it is called out inline;
@@ -56,6 +63,20 @@ Conventions used below:
 - [ ] **A5 bad isolation** — `tb doctor --isolation qemu`
       Expect: exit 2; message names the valid values.
 
+- [ ] **A6 completion protocol** - `_TREEBOX_COMPLETE=complete_bash COMP_WORDS="treebox cre" COMP_CWORD=1 tb`
+      (what the installed bash completion calls), then the same for
+      `COMP_WORDS="treebox template " COMP_CWORD=2`
+      Expect: exit 0; completions `create`, then exactly `init list path`
+      (the hidden `ls` alias is not offered).
+- [ ] **A7 --show-completion / --install-completion** - run each from a real
+      `bash -c` parent (they detect the parent shell)
+      Expect: exit 0; the shown script wires `_TREEBOX_COMPLETE=complete_bash`;
+      install writes into the scratch `~/.bashrc`. SKIP where the shell cannot
+      be detected (some sandboxes hide the process table).
+- [ ] **A8 help** - `tb --help`, bare `tb`, `tb create --help`, `tb template init -h`
+      Expect: `--help` exits 0 and lists every visible command but not the
+      `ls`/`rm` aliases; bare `tb` exits 2 with usage; subcommand help exits 0.
+
 ## B. create
 
 - [ ] **B1 named create** — `tb create fix-auth --repo "$REPO" --root "$ROOT" --json`
@@ -72,6 +93,7 @@ Conventions used below:
       Expect: exit 0; `branch: "feature/auth"`; directory leaf is
       `feature--auth`; `name` is the flattened form.
 - [ ] **B4 --base** — `tb create from-dev --base dev --repo "$REPO" --root "$ROOT" --json`
+      (first push a commit to `dev`, so `origin/dev` differs from `main`)
       Expect: exit 0; `base: "dev"`; the new branch's head equals
       `origin/dev`'s head.
 - [ ] **B5 --checkout existing branch** — `tb create review-dev --checkout dev --repo "$REPO" --root "$ROOT" --json`
@@ -125,9 +147,42 @@ Conventions used below:
       frames; `--quiet` create produces no progress chatter; `--verbose`
       streams raw underlying command output.
 
+- [ ] **B15 real launch (host)** - `tb create launch-host --repo "$REPO" --root "$ROOT"`
+      (no `--print`: this launches the agent, which in the fixture is the stub)
+      Expect: exit 0; the stub's record on stdout shows `name=claude`, `cwd` =
+      the worktree, args exactly `--dangerously-skip-permissions`,
+      `in_container=no`, `api_key=unset`.
+- [ ] **B16 launch without the agent binary** - B15's command with the stub dir
+      removed from `PATH` (and no other `claude` reachable)
+      Expect: exit 1; stderr names `'claude' not found on PATH`; no traceback;
+      the provisioned worktree stays for a later `enter`.
+- [ ] **B17 BRANCH_IN_USE** - `tb create dup --checkout fix-auth … --json` (fix-auth is checked out)
+      Expect: exit 5, `BRANCH_IN_USE`; nothing created.
+- [ ] **B18 INVALID_BRANCH** - `tb create --checkout bad..ref … --json`
+      Expect: exit 2, `INVALID_BRANCH`.
+- [ ] **B19 NOT_A_REPO** - `tb create x --repo "$SBX/not-a-repo" --json` (a plain dir)
+      Expect: exit 2, `NOT_A_REPO`; the hint names `--repo`.
+- [ ] **B20 GIT_MISSING** - `tb list … --json` with a `PATH` that has no `git`
+      Expect: exit 1, `GIT_MISSING`.
+- [ ] **B21 TEMPLATE_INVALID** - a template `broken` whose `container.json` is
+      malformed; `tb create e2e-broken … --isolation docker --template broken --json`
+      Expect: exit 1, `TEMPLATE_INVALID`, before anything is provisioned: no
+      worktree, no branch. Needs no docker engine.
+- [ ] **B22 MISSING_DEPENDENCY** - `tb create e2e-nodocker … --isolation docker --json`
+      with a `PATH` that has no `docker`
+      Expect: exit 1, `MISSING_DEPENDENCY`; no worktree (preflight runs first).
+- [ ] **B23 DOCKER_UNAVAILABLE** - the same with
+      `DOCKER_HOST=unix://$SBX/no-daemon.sock` (a real CLI, no daemon); also
+      `tb doctor --isolation docker`
+      Expect: create exits 1, `DOCKER_UNAVAILABLE`, no worktree; doctor exits 1.
+      SKIP without a docker CLI.
+- [ ] **B24 --cold** - `tb create cold-x … --cold --print`
+      Expect: exit 0; stderr reports the setup as `from-source (cold)`; `.venv`
+      exists; no `treebox-cold-*` dir is left in `$TMPDIR`.
+
 ## C. enter
 
-Prereq: `fix-auth` worktree from B1 exists.
+Setup: `tb create fix-auth … --json` (as B1).
 
 - [ ] **C1 re-launch --print** — `tb enter fix-auth --repo "$REPO" --root "$ROOT" --print`
       Expect: exit 0; same shape of launch command as B11; no agent launched.
@@ -157,7 +212,30 @@ Prereq: `fix-auth` worktree from B1 exists.
       Expect: exit 5 conflict — an explicit mismatched `--isolation` never
       silently re-provisions; the recorded choice wins over config drift too.
 
+- [ ] **C8 real launch on enter** - `tb enter fix-auth … -- --stub-exit=7 "continue the refactor"`
+      Expect: exit 7 (enter exits with the agent's status); the stub saw
+      `--dangerously-skip-permissions --stub-exit=7 'continue the refactor'` in
+      the worktree dir.
+- [ ] **C9 UNKNOWN_ISOLATION** - create `c9-corrupt`, set `"isolation": "qemu"` in
+      its `treebox-state.json` (in `git rev-parse --absolute-git-dir`), then
+      `tb enter c9-corrupt … --json`
+      Expect: exit 5, `UNKNOWN_ISOLATION`.
+- [ ] **C10 recorded harness** - `tb create c10-codex … --harness codex`, then
+      `tb enter c10-codex … --print`, with `--harness claude`, and once more without
+      Expect: codex, then claude (a per-session override), then codex again.
+- [ ] **C11 enter --cold** - change `c11-cold`'s manifest (`version`, `uv lock`),
+      then `tb enter c11-cold … --cold --print`
+      Expect: exit 0; the re-sync reports `from-source (cold)`; deps `fresh`.
+- [ ] **C12 enter --quiet / --verbose** - `tb enter fix-auth … --quiet --print`;
+      change the manifest, then `--verbose --print`
+      Expect: `--quiet` leaves stderr empty; `--verbose` streams uv's own output
+      (`Resolved …`) during the re-sync.
+
 ## D. list
+
+Setup: `d-one`, `d-two` (its branch renamed to `feature/renamed`), and `d-raw`,
+a registration treebox never provisioned (`git -C "$REPO" worktree add -b d-raw
+"$ROOT/d-raw" main`).
 
 - [ ] **D1 human table** — `tb list --repo "$REPO" --root "$ROOT"`
       Expect: exit 0; one row per worktree with name, live branch, isolation,
@@ -172,7 +250,13 @@ Prereq: `fix-auth` worktree from B1 exists.
 - [ ] **D3 empty root** — `tb list --repo "$REPO" --root "$SBX/empty" --json`
       Expect: exit 0; `"worktrees": []` (not an error).
 
+- [ ] **D4 ls alias** - `tb ls … --json`
+      Expect: exit 0; the same payload as `list --json`.
+
 ## E. teardown
+
+Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
+`fix/auth-renamed` (as C4).
 
 - [ ] **E1 non-TTY refusal** — precondition: a **clean** worktree (create a
       throwaway `e2e-clean-td`; do *not* reuse `fix-auth`, which C3 left dirty — a
@@ -207,6 +291,19 @@ Prereq: `fix-auth` worktree from B1 exists.
       `git -C "$REPO" worktree list`, and `$REPO/main-dirt.txt` untouched
       (clean it up afterwards).
 
+- [ ] **E8 rm alias** - `tb rm rm-me … --force --json`
+      Expect: exit 0; removed, as with `teardown`.
+- [ ] **E9 MAIN_WORKTREE** - `git -C "$REPO" branch repo`, then
+      `tb teardown repo --repo "$REPO" --root "$SBX" --force --json` (a root that
+      contains the repo, a branch named like its directory)
+      Expect: exit 5, `MAIN_WORKTREE`; the main checkout intact.
+- [ ] **E10 teardown --isolation mismatch** - `tb teardown e2e-clean-td … --isolation docker`
+      (human, then `--force --json`)
+      Expect: exit 5 both; `ISOLATION_MISMATCH`; nothing removed.
+- [ ] **E11 teardown --quiet / --verbose** - `--force --quiet` on one throwaway,
+      `--force --verbose` on another
+      Expect: exit 0; `--quiet` leaves stderr empty; `--verbose` reports the removal.
+
 ## F. template
 
 Uses the scratch `$TREEBOX_HOME` — must never write to the real `~/.treebox`.
@@ -231,6 +328,17 @@ Uses the scratch `$TREEBOX_HOME` — must never write to the real `~/.treebox`.
 - [ ] **F6 unknown --from** — `tb template init x --from ghost`
       Expect: loud not-found (exit 3), nothing scaffolded.
 
+- [ ] **F7 template ls alias** - `tb template ls --json`
+      Expect: exit 0; the same payload as `template list --json`.
+- [ ] **F8 bad names and self-copy** - `tb template init ../escape --json`;
+      `tb template init mytpl --from mytpl --force --json`
+      Expect: exit 2 `INVALID_NAME`; exit 2 `TEMPLATE_CONFLICT`, `mytpl` intact.
+- [ ] **F9 copy and overwrite failures** (non-root) - `chmod 555` the templates
+      dir, `tb template init denied --json`; restore it, put a read-only subdir in
+      `copytpl`, `tb template init copytpl --force --json`
+      Expect: exit 1 `COPY_FAILED`; exit 1 `OVERWRITE_FAILED`, and no
+      `.copytpl.treebox-tmp` staging dir left behind. SKIP as root.
+
 ## G. config (user-level TOML)
 
 Each writes `$TREEBOX_CONFIG`, runs, then restores the empty file (`: > "$TREEBOX_CONFIG"`).
@@ -246,17 +354,58 @@ Each writes `$TREEBOX_CONFIG`, runs, then restores the empty file (`: > "$TREEBO
       `tb create cfg-override --base main … --json`
       Expect: `base: "main"`.
 
-## H. docker isolation (run only if A4 passed; expensive — image build)
+- [ ] **G5 harness** - `harness = "codex"`, `tb create g5 … --print`; reset the
+      config; `tb enter g5 … --print`
+      Expect: codex both times (the recorded harness outlives the config).
+- [ ] **G6 root** - `root = "trees"`, `tb create g6 --repo "$REPO" --json` (no `--root`)
+      Expect: `worktree_path` is `$REPO/trees/g6` (repo-relative).
+- [ ] **G7 env_file** - `env_file = "<abs path to $SBX/secrets.env>"`, `tb create g7 … --json`
+      Expect: the worktree's `.env` has that file's content.
+- [ ] **G8 setup_hook** - `setup_hook = ["echo hook-ran > hook.txt"]`, `tb create g8 … --json`
+      Expect: `hook.txt` in the worktree reads `hook-ran`; no `.venv` (the hook
+      replaces auto-detected setup).
+- [ ] **G9 caches / XDG_CACHE_HOME** - `[caches] uv = "$SBX/uv-cache"`, create
+      `g9`; then, with an empty config and `XDG_CACHE_HOME=$SBX/xdg`, create `g9b`
+      Expect: uv wrote into `$SBX/uv-cache`; `$SBX/xdg/uv` exists.
+- [ ] **G10 firewall** - `firewall = true`: `tb create e2e-fw … --isolation docker --dry-run --json`,
+      again with `--no-firewall`; empty config with `--firewall`
+      Expect: the plans with the firewall carry `--cap-add=NET_ADMIN` and the
+      `init-firewall.sh` exec; `--no-firewall` beats the config. Needs no engine.
+- [ ] **G11 template** - `template = "ghost"`, `tb create e2e-g11 … --isolation docker --json`
+      Expect: exit 3 `TEMPLATE_NOT_FOUND`; nothing provisioned.
+- [ ] **G12 closed vocabulary** - `isolatoin = "host"`, then `firewall = 1`; `tb list … --json`
+      Expect: exit 2 `INVALID_CONFIG` each; messages say `did you mean
+      'isolation'` and `boolean`.
+- [ ] **G13 TREEBOX_TEMPLATE_DIR / TZ** - `TREEBOX_TEMPLATE_DIR=<dir> tb template list --json`
+      and `tb template path any-name`; `TZ=Europe/Helsinki tb create e2e-tz … --isolation docker --dry-run --json`
+      Expect: `templateDirOverride` is the dir and wins for any name; the plan's
+      build carries `--build-arg TZ=Europe/Helsinki`. (`TREEBOX_HOME` is F3,
+      `TREEBOX_CONFIG` is G1.)
+
+## H. docker isolation (run only if A4 passed)
+
+Setup: install the offline template (`tests/e2e/offline-template`) as
+`$TREEBOX_HOME/templates/e2e-offline` (the fixture does this; by hand:
+`cp -RL tests/e2e/offline-template "$TREEBOX_HOME/templates/e2e-offline"`), and
+pass `--isolation docker --template e2e-offline` (`…` below). The template
+builds with no network once its pinned base image is present, and its agent is
+the stub, so no scenario here needs the bundled 5.6 GB image or launches a real
+agent. Without a reachable engine or the base image, every H scenario is a
+SKIP, never a pass.
 
 **Name every worktree here with the `e2e-` prefix** (see the docker naming marker
 in the preamble): the container/image become `treebox-e2e-*`, so `e2e_cleanup` /
 `e2e_reap_docker` remove them even when a scenario (H6's `--skip-container`) leaves
 one behind on purpose.
 
-- [ ] **H1 docker create** — `tb create e2e-dockered --repo "$REPO" --root "$ROOT" --isolation docker --print`
-      Expect: exit 0; provisioning identical to host (worktree, `.env`,
-      `.venv`); launch command targets the container (`docker exec …`), not a
-      bare host shell.
+- [ ] **H1 docker create** - `tb create e2e-dockered --repo "$REPO" --root "$ROOT" --isolation docker --template e2e-offline --print`
+      Expect: exit 0; host-side provisioning identical to host isolation
+      (worktree, `.env`, branch); the container `treebox-e2e-dockered-*` is
+      running and the template's post-create step ran in it as the host uid in
+      the worktree dir (`docker exec <ctr> cat /tmp/treebox-e2e-post-create`);
+      launch command targets the container (`docker exec …`), not a bare host
+      shell. (Dependency setup in a docker sandbox is the template's
+      post-create; the offline template does not run `uv sync`.)
 - [ ] **H2 sandbox config outside the mount** — after H1
       Expect: the rendered container config/build context (and staged credential
       copies) live under `$ROOT/.containers/<branch>/`, **not** inside the worktree
@@ -282,9 +431,11 @@ one behind on purpose.
       `treebox-e2e-dockered-*` container, then `tb enter e2e-dockered … --print`
       Expect: exit 0; the container is running again (`docker ps`) *before* the
       command is printed, so the emitted `docker exec …` replays cleanly — a
-      stopped sandbox never yields a dead entry command. With a `--firewall`
+      stopped sandbox never yields a dead entry command: run the printed command
+      and the stub answers from inside the container. With a `--firewall`
       worktree, egress lockdown is re-applied on the restart (iptables rules
-      don't survive a container restart).
+      don't survive a container restart); the offline template has no firewall,
+      so that half needs a firewall-capable template and is not automated.
 - [ ] **H6 docker teardown** — `tb teardown e2e-dockered … --force --json`; then
       `--remove-volumes` on a fresh `e2e-dockered2`; then `--skip-container` on a
       fresh `e2e-dockered3`
@@ -293,6 +444,108 @@ one behind on purpose.
       running (the `e2e-` name means `e2e_cleanup` still reaps it later); the
       worktree dir is always removed. Container/image cleanup is best-effort —
       `container: "failed"` is a warning, not a teardown failure.
+
+- [ ] **H7 real launch in the container** - `tb create e2e-launch …` (no
+      `--print`), then `tb enter e2e-launch … -- --stub-exit=3`
+      Expect: create exits 0 and the stub's record says `in_container=yes`,
+      `cwd` = the worktree (mounted at its host path), `uid` = the host uid,
+      `api_key=unset`; enter exits 3 with the stub's args.
+- [ ] **H8 in-container git** - `docker exec -u agent -w <worktree> <ctr> git branch --show-current`
+      and `git status`; `touch <repo>/.git/hooks/planted` in the container
+      Expect: branch `e2e-launch`, status exits 0; the touch fails (the shared
+      hooks are read-only) and nothing appears on the host.
+- [ ] **H9 missing container** - create `e2e-gone`, `docker rm -f` its container,
+      `tb enter e2e-gone … --json`
+      Expect: exit 1, `ERROR`, message `No container exists …` (never a dead
+      `docker exec` command).
+- [ ] **H10 injected engine failure** (boundary) - put `tests/e2e/fakes` first on
+      `PATH` with `TREEBOX_E2E_DOCKER_FAIL=rm` and `TREEBOX_E2E_REAL_DOCKER` set;
+      `tb teardown e2e-fail-rm … --force --json`
+      Expect: exit 0; `container: "failed"`; the worktree removed anyway.
+- [ ] **H11 enter --template** - `tb enter e2e-launch … --template e2e-offline --print`,
+      then `--template ghost --json`
+      Expect: exit 0 both: the template is read only when setup re-runs, so an
+      existing container stays enterable.
+
+## I. interactive prompts (pseudo-terminal)
+
+Setup: `i-keep`, `i-yes`, `i-pick`, `i-stay`, `i-dirty`. Drive these on a real
+terminal (stdin, stdout and stderr a tty); the harness uses Python's `pty`.
+
+- [ ] **I1 confirmation: no** - `tb teardown i-keep …`, answer `n`
+      Expect: exit 1 (`Aborted`); the worktree kept.
+- [ ] **I2 confirmation: yes** - `tb teardown i-yes …`, answer `y`
+      Expect: exit 0; removed; branch kept.
+- [ ] **I3 chooser** - `tb teardown …` (no refs): tick `i-pick` only (arrows,
+      space, enter), tick no branch at the second question
+      Expect: exit 0; only `i-pick` removed; its branch kept.
+- [ ] **I4 chooser cancel** - open the chooser, press Ctrl+C
+      Expect: exit 0; nothing removed.
+- [ ] **I5 chooser mixed pick** - dirty `i-dirty`; tick it and `i-stay`, and
+      `i-stay`'s branch at the second question
+      Expect: exit 5; `i-stay` and its branch removed; `i-dirty` kept and named
+      as kept for uncommitted changes.
+
+## P. parallel dispatch
+
+- [ ] **P1 parallel creates** - four `tb create par-<x> … --json` started at once
+      Expect: exit 0 each; every worktree listed with fresh deps and a `.env`.
+      Known product bug on `main` (56271e6): concurrent `git worktree add -b`
+      runs collide on the shared `.git/config` lock and one create exits 1
+      (`could not lock config file .git/config: File exists`). The harness
+      reports this as KNOWN-BUG, by its signature only.
+- [ ] **P2 same name at once** - two `tb create par-same … --json` at once
+      Expect: one exits 0, the other 5 (`LOCK_HELD`, `BRANCH_EXISTS` or
+      `SLUG_CONFLICT`); exactly one registration.
+- [ ] **P3 a held lock** - with `setup_hook = ["sleep 6"]`, start
+      `tb create par-held … --print` in the background; while it provisions,
+      `tb enter par-held … --json` and `tb teardown par-free par-held … --force --json`
+      Expect: both exit 5 `LOCK_HELD`; `par-free` is not removed either (the
+      batch takes every lock first); the background create exits 0, and a later
+      enter works (the lock is released).
+
+## R. regressions (bugs fixed on 11 November 2026)
+
+Each fails on `e8a7fa1` (before the fixes) and passes after them.
+
+- [ ] **R37 `.env` directory (#37)** - a branch `envdir` that commits `.env/config`;
+      `tb create --checkout envdir … --json`, then `tb enter envdir … --print`
+      Expect: exit 0 both; `.env` stays a directory with its tracked content;
+      `list --json` says `env: absent`; enter warns `.env not copied` on
+      stderr; no traceback.
+- [ ] **R38 stray directory hint (#38)** - `mkdir "$ROOT/junk"`, `tb create junk … --json`
+      Expect: exit 5 `SLUG_CONFLICT` whose hint gives `rm -rf …` and does not
+      recommend `treebox teardown junk` (which exits 3 for it); after the
+      removal, create succeeds.
+- [ ] **R39 cold dry-run (#39)** - `--dry-run --json` with and without `--cold`,
+      host and docker
+      Expect: the host cold plan routes caches to `treebox-cold-…`, the warm
+      plan does not; the docker warm plan mounts `/caches/…`, the cold plan
+      does not; no cache directory is created.
+- [ ] **R43 nested roots (#43)** - `R/foo` on `foo` and `R/nested/foo` on
+      `nested-branch`; `tb enter nested-branch --root R --json`, then
+      `tb teardown nested-branch --root R --force --json`
+      Expect: both act on `R/nested/foo`; `R/foo` untouched.
+- [ ] **R44 credential refresh (#44)** (docker) - replace the staged
+      `settings.json` of `e2e-cred` with a symlink, then a hardlink, to an
+      outside file; `tb enter e2e-cred … --print` after each
+      Expect: exit 0; the outside file's content and mode unchanged; the staged
+      entry is a regular file again with the (fake) login content.
+- [ ] **R45 submodule copy (#45)** - add a submodule `sub`; a branch
+      `copy-target` puts a symlink at `sub/inner` to an outside dir;
+      `tb create --checkout copy-target … --json`
+      Expect: exit 5 `DESTINATION_CONFLICT` with `error.path` at the link; the
+      outside file untouched; after removing the link, a retry exits 0 and
+      copies the submodule.
+- [ ] **R45b unreadable submodule source** (non-root) - `chmod 000` a file in
+      `$REPO/sub`, `tb create r45b … --json`
+      Expect: exit 1 `SUBMODULE_COPY_FAILED`; no traceback.
+- [ ] **R46 merged badge (#46)** (boundary: fake `gh`) - `reused` and
+      `squashed`, each pushed, each with a fake merged PR at its tip; then a
+      new commit on `reused`; origin set to `https://forge.invalid/…` (never
+      resolves); open the chooser with `tests/e2e/fakes` first on `PATH`
+      Expect: `reused` shows `merge not verified for current tip`, never
+      `✓ merged`; `squashed` shows `✓ merged (PR #48)`; Ctrl+C removes nothing.
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 
@@ -305,7 +558,7 @@ one behind on purpose.
       If code and `tests/golden/` disagree with `docs/usage.md` or
       `skills/treebox/SKILL.md`, report **doc drift** as a finding.
 - [ ] **X4 worktree lock** - if any command reported a lock conflict (exit 5)
-      during sequential runs, that's a bug — the lock must be released on exit.
+      during sequential runs (P2 and P3 provoke one on purpose), that's a bug - the lock must be released on exit.
 - [ ] **X5 no host pollution** — after `e2e_cleanup`: nothing new under the real
       `~/.treebox`, no stray `treebox-e2e.*` dirs left in `$TMPDIR`,
       `git -C <treebox repo> status` unchanged by the run, and — if group H ran —
