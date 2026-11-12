@@ -56,6 +56,7 @@ from .models import (
     path_is_under,
     placeholder_branch,
     same_path,
+    worktree_id,
     worktree_path,
     worktree_root,
 )
@@ -470,6 +471,7 @@ def _emit_result(outcome: provision.Outcome, *, json_out: bool, print_only: bool
             "schemaVersion": SCHEMA_VERSION,
             "name": outcome.worktree.name,
             "worktree_path": str(outcome.worktree.path),
+            "id": outcome.worktree.id,
             "branch": outcome.worktree.branch,
             "base": outcome.worktree.base,
             "entry_command": outcome.entry_command,
@@ -612,6 +614,11 @@ def create(
     A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
     exit status, and the file with its output). The worktree is kept and
     marked unfinished; `treebox enter NAME` or the same create retries setup.
+
+    Setup and the agent get TREEBOX_NAME (the worktree name) and TREEBOX_ID
+    (10 lowercase hex characters, unique on this machine, derived from the
+    worktree path) for repo-owned service scripts; --print and --json
+    commands carry them too.
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -763,6 +770,9 @@ def enter(
 
     An unfinished or failed setup runs again; if a setup step fails, enter
     fails too (exit 1, SETUP_FAILED) and the next enter retries it.
+
+    Setup and the agent get the same TREEBOX_NAME and TREEBOX_ID as at
+    create; --print and --json commands carry them too.
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -1035,6 +1045,12 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         rows.append(
             WorktreeRow(
                 name=wt_path.name,
+                # Spelled like enter spells it (git may canonicalize a root alias
+                # such as /var -> /private/var), so list shows the id the
+                # worktree's setup and agent get.
+                id=worktree_id(
+                    Path(resolve.Candidate.registered(repo_path, cfg.root, rec.path, None).path)
+                ),
                 branch=rec.branch or "detached",
                 unnamed=is_placeholder(rec.branch),
                 missing=missing,

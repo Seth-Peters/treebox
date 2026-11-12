@@ -1,7 +1,7 @@
 # treebox enter golden-host --repo __ROOT__/repo --root __ROOT__/wts --print
 # exit: 0
 # --- stdout ---
-sh -c 'cd __ROOT__/wts/golden-host && exec claude --dangerously-skip-permissions'
+sh -c 'cd __ROOT__/wts/golden-host && export TREEBOX_NAME=golden-host TREEBOX_ID=__HASH__ && exec claude --dangerously-skip-permissions'
 # --- stderr ---
 
   ● enter   golden-host

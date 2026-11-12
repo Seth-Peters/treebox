@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -90,6 +91,29 @@ def worktree_path(repo: str, root: str, name: str) -> Path:
     return worktree_root(repo, root) / name
 
 
+# The variables treebox exports to setup and to the agent entry (see
+# ``Worktree.treebox_env``). Repo-owned scripts read them to run services in
+# parallel worktrees; treebox starts no service itself.
+ENV_NAME = "TREEBOX_NAME"
+ENV_ID = "TREEBOX_ID"
+
+# The ``worktree_id`` format is documented contract: exactly this many
+# lowercase hex characters. Repo scripts put it in database and Compose project
+# names, and the docker runner's sandbox names embed it, so it never changes.
+WORKTREE_ID_LENGTH = 10
+
+
+def worktree_id(path: Path) -> str:
+    """The machine-unique id of the worktree registered at ``path``:
+    ``WORKTREE_ID_LENGTH`` lowercase hex characters of the SHA-256 of the path.
+
+    Derived from the path, never from the name: a name repeats across repos
+    and nested roots, the registered path does not. This is the one
+    derivation of a worktree's hash: the docker runner's container and image
+    names embed it, so ``TREEBOX_ID`` and the sandbox name always agree."""
+    return hashlib.sha256(str(path).encode()).hexdigest()[:WORKTREE_ID_LENGTH]
+
+
 def same_path(left: str | Path, right: str | Path) -> bool:
     return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
 
@@ -124,6 +148,7 @@ class WorktreeRow(TypedDict):
     """
 
     name: str
+    id: str  # TREEBOX_ID: models.worktree_id of the registered path
     branch: str
     unnamed: bool  # branch is a treebox/<name> placeholder
     # Kept for older consumers: true when ``health`` is directory_missing or
@@ -198,3 +223,14 @@ class Worktree:
             base=base,
             path=worktree_path(repo, root, name),
         )
+
+    @property
+    def id(self) -> str:
+        """``TREEBOX_ID``: see ``worktree_id``."""
+        return worktree_id(self.path)
+
+    def treebox_env(self) -> dict[str, str]:
+        """The variables setup and the agent entry get, in both runners:
+        ``TREEBOX_NAME`` (the directory leaf, the name users type) and
+        ``TREEBOX_ID``."""
+        return {ENV_NAME: self.name, ENV_ID: self.id}

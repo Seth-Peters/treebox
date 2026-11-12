@@ -48,7 +48,10 @@ After selection, `enter` and `teardown` keep that full path for provisioning,
 state access, runner operations, and reporting. See
 [worktree selection](usage.md#enter-come-back-to-a-worktree) for ref matching.
 The Docker sandbox mounts the absolute path and a live agent's working
-directory is there, so the worktree directory is never renamed. The
+directory is there, so the worktree directory is never renamed. The path also gives the
+worktree its machine-unique
+[`TREEBOX_ID`](usage.md#services-in-parallel-worktrees), the same hash the
+docker container and image names carry. The
 **branch** is a mutable attribute.
 An explicit `create NAME` starts on the branch `NAME` itself (slashes kept in
 the branch, flattened to `--` in the directory); a nameless `create` starts

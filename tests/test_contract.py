@@ -198,6 +198,7 @@ CREATE_KEYS = {
     "schemaVersion",
     "name",
     "worktree_path",
+    "id",
     "branch",
     "base",
     "entry_command",
@@ -206,6 +207,7 @@ CREATE_KEYS = {
 DRY_RUN_KEYS = {"schemaVersion", "dry_run", "name", "worktree_path", "branch", "commands"}
 LIST_ROW_KEYS = {
     "name",
+    "id",
     "branch",
     "unnamed",
     "missing",

@@ -164,7 +164,11 @@ Module map:
   [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable).
   Branch-shaped inputs (`create feature/auth`,
   `create --checkout feature/auth`) derive the name by flattening slashes to
-  `--` (`feature--auth`); generated names come from `names.py`. Also home to
+  `--` (`feature--auth`); generated names come from `names.py`.
+  `worktree_id(path)` is the one path hash: `TREEBOX_ID` (10 lowercase hex,
+  documented contract) and the docker container/image name suffix.
+  `Worktree.treebox_env()` is what both runners export to setup and the agent
+  entry (and carry in the `--print`/`--json` entry command). Also home to
   `expand_user`, the tolerant `~`-expansion helper every path-consuming module
   shares (an unresolvable `~user` stays literal instead of raising).
 - **`config.py`** is **user-level TOML only** (`$TREEBOX_CONFIG`, else

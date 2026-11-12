@@ -495,6 +495,38 @@ prints the resolved location — the install-agnostic answer to "where does this
 template live", including the bundled default. All three take `--json` for
 scripting.
 
+## Services in parallel worktrees
+
+Several worktrees of one repo often need their own copy of a service: a dev
+server, a database, a Compose stack. treebox does not start or manage these
+services. It gives setup and the agent the identity a repo-owned script needs
+to keep each worktree's services apart:
+
+| Variable | Value |
+| -------- | ----- |
+| `TREEBOX_NAME` | The worktree name: its directory leaf, the name you pass to `enter` (`feature--auth` for branch `feature/auth`). Not unique: the same name can exist in two repos, or twice under nested roots. |
+| `TREEBOX_ID` | Unique on this machine. Exactly 10 lowercase hexadecimal characters (`[0-9a-f]{10}`), derived from the registered worktree path (the first 10 characters of its SHA-256). Stable for the life of the worktree; a new worktree at the same path gets the same id. |
+
+Both runners export them to every setup step (the detected package manager or
+your `setup_hook`; the docker template's `postCreate`) and to the agent. The
+`--print` and `--json` entry commands carry them too, so a replayed command
+gives the agent the same values: the host command exports them before `exec`
+(`sh -c 'cd … && export TREEBOX_NAME=… TREEBOX_ID=… && exec claude …'`), and
+the docker command passes them with `-e` on `docker exec`. They are passed on
+every exec and not stored in the container, so a container that was stopped
+and started again, or that an older treebox created, gets them as well.
+`create --json`, `enter --json` and `list --json` include the id as `id`.
+
+The `TREEBOX_ID` format is contract: use it where a name must be unique on the
+machine and use a restricted alphabet, for example a Compose project name
+(`app-$TREEBOX_ID`) or a database name. It can start with a digit, so put a
+letter prefix in front when the target needs one (`app_$TREEBOX_ID` for a
+PostgreSQL identifier). The docker runner's container and image are named
+`treebox-<name>-<TREEBOX_ID>`.
+The path is spelled the way your configured root spells it: if you later reach
+the same root through another spelling (a symlink, or `/var` instead of
+`/private/var` on macOS), the id changes, like the docker sandbox name.
+
 ## Scripting against treebox
 
 treebox is built to be driven by other programs (including agents). Data goes
@@ -537,15 +569,15 @@ Current success payloads:
 
 | Command | Top-level fields |
 | ------- | ---------------- |
-| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created` |
+| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `id`, `branch`, `base`, `entry_command`, `created` |
 | `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands` |
 | `list --json` | `schemaVersion`, `worktrees` |
 | `teardown --json` | `schemaVersion`, `worktrees` |
 | `doctor --json` | `schemaVersion`, `ok`, `isolation`, `checks`, `advisories` |
 
-`list` rows contain `name`, `branch`, `unnamed`, `missing`, `last_commit`,
+`list` rows contain `name`, `id`, `branch`, `unnamed`, `missing`, `last_commit`,
 `commit_epoch`, `path`, `base`, `isolation`, `harness`, `deps`, `env`,
-`health`, and `setup`. `deps` is `fresh`, `stale`, or `unknown`: `fresh` and
+`health`, and `setup`. `id` is the [`TREEBOX_ID`](#services-in-parallel-worktrees) of the worktree. `deps` is `fresh`, `stale`, or `unknown`: `fresh` and
 `stale` only after a finished setup (a matching lockfile hash alone is never
 fresh); `env` is `present` or `absent`. `setup` is the
 [setup model](how-it-works.md#lifecycle-setup-and-cleanup) state - `pending`,

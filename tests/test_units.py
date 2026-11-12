@@ -896,7 +896,10 @@ def test_autonomous_launch_argv_is_exact(tmp_path: Path, harness_name: str, argv
     # worktree directory: pasting it anywhere runs in the box.
     cmd = host.entry_command(wt, harness=harness, args=[])
     assert cmd[:2] == ["sh", "-c"]
-    assert cmd[2] == f"cd {shlex.quote(str(wt.path))} && exec {shlex.join(argv)}"
+    assert cmd[2] == (
+        f"cd {shlex.quote(str(wt.path))} && export TREEBOX_NAME=wt TREEBOX_ID={wt.id} "
+        f"&& exec {shlex.join(argv)}"
+    )
     assert host.entry_command(wt, harness=harness, args=["--continue"])[2].endswith(
         f"exec {shlex.join([*argv, '--continue'])}"
     )
