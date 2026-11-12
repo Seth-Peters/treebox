@@ -170,7 +170,14 @@ First run builds your image (cached after that), provisions the worktree, runs
 - `postCreate` → the command exec'd in the workspace after the container starts
 
 When the firewall is enabled (`firewall = true` in config, or `--firewall` per
-run; `--no-firewall` opts one run out), `firewall.json` deep-merges on top. Any
+run; `--no-firewall` opts one run out), `firewall.json` deep-merges on top, and
+`init-firewall.sh` drops all egress except DNS and the hosts in
+`allowed-domains.sh`. The Docker host (the container's default gateway) is not
+an exception: a host service is unreachable, even one bound to `0.0.0.0`. To
+open specific host ports, list them in your template's `allowed-domains.sh`,
+for example `ALLOWED_HOST_PORTS=(5432 8080)` (TCP), and re-create the sandbox.
+The file is baked into the image from the operator template, so a boxed agent
+cannot change it. Any
 container config in the target repo itself is deliberately ignored — see
 [how it works](how-it-works.md#the-sandbox-config-lives-outside-the-box).
 

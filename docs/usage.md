@@ -243,9 +243,12 @@ Both conditions stop `create` or `enter` with an
 removing the conflict.
 
 A container that stopped since setup (host reboot, manual `docker stop`)
-is restarted with the firewall re-established
-before the agent launches - and before a `--print`/`--json` command is
-emitted - so a treebox-owned restart never leaves egress silently open.
+is restarted. The firewall is re-applied on every entry, also to a container
+that is already running (a `docker restart` outside treebox drops the rules
+but keeps the container running), before the agent launches - and before a
+`--print`/`--json` command is emitted - so no restart leaves egress silently
+open. If the firewall cannot be applied, the entry fails with
+`FIREWALL_FAILED` and the agent does not launch.
 
 ## `list` — what exists, what's stale
 
@@ -479,7 +482,7 @@ to run it. The command is self-contained for both isolation modes: it carries
 the worktree directory (`cd … && exec …` on host, `docker exec -w …` in
 docker), so replaying it from any directory launches the agent in the box.
 It is also entry-ready: for a docker worktree, a stopped container is
-restarted (with the firewall re-applied) before the command is printed, so
+restarted and the firewall is re-applied before the command is printed, so
 the emitted command is never dead on replay.
 Without `--json`, `--print`, or `--dry-run`, `create` and `enter` launch the
 agent and exit with the agent process's exit code. Human `--dry-run` writes the
@@ -554,5 +557,6 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
+| `FIREWALL_FAILED` | `1` | The firewall was requested but `init-firewall.sh` failed in the sandbox. Its traffic stays dropped and nothing launches or is emitted. Fix the template, then re-create the sandbox. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |

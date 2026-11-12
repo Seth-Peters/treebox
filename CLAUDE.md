@@ -101,8 +101,9 @@ Module map:
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
   `create` and `enter` share `_run_session` for runner preflight, the
   worktree lock (see `locking.py`), provision error classification, and the final
-  `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
-  so the printed `entry_command` is never dead on replay).
+  `--json`/`--print`/launch fork (every path first calls `runner.prepare_entry`,
+  so the printed `entry_command` is never dead on replay and a failed
+  firewall init launches nothing).
   `_reconcile_with_state` folds recorded
   creation-time choices into existing-worktree sessions before the runner and
   harness objects are resolved: recorded isolation conflicts with a mismatched
@@ -206,9 +207,11 @@ What a sandboxed backend must **guarantee** (the security invariants):
   sandbox-writable worktree state never records Docker volume ownership.
 - The shared `.git/hooks` is presented read-only (host git executes it).
 - Egress lockdown, when enabled, exists before any workspace-derived code
-  runs (firewall-before-post-create), and is re-established when
-  `prepare_entry` restarts a stopped sandbox (iptables rules don't survive
-  a container restart).
+  runs (firewall-before-post-create), and `prepare_entry` re-establishes it
+  on every entry, running container or not (iptables rules don't survive a
+  restart, and `docker restart` outside treebox leaves a running sandbox
+  open). A failed init blocks the entry (`FIREWALL_FAILED`). The Docker
+  host is not an exception: only template-listed host ports are open.
 - Only user-level treebox config is ever read — never the target repo's.
 
 What a backend may **assume** (host locality):
