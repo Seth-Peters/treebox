@@ -1,0 +1,47 @@
+#!/bin/sh
+# Controlled stand-in for an autonomous agent CLI (claude, codex) in treebox
+# end-to-end runs. It never contacts a model and never edits files: it prints
+# one record of how treebox launched it, then exits.
+#
+# The name it is invoked by selects its role:
+#   claude, codex      agent role: print the launch record on stdout
+#   post-create.sh     setup role, for the offline sandbox template: write a
+#                      marker that proves the container setup step ran
+#
+# Agent-role controls (pass them as agent args after `--`):
+#   --stub-exit=N      exit with status N (default 0)
+#
+# On the host the e2e harness puts symlinks named claude and codex first on
+# PATH. In the offline template (tests/e2e/offline-template) this file is
+# post-create.sh and is linked as /usr/local/bin/claude and /usr/local/bin/codex.
+set -eu
+
+role="$(basename "$0")"
+
+if [ "$role" = "post-create.sh" ]; then
+  # The runner execs post-create with the worktree as the working directory.
+  printf 'uid=%s\ncwd=%s\n' "$(id -u)" "$(pwd)" > /tmp/treebox-e2e-post-create
+  echo "treebox-e2e post-create done"
+  exit 0
+fi
+
+status=0
+in_container=no
+[ -f /.dockerenv ] && in_container=yes
+api_key="unset"
+[ -n "${ANTHROPIC_API_KEY:-}" ] && api_key="set"
+
+echo "TREEBOX_E2E_STUB_BEGIN"
+echo "name=$role"
+echo "cwd=$(pwd)"
+echo "uid=$(id -u)"
+echo "in_container=$in_container"
+echo "api_key=$api_key"
+for arg in "$@"; do
+  case "$arg" in
+    --stub-exit=*) status="${arg#--stub-exit=}" ;;
+  esac
+  printf 'arg=%s\n' "$arg"
+done
+echo "TREEBOX_E2E_STUB_END"
+exit "$status"

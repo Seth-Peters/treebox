@@ -1,0 +1,15 @@
+{
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": { "TZ": "UTC" }
+  },
+  "user": "agent",
+  "mounts": [
+    "type=volume,source=treebox-e2e-vol-${workspaceName},target=/e2e-volume"
+  ],
+  "env": {
+    "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
+    "CODEX_HOME": "/home/agent/.codex"
+  },
+  "postCreate": "sh /usr/local/bin/post-create.sh"
+}

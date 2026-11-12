@@ -1,0 +1,30 @@
+#!/bin/sh
+# Fake GitHub CLI for treebox end-to-end runs. BOUNDARY EVIDENCE ONLY: it
+# stands in for a logged-in `gh` so the teardown chooser's pull-request badges
+# can be driven without a network or a real account. A scenario that uses it
+# proves how treebox reacts to these answers, not how GitHub answers.
+#
+# $TREEBOX_E2E_FAKE_GH_DIR holds one file per branch, named after the branch
+# with "/" replaced by "--", whose content is the JSON that
+# `gh pr view <branch> --json ...` prints. A missing file means "no pull
+# request" (exit 1, like gh).
+set -eu
+
+case "${1:-} ${2:-}" in
+  "auth token")
+    echo "fake-e2e-token"
+    exit 0
+    ;;
+  "pr view")
+    branch="${3:-}"
+    file="${TREEBOX_E2E_FAKE_GH_DIR:?}/$(printf '%s' "$branch" | sed 's#/#--#g')"
+    if [ -f "$file" ]; then
+      cat "$file"
+      exit 0
+    fi
+    echo "no pull requests found for branch \"$branch\"" >&2
+    exit 1
+    ;;
+esac
+echo "fake gh: unsupported command: $*" >&2
+exit 1

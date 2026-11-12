@@ -84,5 +84,5 @@ addopts = "-q"
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src"]
+files = ["src", "tests/e2e"]
 strict = true
