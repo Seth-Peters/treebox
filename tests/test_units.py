@@ -4023,12 +4023,29 @@ def test_bundled_dockerfile_pins_every_version_and_checksum():
     # the helper's own body, a heredoc, calls curl, and nothing calls wget.
     outside_heredocs = re.sub(r"<<'EOF'.*?^EOF$", "", text, flags=re.M | re.S)
     assert not re.search(r"\b(curl|wget)\s+-", outside_heredocs)
-    assert outside_heredocs.count('treebox-fetch "https://') >= 6
+    assert outside_heredocs.count('treebox-fetch "https://') >= 4
     # npm installs name an exact version for every package.
     for line in re.findall(r"npm install -g (.+?)(?:&&|$)", text, flags=re.M):
         for pkg in line.split():
             if pkg.startswith('"'):
                 assert re.search(r'.@\$\{[A-Z_]+_VERSION\}"$', pkg), pkg
+
+
+def test_bundled_dockerfile_keeps_no_download_caches_or_unused_browsers():
+    # Size guard (#72): the npm cache would keep a second, compressed copy of
+    # every package (the Codex binary alone is ~170 MB), and Playwright's
+    # default install adds Firefox, WebKit and the full Chromium build, which
+    # nothing in the headless container uses.
+    text, _ = _bundled_dockerfile_args()
+    steps = re.split(r"^RUN ", text, flags=re.M)[1:]
+    npm_steps = [s for s in steps if "npm install -g" in s]
+    assert npm_steps
+    for step in npm_steps:
+        assert "npm cache clean --force" in step, step.splitlines()[0]
+    installs = re.findall(r"playwright(?:-cli install-browser| install(?![-\w]))([^&]*)", text)
+    assert installs
+    for args in installs:
+        assert args.split() == ["--only-shell", "chromium"], args
 
 
 def test_bundled_container_json_does_not_override_dockerfile_pins():

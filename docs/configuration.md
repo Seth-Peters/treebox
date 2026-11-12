@@ -196,8 +196,6 @@ install the same tools:
 | Base image | `FROM …@sha256:` | Docker Hub index digest (`docker buildx imagetools inspect`) |
 | Node.js 22 | `NODE_VERSION` | `SHASUMS256.txt` of the release on nodejs.org |
 | GitHub CLI | `GH_VERSION` | `gh_<version>_checksums.txt` of the GitHub release |
-| delta | `GIT_DELTA_VERSION` | SHA-256 of the release asset (upstream publishes none) |
-| AWS CLI v2 | `AWS_CLI_VERSION` | SHA-256 of the versioned zip, after its AWS PGP signature passed |
 | uv | `UV_VERSION` | `<asset>.sha256` of the GitHub release |
 | Claude Code | `CLAUDE_CODE_VERSION` | `manifest.json` of the release on downloads.claude.ai |
 | Codex CLI | `CODEX_CLI_VERSION` | exact npm version |
@@ -215,6 +213,29 @@ version and its checksums in your template's `Dockerfile`. Do not pass the
 version as a `build.args` entry in `container.json`: the checksums would no
 longer match, and the build stops.
 
+**What the image leaves out.** To keep the image small, it installs only
+what a supported setup path or a bundled agent uses:
+
+- Playwright has Chromium's headless shell only (no Firefox, WebKit or full
+  Chromium). The container has no display, so every use is headless.
+  `playwright-cli` opens it through `/opt/google/chrome/chrome`.
+- There is no AWS CLI, vim, fzf, man (and no man pages), delta, cmake, or
+  Debian's own Python 3.13 headers (`python3-dev`, `python3-venv`). The image
+  Python is 3.14 with its own headers, and `uv` makes the virtual
+  environments. A build backend that needs cmake gets it from PyPI.
+- gcc, g++, make and pkg-config stay, so `uv sync` and `npm install` can
+  build native dependencies from source.
+
+To add a tool, put it in your own template's `Dockerfile` (see
+[Scaffold a template](#1-scaffold-a-template)), for example:
+
+```dockerfile
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends vim cmake \
+  && rm -rf /var/lib/apt/lists/*
+USER ${USERNAME}
+```
+
 **Hosts the build needs.** A build needs outbound HTTPS to these hosts (Debian
 uses HTTP):
 
@@ -223,11 +244,10 @@ uses HTTP):
 | `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | the base image (only if it is not already pulled) |
 | `deb.debian.org` | Debian packages, and the Chromium libraries Playwright installs |
 | `nodejs.org` | Node.js |
-| `github.com`, `release-assets.githubusercontent.com` | GitHub CLI, delta, uv (GitHub redirects release downloads) |
-| `awscli.amazonaws.com` | AWS CLI |
+| `github.com`, `release-assets.githubusercontent.com` | GitHub CLI, uv (GitHub redirects release downloads) |
 | `downloads.claude.ai` | Claude Code |
 | `registry.npmjs.org` | Codex CLI, Playwright |
-| `cdn.playwright.dev` | the Playwright browsers |
+| `cdn.playwright.dev` | the Chromium headless shell (and FFmpeg) for Playwright |
 
 If the build cannot reach one of them, the step fails with a message that
 names the host, for example:
