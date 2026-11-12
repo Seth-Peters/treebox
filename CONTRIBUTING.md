@@ -86,6 +86,28 @@ observable output, bump `SCHEMA_VERSION` when the JSON shape changes and
 regenerate the golden snapshots with `scripts/golden-diff.sh --update`. Note
 user-facing changes under `[Unreleased]` in `CHANGELOG.md`.
 
+## Releasing
+
+The `Release` workflow (`.github/workflows/release.yml`) publishes treebox.
+It first runs the full CI validation (`ci.yml`: the test matrix and
+`./scripts/validate.sh`) on the exact commit it releases. It publishes only if
+all of that passes.
+
+- **Release to PyPI:** push a tag such as `v0.4.0` on the commit to release.
+  The workflow validates that commit, builds version `0.4.0`, publishes it to
+  PyPI, and then creates the GitHub Release.
+- **Dev build to TestPyPI:** in the Actions tab, open "Release", select "Run
+  workflow" and the branch. The workflow validates the head commit of that
+  branch, builds it as a dev version, and publishes it to TestPyPI.
+
+If the validation fails, nothing is published. Fix the problem, then tag the
+fixed commit.
+
+Every action in `.github/workflows/` is pinned to a full commit SHA, with its
+version in a trailing comment. Dependabot (`.github/dependabot.yml`) opens a
+pull request when a pinned action has a new version. Pin a new action the same
+way.
+
 ## Boundaries
 
 Please preserve the basics: fresh refs by default, no trust in target-repo sandbox config, and stable CLI output for scripts.
