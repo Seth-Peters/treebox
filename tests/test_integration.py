@@ -429,6 +429,154 @@ def test_gitmodules_directory_on_branch_is_kept_and_does_not_block_create_or_ent
     assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
 
+# --- submodule copies follow the branch's own .gitmodules (issue #62) --------
+
+_FILE_PROTOCOL = ("-c", "protocol.file.allow=always")
+_IDENTITY = ("-c", "user.name=t", "-c", "user.email=t@e")
+
+
+def _push_branch_from_clone(repo: Path, tmp_path: Path, branch: str, *edits: list[str]) -> None:
+    """Push ``branch`` (from main) after running git ``edits`` in a scratch
+    clone, so the main checkout's own working tree stays exactly as it is."""
+    clone = tmp_path / f"clone-{branch}"
+    origin = _git(repo, "remote", "get-url", "origin").stdout.strip()
+    assert _git(tmp_path, "clone", "-q", origin, str(clone)).returncode == 0
+    assert _git(clone, "checkout", "-q", "-b", branch).returncode == 0
+    for edit in edits:
+        done = _git(clone, *_FILE_PROTOCOL, *edit)
+        assert done.returncode == 0, done.stderr
+    commit = _git(clone, *_IDENTITY, "commit", "-q", "-m", f"edit {branch}")
+    assert commit.returncode == 0, commit.stderr
+    assert _git(clone, "push", "-q", "origin", branch).returncode == 0
+    assert _git(repo, "fetch", "-q", "origin").returncode == 0
+
+
+def _sub_url(repo: Path) -> str:
+    return _git(repo, "config", "-f", ".gitmodules", "submodule.sub.url").stdout.strip()
+
+
+def _assert_pristine(wt: Path) -> None:
+    """The fresh worktree is exactly its branch: nothing modified and nothing
+    untracked but the hermetic setup hook's log (the copied ``.env`` is
+    force-ignored)."""
+    assert _git(wt, "status", "--porcelain", "-uall").stdout == "?? setup.log\n"
+
+
+def test_create_keeps_the_branchs_renamed_submodule_and_stays_clean(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """``main`` declares ``sub``; the branch renames it to ``libB``. The
+    worktree keeps the branch's ``.gitmodules``, gets no stray ``sub/``, and
+    ``libB`` (which the main checkout does not have) is skipped with a note."""
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "renamed"
+
+    created = _run(["create", "--checkout", "renamed", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    assert _git(wt, "config", "-f", ".gitmodules", "--get-regexp", "path").stdout == (
+        "submodule.sub.path libB\n"
+    )
+    assert not (wt / "sub").exists()
+    _assert_pristine(wt)
+    assert "skipped libB" in created.stderr
+    assert "copied 0" in created.stderr
+    # The main checkout is left exactly as it was.
+    assert _git(repo, "status", "--porcelain").stdout == ""
+    assert (repo / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+
+
+def test_renamed_submodule_note_keeps_json_stdout_pure(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """Under ``--json`` the skip note never reaches stdout, which stays one
+    parseable payload."""
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    created = _run(
+        ["create", "--checkout", "renamed", "--repo", str(repo), "--root", root, "--json"]
+    )
+    assert created.exit_code == 0, created.output
+    assert json.loads(created.stdout)["created"] is True
+    assert "libB" not in created.stdout
+    _assert_pristine(Path(root) / "renamed")
+
+
+def test_create_copies_only_submodules_both_sides_declare(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """A branch that adds a submodule the main checkout lacks still gets the
+    shared one copied; the new one is skipped and left as the branch has it."""
+    _push_branch_from_clone(
+        repo, tmp_path, "adds-extra", ["submodule", "add", "-q", _sub_url(repo), "extra"]
+    )
+    wt = Path(root) / "adds-extra"
+    created = _run(
+        ["create", "--checkout", "adds-extra", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert (wt / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+    assert not (wt / "sub" / ".git").exists()
+    assert (wt / "extra").is_dir()
+    assert list((wt / "extra").iterdir()) == []
+    assert "skipped extra" in created.stderr
+    assert "copied 1" in created.stderr
+    assert _git(wt, "show", "HEAD:.gitmodules").stdout == (wt / ".gitmodules").read_text()
+    _assert_pristine(wt)
+
+
+def test_branch_without_gitmodules_gets_nothing_from_the_main_checkout(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """The main checkout declares ``sub`` but the branch dropped every
+    submodule: no ``.gitmodules`` and no submodule tree may appear."""
+    _push_branch_from_clone(repo, tmp_path, "no-modules", ["rm", "-q", "sub", ".gitmodules"])
+    wt = Path(root) / "no-modules"
+    created = _run(
+        ["create", "--checkout", "no-modules", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert not (wt / ".gitmodules").exists()
+    assert not (wt / "sub").exists()
+    _assert_pristine(wt)
+
+
+def test_untracked_gitmodules_in_the_main_checkout_is_never_copied(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """An untracked ``.gitmodules`` in the main checkout (with its tree on
+    disk) declares nothing for a branch that tracks no ``.gitmodules``."""
+    _push_branch_from_clone(repo, tmp_path, "no-modules", ["rm", "-q", "sub", ".gitmodules"])
+    assert _git(repo, "checkout", "-q", "no-modules").returncode == 0
+    (repo / ".gitmodules").write_text('[submodule "vendor"]\n\tpath = vendor\n\turl = unused\n')
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "lib.txt").write_text("untracked vendor\n")
+    assert "?? .gitmodules" in _git(repo, "status", "--porcelain").stdout
+
+    wt = Path(root) / "probe"
+    created = _run(
+        ["create", "probe", "--base", "no-modules", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert not (wt / ".gitmodules").exists()
+    assert not (wt / "vendor").exists()
+    _assert_pristine(wt)
+
+
+def test_branch_gitmodules_without_one_in_the_main_checkout_is_kept(
+    repo: Path, root: str, hermetic_config
+):
+    """The branch declares ``sub`` but the main checkout has no
+    ``.gitmodules``: the branch's file is kept and ``sub`` is skipped."""
+    (repo / ".gitmodules").unlink()
+    wt = Path(root) / "feature-x"
+    created = _run(["create", "feature-x", "--repo", str(repo), "--root", root, "--print"])
+    assert created.exit_code == 0, created.output
+    assert _git(wt, "show", "HEAD:.gitmodules").stdout == (wt / ".gitmodules").read_text()
+    assert list((wt / "sub").iterdir()) == []
+    assert "skipped sub" in created.stderr
+    _assert_pristine(wt)
+
+
 def test_managed_file_copy_refuses_a_directory_planted_mid_copy(tmp_path: Path, monkeypatch):
     """A directory swapped in between the unlink and the create is a refusal,
     not a traceback: the safe copy asks the filesystem, not the errno."""

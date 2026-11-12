@@ -42,7 +42,7 @@ class DestinationConflictError(ProvisionError):
     sits at its destination. Nothing is ever removed to make room: the worktree
     tree is untrusted, and the entry may be the user's (or the branch's) own
     content. A submodule copy surfaces this as exit 5, DESTINATION_CONFLICT;
-    the managed-file copies (``.env``, ``.gitmodules``) catch it and skip."""
+    the managed ``.env`` copy catches it and skips."""
 
     def __init__(self, path: Path, message: str) -> None:
         super().__init__(message)
@@ -254,10 +254,10 @@ def _is_directory_no_follow(path: Path) -> bool:
 
 
 def _copy_managed_file(src: Path, dest: Path, reporter: Reporter) -> bool:
-    """Copy a file treebox manages (``.env``, ``.gitmodules``) into the
+    """Copy a file treebox manages (``.env``) into the
     worktree; False when the worktree keeps a directory at that name.
 
-    A branch can commit ``.env/`` or ``.gitmodules/`` as a directory, and a
+    A branch can commit ``.env/`` as a directory, and a
     boxed agent can create one. That must neither crash provisioning nor cost
     the branch its content, so the copy is skipped with a warning and the
     worktree stays usable: the directory is left exactly as it is.
@@ -363,8 +363,6 @@ def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | Non
     if src.is_symlink():
         reporter.warn(f"skipping submodule behind a symlink: {rel!r}")
         return None
-    if not src.is_dir():
-        return None  # not checked out in the source repo; nothing to copy
     if not src.resolve().is_relative_to(repo.resolve()):
         reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
         return None
@@ -372,21 +370,35 @@ def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | Non
 
 
 def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
-    """Copy submodule working trees from the source repo (copy only, no linkage)."""
-    if not git.has_gitmodules(repo):
+    """Copy submodule working trees from the main checkout (copy only, no
+    linkage), for the submodules the worktree's own branch declares.
+
+    The branch's ``.gitmodules`` is the authority and is never written: the
+    main checkout's file can describe another branch (a renamed or removed
+    submodule), and copying it would leave the fresh worktree dirty. A path
+    is copied only when both sides declare it and the main checkout has it
+    on disk; every other branch path is skipped with a note. The copied
+    content mirrors the main checkout, not the commit the branch pins.
+    """
+    declared = git.submodule_paths(worktree)
+    if not declared:
         return 0
-    _copy_managed_file(Path(repo) / ".gitmodules", worktree / ".gitmodules", reporter)
+    source = Path(repo)
+    available = {Path(rel) for rel in git.submodule_paths(source)}
     copied = 0
-    for rel in git.submodule_paths(repo):
-        relative = _safe_submodule_path(Path(repo), rel, reporter)
+    for rel in declared:
+        relative = _safe_submodule_path(source, rel, reporter)
         if relative is None:
+            continue
+        if relative not in available or not (source / relative).is_dir():
+            reporter.note("submodules", f"skipped {rel} · not checked out in {repo}")
             continue
         # The source side is validated above; ``copy_submodule`` owns the
         # destination side (the worktree tree is untrusted) and skips ``.git``
         # pointers, whose relative gitdir would break git in the linked
         # worktree (issue #16).
         try:
-            copy_submodule(Path(repo), worktree, relative)
+            copy_submodule(source, worktree, relative)
         except UnsafeDestinationError as exc:
             raise DestinationConflictError(exc.path, str(exc)) from exc
         except SubmoduleCopyError as exc:

@@ -1968,6 +1968,8 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
 
     worktree = tmp_path / "wt"
     worktree.mkdir()
+    # The branch declares the same (untrusted) submodule paths.
+    (worktree / ".gitmodules").write_text((repo / ".gitmodules").read_text())
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 

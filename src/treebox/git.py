@@ -7,6 +7,7 @@ shells out to git directly. Functions raise ``GitError`` on failure.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -709,11 +710,19 @@ def branch_for_path(repo: str | Path, path: str) -> str | None:
 
 
 def has_gitmodules(repo: str | Path) -> bool:
-    return (Path(repo) / ".gitmodules").is_file()
+    """Whether ``repo`` has a regular ``.gitmodules`` file. A symlink or a
+    directory at that name is not one: neither is ever read."""
+    try:
+        return stat.S_ISREG((Path(repo) / ".gitmodules").lstat().st_mode)
+    except OSError:
+        return False
 
 
 def submodule_paths(repo: str | Path) -> list[str]:
-    """Relative paths of configured submodules, from .gitmodules."""
+    """Relative paths of configured submodules, from the ``.gitmodules`` in
+    the working tree at ``repo`` (empty when there is no such regular file)."""
+    if not has_gitmodules(repo):
+        return []
     try:
         out = _run(
             [
