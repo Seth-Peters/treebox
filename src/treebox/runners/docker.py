@@ -149,6 +149,13 @@ _FIREWALL_GUARDED = (
 )
 
 
+_ROOT_HINT = (
+    "Run treebox as a non-root user that can reach the Docker daemon. Create one "
+    "with `useradd --create-home --groups docker treebox`, then run treebox as "
+    "that user (`su - treebox`). Host isolation still works as root."
+)
+
+
 def _install_hint() -> str:
     """Platform-aware install instructions for a missing docker binary."""
     if sys.platform == "darwin":
@@ -299,6 +306,17 @@ class DockerRunner:
     # --- preflight -----------------------------------------------------------
 
     def preflight(self, reporter: Reporter) -> None:
+        # Checked first: no docker setup fixes it. The sandbox user takes the
+        # invoking uid (see _inject), so as uid 0 it would be root inside the
+        # box and free to delete its own firewall rules (and the template's
+        # `useradd -u 0` fails mid-build). Refuse before any provisioning.
+        if system.identity().uid == 0:
+            raise PreflightError(
+                "docker isolation cannot run as root (uid 0): the sandbox user "
+                "would be root and could remove its own firewall.",
+                error_code="RUNNING_AS_ROOT",
+                hint=_ROOT_HINT,
+            )
         if not system.have("docker"):
             raise PreflightError(
                 "docker runner needs docker on PATH.",

@@ -210,6 +210,9 @@ What a sandboxed backend must **guarantee** (the security invariants):
   `prepare_entry` restarts a stopped sandbox (iptables rules don't survive
   a container restart).
 - Only user-level treebox config is ever read — never the target repo's.
+- The sandbox user is never root: the docker runner's `preflight` refuses
+  uid 0 (`RUNNING_AS_ROOT`) before provisioning, because a root agent could
+  remove its own firewall rules.
 
 What a backend may **assume** (host locality):
 

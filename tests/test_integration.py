@@ -1545,6 +1545,97 @@ def test_enter_preflights_the_runner_so_a_stopped_daemon_is_not_a_lost_worktree(
     assert wt.is_dir()  # the worktree survives — no destructive teardown advice
 
 
+def _as_root(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Run as uid 0 with a reachable daemon; record every docker engine call."""
+    from treebox import system
+    from treebox.runners import docker as dr
+
+    calls: list[list[str]] = []
+
+    def _docker(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+    monkeypatch.setattr(dr.system, "identity", lambda: system.Identity(uid=0, gid=0))
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    monkeypatch.setattr(dr, "_docker", _docker)
+    return calls
+
+
+def _assert_root_refusal(res) -> None:
+    assert res.exit_code == 1  # EXIT_ERROR, like every PreflightError
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "RUNNING_AS_ROOT"
+    assert "root" in err["message"]
+    assert "useradd" in err["hint"]
+
+
+def test_docker_create_as_root_is_refused_before_anything_is_provisioned(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """As uid 0 the image build cannot add the sandbox user (`useradd -u 0`
+    is not unique), and a root agent could delete its own firewall rules.
+    `create --isolation docker` must refuse before any git or docker work:
+    no worktree, no branch, no image build."""
+    calls = _as_root(monkeypatch)
+
+    res = _run(["create", "boxed", "--isolation", "docker", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 1
+    assert "useradd" in res.stderr
+
+    res = _run(
+        ["create", "boxed", "--isolation", "docker", "--repo", str(repo), "--root", root, "--json"]
+    )
+    _assert_root_refusal(res)
+    assert not (Path(root) / "boxed").exists()
+    assert _git(repo, "branch", "--list", "boxed").stdout == ""
+    assert not any(c[:1] == ["build"] for c in calls)
+
+
+def test_docker_enter_as_root_is_refused_and_leaves_the_worktree_alone(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    wt = Path(root) / "feature-auth"
+    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_state_runner(wt, "docker")
+    calls = _as_root(monkeypatch)
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])
+    _assert_root_refusal(res)
+    assert wt.is_dir()
+    assert not any(c[:1] == ["build"] for c in calls)
+
+
+def test_doctor_docker_as_root_fails_the_isolation_hard_check(
+    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    _as_root(monkeypatch)
+
+    res = _run(["doctor", "--isolation", "docker", "--repo", str(repo), "--json"])
+    assert res.exit_code == 1
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is False
+    check = next(c for c in payload["checks"] if c["name"] == "isolation: docker")
+    assert check["ok"] is False and "root" in check["detail"]
+    assert any("useradd" in a for a in payload["advisories"])
+
+    res = _run(["doctor", "--isolation", "docker", "--repo", str(repo)])
+    assert res.exit_code == 1
+    assert "useradd" in res.stdout + res.stderr
+
+
+def test_host_isolation_as_root_is_unaffected(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    _as_root(monkeypatch)
+
+    res = _run(["create", "rooted", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 0, res.stderr
+    res = _run(["enter", "rooted", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 0, res.stderr
+
+
 def test_runner_recorded_before_setup_survives_a_failed_create(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):

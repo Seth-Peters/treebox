@@ -231,7 +231,9 @@ passed through to the agent. `--cold` forces a cache-bypassing re-sync.
 Under docker isolation, `enter` **preflights the Docker daemon first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
 `DOCKER_UNAVAILABLE` error and a start-docker hint rather than a misleading
-error deeper in launch. It also **re-stages the scoped credential copies**
+error deeper in launch. The same preflight refuses to run as root (uid 0)
+with `RUNNING_AS_ROOT`, before any worktree, branch or image exists; see
+[Install](install.md#what-each-isolation-mode-needs). It also **re-stages the scoped credential copies**
 from the host on every entry - independent of the lockfile-hash skip - so a
 host logout/revocation drops the stale copies and a fresh login reaches the
 sandbox on the very next entry. The same refresh runs during `create`.
@@ -540,6 +542,7 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
+| `RUNNING_AS_ROOT` | `1` | Docker isolation was asked for as root (uid 0). Run treebox as a non-root user, for example one made with `useradd --create-home --groups docker treebox`. Nothing is provisioned. |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
