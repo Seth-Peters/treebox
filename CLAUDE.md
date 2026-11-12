@@ -55,10 +55,11 @@ run (pluggable)** — with three registries that define everything swappable.
 Module map:
 
 - **`provision.py`** owns the host-side half, identical for every runner:
-  `fetch → resolve branch → git worktree add → install pre-push guard →
-  copy submodules → copy .env → runner.setup (cache-backed) →
-  record lockfile hash → hand to runner`. An explicit `create NAME` uses the
-  name as the branch, created fresh from `origin/<base>` (an existing branch is
+  `fetch → resolve branch → write record (setup pending) → git worktree add →
+  install pre-push guard → copy submodules → copy .env → runner.setup
+  (cache-backed) → record the setup result → hand to runner`. An explicit
+  `create NAME` uses the name as the branch, created fresh from
+  `origin/<base>` (an existing branch is
   a `BRANCH_EXISTS` conflict — `--checkout` is the resume path); a nameless
   `create` makes a `treebox/<petname>` placeholder. Every worktree gets the
   pre-push guard (`extensions.worktreeConfig` + `core.hooksPath` into the
@@ -133,17 +134,25 @@ Module map:
   field to `WorktreeRecord`, bump `SCHEMA_VERSION`, and teach `_parse` to
   upgrade older versions. A missing or invalid record is a classified error
   (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) with an `adopt` recovery
-  path, never a fallback to config defaults or to `state.py`.
-- **`state.py`** stores per-worktree *observations* only (lockfile hash +
-  `provisioned`) inside the worktree's private git dir
-  (`.git/worktrees/<id>/`), so it never appears in `git status` and is pruned
-  with the worktree. The lockfile hash is what lets `enter` re-sync only when
-  deps changed (the `provisioned` flag makes `enter` finish an interrupted
-  setup even when the hash matches). This state is sandbox-writable, so it
-  never decides policy and never authorizes destructive host cleanup; it is
-  read and written without following links (a planted symlink reads as no
-  state and is replaced, not written through). `list` reads it through the
-  repo's own worktree registration (`load_registered`).
+  path, never a fallback to config defaults. Besides the policy it holds the
+  host-observed `setup` result (version 2; a version 1 record upgrades with
+  setup `pending`): a sandbox that could mark its own setup done could make
+  treebox skip setup forever or report stale deps fresh, so nothing in the
+  sandbox-writable git dir is read for any decision (the legacy
+  `treebox-state.json` there is ignored).
+- **`lifecycle.py`** holds the two lifecycle models every command derives its
+  decisions from: the **setup model** (`SetupResult`: `pending` / `failed` /
+  `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,
+  `resumable` whether a same-name `create` finishes it, `freshness` what
+  `list` reports) and the **cleanup model** (`Cleanup`: teardown steps run in
+  order - runner resources, worktree, ownership record - and the record and
+  the runner's resource manifest are removed only once nothing remains). A
+  failed setup step is a failed `create`/`enter` (`SETUP_FAILED`, exit 1,
+  output in `<parent>/.logs/<leaf>.setup.log`); an incomplete cleanup is a
+  failed `teardown` (`TEARDOWN_INCOMPLETE`, exit 1) that the same command
+  retries. Worktree health (`healthy`, `directory_missing`,
+  `invalid_linkage`, `unregistered`, `unreadable_state`) is classified once,
+  in `provision.worktree_health`, and exposed as `health` in `list --json`.
 - **`models.py`** holds the `Worktree` value object and the path-as-identity
   rule: the registered *path* identifies a worktree (the *name* is only its
   directory leaf, and can repeat under a nested root); the *branch* is a
@@ -232,9 +241,9 @@ What a backend may **assume** (host locality):
 - Provisioning already happened host-side (`provision.py` writes the
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
-  bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, the record lives beside the worktree, and the
-  lockfile hash stats host files.
+  bind-mounts the worktree and its git common dir 1:1, the record (policy
+  and setup result) lives beside the worktree, and the lockfile hash stats
+  host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud

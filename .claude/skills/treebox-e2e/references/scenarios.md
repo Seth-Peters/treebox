@@ -156,12 +156,25 @@ Prereq: `fix-auth` worktree from B1 exists.
       (worktree was created with host isolation)
       Expect: exit 5 conflict — an explicit mismatched `--isolation` never
       silently re-provisions; the recorded choice wins over config drift too.
-- [ ] **C8 policy lives in the host-owned record** — overwrite the state file
+- [ ] **C8 policy and setup result live in the host-owned record** — write a
+      state file into the sandbox-writable git dir
       (`$(git -C "$ROOT/fix-auth" rev-parse --absolute-git-dir)/treebox-state.json`)
       with `{"isolation": "docker", "template": "/etc", "provisioned": true}`,
       then `tb enter fix-auth … --print`
       Expect: exit 0, still the host launch command; `tb list --json` still
       reports `host` (the policy comes from `$ROOT/.records/fix-auth.json`).
+- [ ] **C10 failed setup is a failed create; enter retries** — with
+      `setup_hook = ["exit 7"]` in `$TREEBOX_CONFIG`, `tb create c10 … --json`
+      Expect: exit 1, `"code": "SETUP_FAILED"`, the message names
+      `setup · hook 1` and status 7, `error.path` is
+      `$ROOT/.logs/c10.setup.log`; the worktree is kept; `list --json` shows
+      `setup: "failed"`, `deps: "unknown"`. `tb enter c10 … --json` runs the
+      hook again; after fixing the hook it exits 0 and `list` shows `fresh`.
+- [ ] **C11 invalid linkage** — `rm "$ROOT/c10/.git"`, then
+      `tb enter c10 … --json`
+      Expect: exit 5, `"code": "INVALID_LINKAGE"`; `list --json` shows
+      `health: "invalid_linkage"`, `missing: true`; `tb teardown c10 … --force`
+      removes the directory and the registration.
 - [ ] **C9 legacy worktree + adopt** — `rm "$ROOT/.records/fix-auth.json"`, then
       `tb enter fix-auth … --json`
       Expect: exit 5, `"code": "RECORD_MISSING"`, hint names `treebox adopt`;
@@ -179,7 +192,7 @@ Prereq: `fix-auth` worktree from B1 exists.
 - [ ] **D2 json shape** — `tb list --repo "$REPO" --root "$ROOT" --json`
       Expect: exit 0; `worktrees[]` where each entry has `name`, `branch`,
       `unnamed`, `missing`, `path`, `base`, `isolation`, `harness`, `deps`
-      (`fresh|stale`), `env`.
+      (`fresh|stale`), `env`, `health` (`healthy`), `setup` (`done`).
 - [ ] **D3 empty root** — `tb list --repo "$REPO" --root "$SBX/empty" --json`
       Expect: exit 0; `"worktrees": []` (not an error).
 
@@ -304,8 +317,13 @@ one behind on purpose.
       Expect: exit 0 each; `--remove-volumes` reports `volumes_removed: true`;
       `--skip-container` reports `container: "skipped"` and leaves the container
       running (the `e2e-` name means `e2e_cleanup` still reaps it later); the
-      worktree dir is always removed. Container/image cleanup is best-effort —
-      `container: "failed"` is a warning, not a teardown failure.
+      worktree dir is removed. A cleanup step that fails is a failed teardown:
+      put a `docker` wrapper first on `PATH` that exits 1 for `rm` of the
+      `treebox-e2e-*` container. Expect exit 1, `TEARDOWN_INCOMPLETE`,
+      `complete: false`, `remaining` names the container; the worktree, its
+      record and `.containers/<name>/treebox-resources.json` stay. Without the
+      wrapper the same teardown exits 0 and leaves no container, image, volume,
+      manifest or record.
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 

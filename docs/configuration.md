@@ -75,7 +75,7 @@ Docker teardown ownership and missing-manifest behavior, see the
 | `env_file` | `.env`               | The secrets file copied into every new worktree; repo-relative unless absolute or `~`-prefixed. |
 | `firewall` | `false`              | Restrict container egress (docker isolation).              |
 | `template` | `default`            | Which operator template defines the sandbox.              |
-| `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. |
+| `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. They run in order; one that exits non-zero fails `create` / `enter` (`SETUP_FAILED`). |
 | `caches`   | *(standard env vars)* | Per-ecosystem shared cache locations treebox installs from and mounts. |
 
 ## Customizing the sandbox

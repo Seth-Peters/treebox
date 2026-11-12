@@ -17,13 +17,14 @@ Every `create` walks the same host-side pipeline, regardless of isolation mode:
 ```text
 fetch origin                 # required — a failure exits 4, loudly
   └─ resolve origin/<base>
-       └─ git worktree add   # .treebox/worktrees/<name>, on <name> (or treebox/<petname>)
-            └─ install pre-push guard     # treebox/* refs can't be pushed
-                 └─ copy submodules
-                      └─ copy .env
-                           └─ runner.setup      # deps, from the shared cache
-                                └─ record lockfile hash
-                                     └─ hand off to the runner
+       └─ write the host-owned record   # policy, setup pending
+            └─ git worktree add   # .treebox/worktrees/<name>, on <name> (or treebox/<petname>)
+                 └─ install pre-push guard     # treebox/* refs can't be pushed
+                      └─ copy submodules
+                           └─ copy .env
+                                └─ runner.setup      # deps, from the shared cache
+                                     └─ record the setup result (done + lockfile hash, or failed)
+                                          └─ hand off to the runner
 ```
 
 The runner — picked with `--isolation` — only decides **where** the last two
@@ -73,20 +74,64 @@ human escape hatch.
 stale refs. `--no-fetch` is the only escape, and it's explicit.
 
 After that, staleness is *tracked*: treebox hashes the ecosystem's manifest
-files (lockfiles) at setup time and stores the hash in the worktree's private
-git dir (`.git/worktrees/<id>/`). That state never appears in `git status`,
-is pruned together with the worktree, and is what lets `enter` re-sync
-dependencies only when they actually changed — and `list` show `fresh` /
-`stale` at a glance. It also records whether setup ever completed: `enter`
-finishes an interrupted setup instead of skipping it as unchanged.
+files (lockfiles) when setup finishes and stores the hash, with the setup
+result, in the [host-owned record](#the-host-owned-record). That is what lets
+`enter` re-sync dependencies only when they actually changed, and `list` show
+`fresh` / `stale` at a glance. The record also says whether setup finished:
+`enter` finishes an interrupted or failed setup instead of skipping it as
+unchanged.
 
-That private state holds only *observations* (the lockfile hash and whether
-setup completed). It is sandbox-writable, because the Docker runner mounts the
-git common directory, so it never decides policy and never authorizes
-destructive host cleanup. treebox reads and writes it without following links:
-a symlink planted at the state file reads as "no state", and a write replaces
-the link instead of writing through it. A forged observation can at most make
-`enter` re-run setup under the recorded policy.
+The setup result is host-owned on purpose. The worktree's private git dir
+(`.git/worktrees/<id>/`) is sandbox-writable, because the Docker runner mounts
+the git common directory; a sandboxed agent that could write "setup done" there
+could make treebox skip its setup forever or report stale dependencies as
+fresh. treebox therefore reads nothing from that directory for any decision.
+The `treebox-state.json` file older versions wrote there is ignored, and is
+pruned with the worktree as before.
+
+## Lifecycle: setup and cleanup
+
+Two small models decide what `create`, `enter`, `list` and `teardown` do. Each
+lives in one place (`src/treebox/lifecycle.py`); the commands derive their
+decisions from it.
+
+**Setup.** The record holds the result of the last setup attempt:
+
+| State | Meaning | Recovery |
+| ----- | ------- | -------- |
+| `pending` | Setup started and did not finish (interrupted), or no result was recorded (a version 1 record, or an adopted worktree). | `enter`, or the same `create`, runs setup again. |
+| `failed` | A setup step exited non-zero. The record keeps the step and its exit status; its output is in `<worktree-parent>/.logs/<name>.setup.log`. | `enter`, or the same `create`, runs setup again. |
+| `done` | Setup finished, against the recorded lockfile hash. | `enter` runs setup again only when the lockfile hash changed. |
+
+Transitions: `create` writes `pending` before the worktree exists, then `done`
+or `failed`. `enter` moves `pending` or `failed` (or `done` with a changed
+lockfile hash) to `pending`, runs setup, then records `done` or `failed`.
+`adopt` records `pending`. A failed setup is a failed command (`SETUP_FAILED`,
+exit `1`); an interrupted one stays `pending`. `list` reports `deps: fresh` or
+`stale` only from `done`.
+
+**Cleanup.** `teardown` removes one worktree's resources in a fixed order:
+
+1. Runner resources: container, image, volumes (with `--remove-volumes`), and
+   the sandbox files that hold the resource manifest.
+2. The worktree: its directory and its git registration.
+3. Ownership: the host-owned record and the setup log.
+
+A step runs only when every earlier step finished. Each resource a step could
+not remove is named in `remaining`. While anything remains, the worktree, its
+record and the resource manifest are kept, and the teardown fails
+(`TEARDOWN_INCOMPLETE`, exit `1`); the same command retries, because nothing
+that names the remaining resources was deleted. Before any step, under the
+worktree lock, teardown checks again for uncommitted changes and for a git
+lock; git's own refusal to remove a worktree is final, with no fallback that
+deletes it anyway.
+
+**Health** is classified once, for every command: `healthy`,
+`directory_missing`, `invalid_linkage` (the `.git` pointer is missing or
+leads elsewhere, so git inside the directory would act on the main checkout),
+`unregistered`, or `unreadable_state` (record missing or invalid). See
+[`list --json`](usage.md#scripting-against-treebox) for how the older `missing`
+field maps to it.
 
 ### The host-owned record
 
@@ -111,9 +156,9 @@ override. `teardown` removes the record with the worktree.
 
 A sandboxed agent therefore cannot choose host execution, drop its firewall, or
 point its next sandbox at a template it wrote: none of that is in files it can
-reach. A resumed `create` (an earlier run died before setup finished) must
-restate the recorded policy, so a forged "setup not finished" flag cannot turn a
-plain `create NAME` into a policy change (`RECORD_CONFLICT`).
+reach. A resumed `create` (an earlier setup did not finish) must restate the
+recorded policy, so a resume can never turn a plain `create NAME` into a policy
+change (`RECORD_CONFLICT`).
 
 A missing or invalid record is a classified error with a recovery path
 (`RECORD_MISSING` / `RECORD_INVALID`, exit `5`), never a fallback to the config
@@ -156,9 +201,9 @@ cargo** — and drives its cache-backed install. Installs hardlink out of shared
 host caches (`~/.cache/uv`, the pnpm store, …) that are reused across
 worktrees *and* mounted into containers. A tenth worktree costs seconds, not a
 re-download. `--cold` bypasses the caches when you want a from-source build.
-In host isolation, setup is a best-effort warm start: missing tools or failed
-auto/custom setup steps warn and the agent still launches. Docker isolation's
-`postCreate` remains part of sandbox setup and fails loudly.
+A package manager that is not installed is skipped with a note. A setup step
+that fails - in host isolation or in the sandbox - fails the command
+(`SETUP_FAILED`); see [the setup model](#lifecycle-setup-and-cleanup).
 
 ## The sandbox config lives outside the box
 
