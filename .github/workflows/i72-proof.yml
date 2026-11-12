@@ -37,8 +37,16 @@ jobs:
           echo ".Size: $(docker image inspect i72-after:latest --format '{{.Size}}')"
           docker history --format '{{.Size}}\t{{.CreatedBy}}' i72-after:latest | awk -F'\t' '$1 != "0B"' | cut -c1-100
 
+      - name: Chromium sandbox without host change (expected to fail on Ubuntu 24.04)
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          docker run --rm i72-after:latest bash -c 'cd /tmp && timeout 60 playwright-cli open https://example.com 2>&1 | grep -m1 -E "Page Title|No usable sandbox"' || true
+
       - name: In-container checks
         run: |
+          # Ubuntu 23.10+ blocks unprivileged user namespaces, which Chromium's
+          # sandbox needs; this is a host setting, the same for any image.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           mkdir -p out && chmod 777 out
           docker run --rm -v "$PWD/.github/i72-check.sh:/check.sh:ro" -v "$PWD/out:/out" i72-after:latest bash /check.sh
 
@@ -65,3 +73,20 @@ jobs:
           docker exec "$c" sh -c 'claude --version && codex --version && ls -la .venv/bin/python'
           tb list --json --repo "$REPO" --root "$ROOT"
           tb teardown i72-plain i72-fw --force --repo "$REPO" --root "$ROOT" || true
+
+  # The #70 image (the base of this branch) on the same Ubuntu host, to show
+  # that the Chromium sandbox failure without the sysctl is not new.
+  baseline-sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Build the #70 image
+        run: |
+          mkdir ctx && git archive 613a214 src/treebox/assets/container | tar -x -C ctx
+          cd ctx/src/treebox/assets/container
+          docker build -q -t i72-before:latest --build-arg TZ=UTC --build-arg USER_UID="$(id -u)" --build-arg USER_GID="$(id -g)" .
+      - name: Chromium sandbox without host change
+        run: |
+          docker run --rm i72-before:latest bash -c 'readlink -f /opt/google/chrome/chrome; cd /tmp && timeout 60 playwright-cli open https://example.com 2>&1 | grep -m1 -E "Page Title|No usable sandbox"' || true
