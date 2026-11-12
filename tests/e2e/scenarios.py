@@ -190,7 +190,14 @@ def a3(ctx: Ctx) -> None:
 def a4(ctx: Ctx) -> None:
     run = ctx.tb("doctor", "--repo", str(ctx.repo), "--isolation", "docker", "--json")
     d = ctx.json_out(run) or {}
-    engine = subprocess.run(["docker", "info"], capture_output=True, env=ctx.env).returncode == 0
+    docker = shutil.which("docker", path=ctx.env["PATH"])
+    engine = (
+        bool(docker)
+        and subprocess.run(
+            [docker or "docker", "info"], capture_output=True, env=ctx.env
+        ).returncode
+        == 0
+    )
     if engine:
         ctx.exit_is(run, 0)
         ctx.eq(d.get("ok"), True, "ok with a reachable engine")
