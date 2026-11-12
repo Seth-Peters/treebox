@@ -1,0 +1,67 @@
+name: i72 proof (temporary)
+
+# Temporary proof for issue #72: build the bundled sandbox image from a clean
+# cache on a real amd64 and arm64 engine, exercise it, and run treebox create
+# and enter with docker isolation. Removed again before the PR is merged.
+
+on:
+  push:
+    branches: [build/issue-72-slim-sandbox-image]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Engine
+        run: docker version --format '{{.Server.Version}} {{.Server.Arch}}'; uname -m; df -h /
+
+      - name: Clean-cache build
+        working-directory: src/treebox/assets/container
+        run: |
+          start=$(date +%s)
+          docker build --no-cache --progress=plain -t i72-after:latest -f Dockerfile \
+            --build-arg TZ=UTC --build-arg USER_UID="$(id -u)" --build-arg USER_GID="$(id -g)" .
+          echo "build seconds: $(( $(date +%s) - start ))"
+          docker images i72-after
+          echo ".Size: $(docker image inspect i72-after:latest --format '{{.Size}}')"
+          docker history --format '{{.Size}}\t{{.CreatedBy}}' i72-after:latest | awk -F'\t' '$1 != "0B"' | cut -c1-100
+
+      - name: In-container checks
+        run: |
+          mkdir -p out && chmod 777 out
+          docker run --rm -v "$PWD/.github/i72-check.sh:/check.sh:ro" -v "$PWD/out:/out" i72-after:latest bash /check.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-${{ matrix.runner }}
+          path: out/*.png
+
+      - name: treebox create and enter (docker, with and without --firewall)
+        shell: bash
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          source .claude/skills/treebox-e2e/fixture.sh
+          set -x
+          tb create i72-plain --isolation docker --no-firewall --print --repo "$REPO" --root "$ROOT"
+          tb enter i72-plain --print --repo "$REPO" --root "$ROOT"
+          tb create i72-fw --isolation docker --firewall --print --repo "$REPO" --root "$ROOT"
+          tb enter i72-fw --print --repo "$REPO" --root "$ROOT"
+          c=$(docker ps --format '{{.Names}}' | grep '^treebox-i72-fw-')
+          docker exec "$c" sh -c 'curl -sS --connect-timeout 5 https://example.com >/dev/null && echo "example.com reachable (BAD)" || echo "example.com blocked (expected)"'
+          docker exec "$c" sh -c 'curl -sS --connect-timeout 5 https://api.github.com/zen'
+          docker exec "$c" sh -c 'claude --version && codex --version && ls -la .venv/bin/python'
+          tb list --json --repo "$REPO" --root "$ROOT"
+          tb teardown i72-plain i72-fw --force --repo "$REPO" --root "$ROOT" || true
