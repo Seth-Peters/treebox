@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,11 +175,60 @@ def last_commit(worktree: str | Path) -> LastCommit:
         return LastCommit("", 0)
 
 
+# git takes the lock on a config file without waiting: a second writer fails at
+# once with this message instead of queueing (refs have a lock timeout; config
+# has none). Matched under LC_ALL=C so a translated git cannot hide it.
+_CONFIG_LOCK_MARK = "could not lock config file"
+# A config write holds its lock for microseconds, so a short retry outlasts any
+# live writer (an agent's `git push -u` or `git branch -m` in another worktree);
+# only a lock file a crashed git left behind survives all the attempts.
+_CONFIG_LOCK_ATTEMPTS = 6
+_CONFIG_LOCK_BACKOFF = 0.1
+
+
+def _c_locale() -> dict[str, str]:
+    return {**os.environ, "LC_ALL": "C", "LANGUAGE": "C"}
+
+
+def _config_lock_busy(exc: GitError) -> bool:
+    return _CONFIG_LOCK_MARK in str(exc)
+
+
+def _stale_config_lock(exc: GitError) -> GitError:
+    return GitError(
+        f"{exc}\nThe shared git config stayed locked across {_CONFIG_LOCK_ATTEMPTS} "
+        "attempts. If no git command is running in this repository, a crashed git "
+        "left a `config.lock` file in the git dir - remove it and retry."
+    )
+
+
 def enable_worktree_config(worktree: str | Path) -> None:
     """Turn on ``extensions.worktreeConfig`` so per-worktree config (and thus a
-    per-worktree ``core.hooksPath``) exists at all. Writes the shared config;
-    idempotent."""
-    _run(["-C", str(worktree), "config", "extensions.worktreeConfig", "true"])
+    per-worktree ``core.hooksPath``) exists at all.
+
+    This is a write to the *shared* config, so it happens once per repository,
+    not once per worktree: when the extension is already on there is nothing to
+    write and no lock to contend for. Callers hold ``locking.repo_lock``; the
+    retry covers writers treebox does not control.
+    """
+    probe = _spawn(
+        _git(["-C", str(worktree), "config", "--type=bool", "--get", "extensions.worktreeConfig"]),
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return
+    args = ["-C", str(worktree), "config", "extensions.worktreeConfig", "true"]
+    for attempt in range(1, _CONFIG_LOCK_ATTEMPTS + 1):
+        try:
+            _run(args, env=_c_locale())
+            return
+        except GitError as exc:
+            if not _config_lock_busy(exc):
+                raise
+            if attempt == _CONFIG_LOCK_ATTEMPTS:
+                raise _stale_config_lock(exc) from exc
+            time.sleep(_CONFIG_LOCK_BACKOFF * attempt)
 
 
 def set_worktree_hooks_path(worktree: str | Path, hooks_dir: str | Path) -> None:
@@ -605,13 +655,67 @@ def files_at_revision(
 
 
 def worktree_add(repo: str | Path, worktree: str | Path, plan: BranchPlan) -> None:
+    """Add the worktree for ``plan`` - all or nothing.
+
+    ``git worktree add -b`` is not atomic: it creates the branch, then writes
+    the branch's upstream section to the shared ``.git/config``, then builds
+    the worktree. If the config write loses git's try-once lock, git exits
+    non-zero having already created the branch - an orphan with no worktree
+    that makes a retried ``create`` fail with BRANCH_EXISTS. So a failed add
+    takes back the branch it created, and a busy config lock is retried.
+    """
     args = ["-C", str(repo), "worktree", "add"]
     # "--" so a flag-shaped path/ref is always parsed as an operand.
     if plan.kind == "local":
         args += ["--", str(worktree), plan.name]
+        created_at = None
     else:
         args += ["-b", plan.name, "--", str(worktree), plan.start_point or ""]
-    _run(args)
+        created_at = _commit_oid(repo, plan.start_point or "")
+    for attempt in range(1, _CONFIG_LOCK_ATTEMPTS + 1):
+        # Only a branch that was absent right before this attempt can be one
+        # the attempt created; anything already there is someone else's.
+        ours = created_at is not None and not local_branch_exists(repo, plan.name)
+        try:
+            _run(args, env=_c_locale())
+            return
+        except GitError as exc:
+            if ours:
+                _discard_branch_of_failed_add(repo, plan.name, worktree, created_at)
+            if not _config_lock_busy(exc):
+                raise
+            if attempt == _CONFIG_LOCK_ATTEMPTS:
+                raise _stale_config_lock(exc) from exc
+            time.sleep(_CONFIG_LOCK_BACKOFF * attempt)
+
+
+def _commit_oid(repo: str | Path, ref: str) -> str | None:
+    # --end-of-options: ``ref`` comes from the caller and may be flag-shaped.
+    args = ["-C", str(repo), "rev-parse", "--verify", "--quiet", "--end-of-options"]
+    try:
+        return _run([*args, f"{ref}^{{commit}}"]).strip() or None
+    except GitError:
+        return None
+
+
+def _discard_branch_of_failed_add(
+    repo: str | Path, branch: str, worktree: str | Path, created_at: str | None
+) -> None:
+    """Delete the branch a failed ``worktree add -b`` left behind.
+
+    Only the exact ref this call created: the worktree must not be registered
+    (nothing has the branch checked out) and the ref must still sit on the
+    commit it was created at - ``update-ref -d <ref> <old>`` refuses otherwise,
+    so a branch that already existed, or one that moved, is never touched.
+    Deliberately not ``branch -D``, which rewrites the config that just failed.
+    """
+    if created_at is None or worktree_registered(repo, str(worktree)):
+        return
+    _spawn(
+        _git(["-C", str(repo), "update-ref", "-d", f"refs/heads/{branch}", created_at]),
+        capture_output=True,
+        text=True,
+    )
 
 
 def worktree_prune(repo: str | Path) -> None:
