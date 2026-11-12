@@ -53,6 +53,18 @@ test against a throwaway local remote:
 ./scripts/validate.sh
 ```
 
+For changes to the runners or the sandbox assets, also run the end-to-end
+scenarios. One command drives every scenario through the real CLI (and, when
+Docker is reachable, the real engine, with an offline template and a stub
+agent: no real agent ever launches) and writes an evidence bundle outside the
+repository. The `E2E evidence` workflow runs the same command on such pull
+requests and uploads the bundle; link that run in your PR. See the
+`treebox-e2e` skill (`.claude/skills/treebox-e2e/SKILL.md`).
+
+```bash
+uv run python tests/e2e/run.py evidence --out "$TMPDIR/treebox-evidence"
+```
+
 For behavior-preserving refactors, `scripts/golden-diff.sh` is the focused
 snapshot-only gate. Refresh snapshots only after you've deliberately accepted a
 behavior change.
