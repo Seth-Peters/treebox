@@ -556,3 +556,5 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
+| `COPY_FAILED` | `1` | `template init` cannot copy the template into place (an I/O or permission error under `$TREEBOX_HOME/templates`). `error.path` names the destination. |
+| `OVERWRITE_FAILED` | `1` | `template init --force` cannot remove the existing template it replaces (an I/O or permission error). `error.path` names that template. |
