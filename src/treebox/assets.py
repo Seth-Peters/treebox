@@ -16,6 +16,10 @@ one per run with ``--template``. Resolution order for ``name``:
 A named template that resolves to none of these is an error, not a silent
 fallback to the default: asking for ``--template hardened`` and quietly getting
 the stock box would defeat the point.
+
+A name is an identifier, never a path (``models.is_valid_template_name``): an
+absolute path or a ``..`` segment would let the name escape the operator-owned
+locations above, so ``template_dir`` refuses it with ``TemplateNameError``.
 """
 
 from __future__ import annotations
@@ -30,9 +34,22 @@ from pathlib import Path
 from typing import Any
 
 from .config import treebox_home
-from .models import expand_user
+from .models import expand_user, is_valid_template_name
 
 DEFAULT_TEMPLATE = "default"
+
+
+class TemplateNameError(ValueError):
+    """A template name that is not an identifier (a path, ``..``, or a
+    character outside ``models.TEMPLATE_NAME_RE``). Typed so the CLI
+    classifies it as a usage error on every path."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"Invalid template name '{name}'. A template name is one identifier "
+            "(letters, digits, '.', '_', '-'), never a path."
+        )
+        self.name = name
 
 
 class TemplateNotFoundError(RuntimeError):
@@ -118,6 +135,8 @@ def template_dir(name: str = DEFAULT_TEMPLATE) -> Path:
 
     Never reads from the target repo — see the module docstring for why.
     """
+    if not is_valid_template_name(name):
+        raise TemplateNameError(name)
     explicit = os.environ.get("TREEBOX_TEMPLATE_DIR")
     if explicit:
         return expand_user(explicit)
@@ -213,5 +232,8 @@ def available_templates() -> list[str]:
     names = {DEFAULT_TEMPLATE}
     root = user_templates_root()
     if root.is_dir():
-        names.update(p.name for p in root.iterdir() if p.is_dir())
+        # Only identifiers are selectable, so only they are listed.
+        names.update(
+            p.name for p in root.iterdir() if p.is_dir() and is_valid_template_name(p.name)
+        )
     return sorted(names)

@@ -12,6 +12,7 @@ porcelain discipline, removing/renaming a ``--json`` field means bumping
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -20,7 +21,7 @@ import pytest
 import typer.main
 from typer.testing import CliRunner
 
-from treebox import locking, state
+from treebox import locking, record
 from treebox.cli import (
     EXIT_CONFLICT,
     EXIT_ERROR,
@@ -111,6 +112,12 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
         | _VERBOSITY
         | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"},
         ["ref", "args"],
+    ),
+    "adopt": (
+        {"--repo", "--root", "--json", "--quiet", "-q"}
+        | {"--isolation", "--harness", "-H", "--firewall", "--no-firewall"}
+        | {"--template", "--base", "--force"},
+        ["ref"],
     ),
     "list": (_COMMON_LIST, []),
     "teardown": (_TEARDOWN_OPTS, ["refs"]),
@@ -311,10 +318,13 @@ def test_exit_and_error_code_matrix(
     assert _run(["create", "fix-auth", *r, "--print"]).exit_code == 0
     assert _run(["create", "fix-authz", *r, "--print"]).exit_code == 0
     (Path(root) / "fix-auth" / "dirty.txt").write_text("x")
-    st = state.load(Path(root) / "fix-authz")
-    assert st is not None
-    st.isolation = "bogus"
-    state.save(Path(root) / "fix-authz", st)
+    authz = Path(root) / "fix-authz"
+    record.save(dataclasses.replace(record.load(authz), isolation="bogus"))
+    assert _run(["create", "legacy", *r, "--print"]).exit_code == 0
+    record.remove(Path(root) / "legacy")  # a worktree from before host-owned records
+    assert _run(["create", "moved", *r, "--print"]).exit_code == 0
+    moved = record.record_path(Path(root) / "moved")
+    moved.write_text(moved.read_text().replace(str(Path(root) / "moved"), "/elsewhere/moved"))
     subprocess.run(["git", "-C", str(repo), "branch", "spare"], check=True)
 
     matrix: list[tuple[list[str], int, str]] = [
@@ -339,6 +349,12 @@ def test_exit_and_error_code_matrix(
             "ISOLATION_MISMATCH",
         ),
         (["create", "--isolation", "nope", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
+        (["create", "--template", "/etc", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
+        (["enter", "--template", "../x", "taken", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
+        (["enter", "legacy", *r, "--json"], EXIT_CONFLICT, "RECORD_MISSING"),
+        (["enter", "moved", *r, "--json"], EXIT_CONFLICT, "RECORD_INVALID"),
+        (["teardown", "legacy", "--force", *r, "--json"], EXIT_CONFLICT, "RECORD_MISSING"),
+        (["adopt", "taken", "--isolation", "host", *r, "--json"], EXIT_CONFLICT, "RECORD_EXISTS"),
     ]
     for args, want_exit, want_code in matrix:
         res = _run(args)

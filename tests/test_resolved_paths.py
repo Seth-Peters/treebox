@@ -1,5 +1,6 @@
 """A resolved worktree path must remain the identity through every operation."""
 
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from treebox import locking, state
+from treebox import locking, record, state
 from treebox.cli import app
 
 
@@ -168,18 +169,19 @@ def test_nested_runner_and_state_use_selected_path(
     from treebox.runners.host import HostRunner
 
     direct, nested = nested_worktrees
-    selected = state.load(nested)
-    assert selected is not None
-    selected.harness = "codex"
-    selected.lockfile_hash = "stale"
-    state.save(nested, selected)
+    record.save(dataclasses.replace(record.load(nested), harness="codex"))
+    state.save(nested, state.WorktreeState(lockfile_hash="stale", provisioned=True))
     before = state.load(direct)
+    before_record = record.load(direct)
     result = _run(["enter", "nested-branch", "--repo", str(repo), "--root", root, "--json"])
     assert result.exit_code == 0, result.output
     assert "codex" in json.loads(result.stdout)["entry_command"][-1]
     after = state.load(nested)
-    assert after is not None and after.harness == "codex" and after.lockfile_hash != "stale"
+    assert after is not None and after.lockfile_hash != "stale"
+    assert record.load(nested).harness == "codex"
     assert state.load(direct) == before
+    assert record.load(direct) == before_record
+    assert record.record_path(direct) != record.record_path(nested)
     actual_teardown = HostRunner.teardown
     observed = []
 

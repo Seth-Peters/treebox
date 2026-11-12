@@ -1,4 +1,4 @@
-"""Typer CLI: create / enter / list / teardown / template / doctor / version.
+"""Typer CLI: create / enter / adopt / list / teardown / template / doctor / version.
 
 Conventions: data to stdout, diagnostics to stderr. Successful non-launch paths
 exit 0; normal ``create`` / ``enter`` launch mode exits with the agent process's
@@ -33,6 +33,7 @@ from . import (
     locking,
     names,
     provision,
+    record,
     resolve,
     state,
     status,
@@ -51,6 +52,7 @@ from .models import (
     flatten_branch,
     is_placeholder,
     is_valid_name,
+    is_valid_template_name,
     path_is_under,
     placeholder_branch,
     same_path,
@@ -177,82 +179,80 @@ def _resolve_config(
     return cfg
 
 
-def _reconcile_with_state(
+def _reconcile_with_record(
     reporter: Reporter,
     cfg: Config,
-    st: state.WorktreeState | None,
+    rec: record.WorktreeRecord,
     *,
     isolation: str | None,
     harness: str | None = None,
     template: str | None = None,
-    honor_firewall: bool = False,
     json_out: bool = False,
 ) -> Config:
-    """Fold a worktree's recorded creation-time choices into the session config.
+    """Fold a worktree's host-owned record (its creation policy) into the
+    session config.
 
-    One precedence policy: a recorded value describes the worktree that
-    actually exists, so it beats the config default. What an explicit flag
-    means differs per field:
+    The record describes the worktree that actually exists, so it beats the
+    config default. What an explicit flag means differs per field:
 
-    - ``isolation``: the sandbox/no-sandbox decision is fixed at create time —
-      falling back to the config default would silently enter a
-      docker-sandboxed worktree on the host (or leak its container on
-      teardown). An unknown recorded mode (corrupt or hand-edited state) and
-      an explicit ``--isolation`` that disagrees with the recorded one are
-      both conflicts, never overrides.
-    - ``firewall`` (``honor_firewall`` callers, i.e. ``enter``): the recorded
-      choice simply wins — capabilities are fixed on the created container,
-      so re-resolving the config default would make ``create --no-firewall``
-      (under a ``firewall=true`` config) hard-error against its own
-      container, and there is no ``enter`` flag to reconcile. ``teardown``
-      leaves the config default in place, as it always has.
-    - ``harness``: a known recorded value wins over the config default, so
-      ``create -H codex`` + ``enter`` launches codex, not the session
-      default — but an explicit ``--harness`` stays a legitimate per-session
-      override, and an unrecorded/unknown value falls back to the default.
-    - ``template``: the template decides the container's user, mounts, and
-      per-workspace volume names, so the recorded choice wins (a config
-      default here would regenerate ``container.json`` from the wrong
-      template — docker exec as the wrong user → unauthenticated agent — and
-      derive the wrong volume names on ``--remove-volumes``). An explicit
-      ``--template`` stays a legitimate per-session override; unrecorded
-      (None) falls back to the config default.
+    - ``isolation``: the sandbox/no-sandbox decision is fixed at create time.
+      An unknown recorded mode and an explicit ``--isolation`` that disagrees
+      with the recorded one are both conflicts, never overrides.
+    - ``firewall``: the recorded choice wins - capabilities are fixed on the
+      created container, and there is no ``enter`` flag to reconcile.
+    - ``harness``: a known recorded value wins over the config default, but an
+      explicit ``--harness`` stays a legitimate per-session override (an
+      unknown recorded value falls back to the default).
+    - ``template``: the template decides the container's user and mounts, so
+      the recorded choice wins over the config default; an explicit
+      ``--template`` stays a legitimate per-session operator override.
 
     This is also where recorded/boundary ``str`` names are final: callers
     resolve ``Harness``/runner objects from the returned config, once.
     """
-    recorded = st.isolation if st else ""
-    if recorded and recorded not in VALID_ISOLATION:
+    if rec.isolation not in VALID_ISOLATION:
         raise _die(
             reporter,
-            f"Worktree was provisioned with unknown isolation mode '{recorded}'.",
+            f"Worktree was provisioned with unknown isolation mode '{rec.isolation}'.",
             code=EXIT_CONFLICT,
             error_code="UNKNOWN_ISOLATION",
-            hint="Its recorded isolation mode is unknown (corrupt or hand-edited state). "
-            "Remove it manually (git worktree remove; docker rm any leftover container) "
-            "and re-create it.",
+            hint="Its recorded isolation mode is unknown (a record from another treebox "
+            "version, or hand-edited). Restate the policy with `treebox adopt "
+            f"{rec.worktree.name} --force --isolation <mode>`, or remove it manually "
+            "(git worktree remove; docker rm any leftover container) and re-create it.",
+            path=str(record.record_path(rec.worktree)),
             json_out=json_out,
         )
-    if recorded and isolation is not None and isolation != recorded:
+    if isolation is not None and isolation != rec.isolation:
         raise _die(
             reporter,
-            f"Worktree was provisioned with '{recorded}' isolation, "
+            f"Worktree was provisioned with '{rec.isolation}' isolation, "
             f"but --isolation {isolation} was given.",
             code=EXIT_CONFLICT,
             error_code="ISOLATION_MISMATCH",
-            hint=f"Drop --isolation to use the recorded '{recorded}' mode, or tear "
+            hint=f"Drop --isolation to use the recorded '{rec.isolation}' mode, or tear "
             "down and re-create the worktree with the new one.",
             json_out=json_out,
         )
-    if recorded and isolation is None:
-        cfg = cfg.with_overrides(isolation=recorded)
-    if honor_firewall and st is not None:
-        cfg = cfg.with_overrides(firewall=st.firewall)
-    if harness is None and st and st.harness in VALID_HARNESSES:
-        cfg = cfg.with_overrides(harness=st.harness)
-    if template is None and st and st.template:
-        cfg = cfg.with_overrides(template=st.template)
+    cfg = cfg.with_overrides(isolation=rec.isolation, firewall=rec.firewall)
+    if harness is None and rec.harness in VALID_HARNESSES:
+        cfg = cfg.with_overrides(harness=rec.harness)
+    if template is None:
+        cfg = cfg.with_overrides(template=rec.template)
     return cfg
+
+
+def _record_hint(exc: record.RecordError) -> str:
+    """The recovery path for a missing or invalid host-owned record. Never a
+    fallback: the operator restates the policy (``adopt``) or tears down."""
+    name = exc.worktree.name
+    force = " --force" if isinstance(exc, record.RecordInvalidError) else ""
+    return (
+        f"Restate how it was created: treebox adopt {name}{force} --isolation "
+        "<host|docker> [--firewall] [--template <name>] - or tear it down: "
+        f"treebox teardown {name} --isolation <host|docker>. Its sandbox-writable "
+        "state is never trusted for this."
+    )
 
 
 def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
@@ -383,6 +383,18 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_PERMISSION, "FETCH_FAILED", hint)
     if isinstance(exc, provision.SlugConflictError):
         return _ErrorInfo(EXIT_CONFLICT, "SLUG_CONFLICT", exc.hint)
+    if isinstance(exc, record.RecordMissingError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_MISSING", _record_hint(exc))
+    if isinstance(exc, record.RecordInvalidError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_INVALID", _record_hint(exc))
+    if isinstance(exc, provision.RecordConflictError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_CONFLICT", exc.hint)
+    if isinstance(exc, provision.RecordExistsError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_EXISTS", exc.hint)
+    if isinstance(exc, assets.TemplateNameError):
+        return _ErrorInfo(
+            EXIT_USAGE, "INVALID_CONFIG", "Pass a template name, e.g. --template default."
+        )
     if isinstance(exc, provision.BranchInUseError):
         return _ErrorInfo(EXIT_CONFLICT, "BRANCH_IN_USE", exc.hint)
     if isinstance(exc, provision.BranchConflictError):
@@ -425,7 +437,9 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         code=code,
         error_code=error_code,
         hint=hint,
-        path=str(exc.path) if isinstance(exc, provision.ProvisionError) and exc.path else None,
+        path=str(exc.path)
+        if isinstance(exc, (provision.ProvisionError, record.RecordError)) and exc.path
+        else None,
         json_out=json_out,
     )
 
@@ -763,15 +777,20 @@ def enter(
         raise _handle(reporter, exc, json_out=json_out) from exc
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
-    st = state.load(cand.path)
-    cfg = _reconcile_with_state(
+    # The creation policy comes only from the host-owned record. A missing or
+    # invalid one is a classified error with a recovery path, never a fallback
+    # to the config default (or to the worktree's sandbox-writable state).
+    try:
+        rec = record.load(Path(cand.path))
+    except record.RecordError as exc:
+        raise _handle(reporter, exc, json_out=json_out) from exc
+    cfg = _reconcile_with_record(
         reporter,
         cfg,
-        st,
+        rec,
         isolation=isolation,
         harness=harness,
         template=template,
-        honor_firewall=True,
         json_out=json_out,
     )
     # Names are final after reconciliation: resolve the objects once.
@@ -789,6 +808,7 @@ def enter(
             run,
             repo=repo_path,
             path=Path(cand.path),
+            base=rec.base,
             harness=agent,
             cold=cold,
             args=args or [],
@@ -858,6 +878,105 @@ def _run_session(
     raise typer.Exit(code)
 
 
+# --- adopt -------------------------------------------------------------------
+
+
+@app.command()
+def adopt(
+    ref: str = typer.Argument(..., help="Worktree name, branch, or a unique substring of either."),
+    isolation: str = typer.Option(
+        ...,
+        "--isolation",
+        help=f"How the worktree was created: {'|'.join(VALID_ISOLATION)}. Required: "
+        "never guessed from config or from the worktree's own files.",
+    ),
+    repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
+    root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
+    harness: str | None = typer.Option(
+        None, "--harness", "-H", help=f"Agent harness to record: {'|'.join(VALID_HARNESSES)}."
+    ),
+    firewall: bool | None = typer.Option(
+        None,
+        "--firewall/--no-firewall",
+        help="Record the container firewall choice (docker isolation). "
+        "Unset: the config default applies.",
+    ),
+    template: str | None = typer.Option(
+        None, "--template", help="Operator-owned sandbox template name to record."
+    ),
+    base: str | None = typer.Option(None, "--base", help="Base branch to record."),
+    force: bool = typer.Option(
+        False, "--force", help="Replace an existing (or invalid) record with these settings."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Print a machine-readable JSON result."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
+) -> None:
+    """Record the creation policy of an existing worktree that has no host-owned record.
+
+    The migration step for worktrees made by an older treebox. You state how
+    the worktree was created; treebox never promotes the worktree's own
+    (sandbox-writable) files to policy. Options you omit take the config
+    default. After this, `enter` and `teardown` work as usual.
+    """
+    reporter = Reporter(quiet=quiet, silent=json_out)
+    cfg = _resolve_config(
+        reporter,
+        isolation=isolation,
+        harness=harness,
+        base=base,
+        root=root,
+        firewall=firewall,
+        template=template,
+        json_out=json_out,
+    )
+    repo_path = _repo_root(reporter, repo, json_out=json_out)
+    try:
+        cand = resolve.resolve_ref(repo_path, cfg.root, ref)
+        if cfg.isolation == "docker":
+            # Same early check as create: a typo must not become the policy.
+            assets.load_template_json(cfg.template, assets.CONFIG_FILE)
+            if cfg.firewall:
+                assets.load_template_json(cfg.template, assets.FIREWALL_FILE)
+        path = Path(cand.path)
+        policy = record.WorktreeRecord(
+            worktree=path,
+            base=cfg.base,
+            isolation=cfg.isolation,
+            harness=cfg.harness,
+            firewall=cfg.firewall,
+            template=cfg.template,
+        )
+        with locking.worktree_lock(path):
+            provision.adopt(repo_path, path, policy, force=force)
+    except _PROVISION_ERRORS as exc:
+        raise _handle(reporter, exc, json_out=json_out) from exc
+
+    if json_out:
+        _emit_json(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "name": cand.name,
+                "worktree_path": str(path),
+                "record": {
+                    "path": str(record.record_path(path)),
+                    "isolation": policy.isolation,
+                    "firewall": policy.firewall,
+                    "template": policy.template,
+                    "harness": policy.harness,
+                    "base": policy.base,
+                },
+            }
+        )
+        return
+    reporter.heading("adopt", cand.name)
+    reporter.ok(
+        "record",
+        f"{policy.isolation} · firewall {'on' if policy.firewall else 'off'} · "
+        f"template {policy.template} · {policy.harness} · base {policy.base}",
+    )
+    reporter.hint(f"Enter it: treebox enter {cand.name}")
+
+
 # --- list --------------------------------------------------------------------
 
 
@@ -881,9 +1000,14 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         # must never be shelled into — that would crash list/teardown on a path
         # that isn't there. Surface it as `missing` so teardown can prune it.
         missing = rec.prunable or not wt_path.is_dir()
-        # Read through the main repo's registration so a missing worktree can
-        # still report its recorded creation-time choices. An absent, legacy,
-        # or unreadable state file remains honestly unknown.
+        # The policy columns come from the host-owned record; a legacy or
+        # invalid record shows as honestly unknown (""), never as a guess.
+        # Observations are read through the main repo's registration so a
+        # missing worktree still resolves them.
+        try:
+            policy: record.WorktreeRecord | None = record.load(wt_path)
+        except record.RecordError:
+            policy = None
         st = state.load_registered(repo_path, rec.path)
         deps: DepsFreshness
         if missing:
@@ -904,9 +1028,9 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
                 last_commit=subject,
                 commit_epoch=epoch,
                 path=rec.path,
-                base=st.base if st else "",
-                isolation=st.isolation if st else "",
-                harness=st.harness if st else "",
+                base=policy.base if policy else "",
+                isolation=policy.isolation if policy else "",
+                harness=policy.harness if policy else "",
                 deps=deps,
                 env="present" if env_present else "absent",
             )
@@ -1370,7 +1494,6 @@ def teardown(
                             reporter,
                             cfg,
                             cand,
-                            repo_path,
                             explicit=isolation,
                             remove_volumes=remove_volumes,
                             json_out=json_out,
@@ -1386,9 +1509,7 @@ def teardown(
                         cand,
                         repo_path,
                         run=run,
-                        explicit_isolation=isolation,
                         delete_branch=cand.path in branch_delete,
-                        remove_volumes=remove_volumes,
                         force=force,
                         skip_container=skip_container,
                         json_out=json_out,
@@ -1448,37 +1569,39 @@ def _teardown_runner(
     reporter: Reporter,
     cfg: Config,
     cand: resolve.Candidate,
-    repo_path: str,
     *,
     explicit: str | None,
     remove_volumes: bool,
     json_out: bool,
-) -> Runner:
-    """Resolve one teardown target's runner from its recorded isolation mode.
+) -> Runner | None:
+    """Resolve one teardown target's runner from its host-owned record.
 
-    The record is read through the repo's own worktree registration
-    (`state.load_registered`), never through the worktree's ``.git`` pointer:
-    a corrupt tree (missing pointer, the documented teardown recovery path)
-    would make the pointer route resolve into the MAIN repo, read no state,
-    and silently fall back to the config default - tearing a docker worktree
-    down with the host runner and leaking its container while reporting
-    ``container: "cleaned"``.
+    The record is keyed by the registered path and lives outside the worktree,
+    so it survives a corrupt tree (missing ``.git`` pointer, the documented
+    teardown recovery path) and even a deleted worktree directory.
 
-    Called for the whole batch *before* any removal: the mismatch/unknown
-    conflicts `_reconcile_with_state` raises must abort an untouched batch
-    (all-or-nothing), never fire mid-loop after worktrees are already gone. An
-    unknown recorded isolation mode is a hard conflict here just as it is on
-    ``enter`` — ``--skip-container`` is the escape hatch for a tree treebox
-    can't drive. Reconciliation also recovers the created-time template, so
-    `_template_volumes` derives the right per-workspace volume names on
-    `--remove-volumes` (teardown has no `--template` flag; state is the only
-    source) — and folds the recorded harness too, which nothing in a teardown
-    reads today; only the firewall stays at the config default here (see
-    ``honor_firewall``). ``remove_volumes`` is handed to the factory: teardown
-    options and resource ownership are runner concerns, so the docker runner
-    reads its authoritative host-owned manifest outside the sandbox mount."""
-    st = state.load_registered(repo_path, cand.path)
-    cfg_run = _reconcile_with_state(reporter, cfg, st, isolation=explicit, json_out=json_out)
+    Called for the whole batch *before* any removal: the conflicts
+    `_reconcile_with_record` raises must abort an untouched batch
+    (all-or-nothing), never fire mid-loop after worktrees are already gone.
+    Without a usable record the config default is only a guess, so it is
+    never used: an explicit ``--isolation`` is the operator naming the mode;
+    otherwise a still-present worktree is a classified ``RECORD_MISSING`` /
+    ``RECORD_INVALID`` error, and a worktree whose directory is gone too
+    returns ``None`` (its container is skipped with a warning).
+    ``--skip-container`` is the escape hatch for a tree treebox can't drive.
+    ``remove_volumes`` is handed to the factory: teardown options and
+    resource ownership are runner concerns, so the docker runner reads its
+    authoritative host-owned manifest outside the sandbox mount."""
+    path = Path(cand.path)
+    try:
+        rec = record.load(path)
+    except record.RecordError as exc:
+        if explicit is not None:
+            return get_runner(cfg.with_overrides(isolation=explicit), remove_volumes=remove_volumes)
+        if isinstance(exc, record.RecordMissingError) and not path.is_dir():
+            return None
+        raise _handle(reporter, exc, json_out=json_out) from exc
+    cfg_run = _reconcile_with_record(reporter, cfg, rec, isolation=explicit, json_out=json_out)
     return get_runner(cfg_run, remove_volumes=remove_volumes)
 
 
@@ -1489,19 +1612,17 @@ def _teardown_one(
     repo_path: str,
     *,
     run: Runner | None,
-    explicit_isolation: str | None,
     delete_branch: bool,
-    remove_volumes: bool,
     force: bool,
     skip_container: bool,
     json_out: bool,
 ) -> TeardownRecord:
     """Tear down one resolved worktree; returns its --json record. ``run`` is
-    the batch-validated runner from ``_teardown_runner``, or ``None`` under
-    ``--skip-container`` (no container work, so no runner was resolved)."""
+    the batch-validated runner from ``_teardown_runner``: ``None`` under
+    ``--skip-container`` (no container work, so no runner was resolved) or
+    when neither the directory nor a record is left to name the mode."""
     wt = Worktree.at(repo_path, Path(cand.path), branch=cand.branch or "")
     exists = wt.path.is_dir()
-    st = state.load_registered(repo_path, wt.path)
 
     branch_name = (
         cand.branch
@@ -1514,19 +1635,15 @@ def _teardown_one(
     if skip_container:
         container = "skipped"
         reporter.note("container", "skipped")
-    elif not exists and st is None and explicit_isolation is None:
-        # The directory and its recorded state are both gone, so the isolation
-        # mode is unreadable and the config default is only a guess we won't
-        # act on.
+    elif run is None:
+        # The directory and its record are both gone, so the isolation mode
+        # is unreadable and the config default is only a guess we won't act on.
         container = "skipped"
         reporter.warn(
             "worktree directory is gone — recorded isolation mode unreadable; "
             "remove any leftover container manually"
         )
     else:
-        # run is None only under --skip-container, handled above; a real runner
-        # is always resolved when we reach an actual container teardown.
-        assert run is not None
         container = "skipped"
         try:
             # The runner was constructed with the batch's volume choice
@@ -1564,6 +1681,11 @@ def _teardown_one(
     else:
         git.worktree_prune(repo_path)
         reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
+
+    # The host-owned record goes last, with the worktree it describes: a
+    # failure above leaves it in place, so a retried teardown still knows
+    # the mode.
+    record.remove(wt.path)
 
     branch_deleted = False
     if delete_branch and branch_name:
@@ -1766,11 +1888,6 @@ template_app = typer.Typer(
 )
 app.add_typer(template_app, name="template")
 
-# A template name is a single path segment and a docker-image-tag fragment; keep
-# it to a conservative, filesystem-safe charset so `init` can't write outside
-# the templates root.
-_TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
 
 def _template_source(name: str) -> str:
     """Where ``template_dir(name)`` resolves from, for display: an explicit
@@ -1804,7 +1921,9 @@ def template_init(
     `treebox create <name> --isolation docker --template <name>`.
     """
     reporter = Reporter(silent=json_out)
-    if name in (".", "..") or not _TEMPLATE_NAME_RE.match(name):
+    # One identifier rule (models.is_valid_template_name) for init, path, and
+    # resolution, so `init` can never write outside the templates root.
+    if not is_valid_template_name(name):
         raise _die(
             reporter,
             f"Invalid template name '{name}'. Use letters, digits, '.', '_', or '-'.",
@@ -2013,6 +2132,8 @@ def template_path(
     reporter = Reporter()
     try:
         path = assets.template_dir(name)
+    except assets.TemplateNameError as exc:
+        raise _die(reporter, str(exc), code=EXIT_USAGE, error_code="INVALID_NAME") from exc
     except assets.TemplateNotFoundError as exc:
         raise _die(reporter, str(exc), code=EXIT_NOTFOUND, error_code="TEMPLATE_NOT_FOUND") from exc
     sys.stdout.write(f"{path}\n")
