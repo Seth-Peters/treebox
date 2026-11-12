@@ -73,6 +73,10 @@ Module map:
   CLI-facing `DestinationConflictError` (exit 5, `DESTINATION_CONFLICT`) and
   `SubmoduleCopyFailedError` (exit 1, `SUBMODULE_COPY_FAILED`). `cli.py`
   classifies `ProvisionError`s only and reads `error.path` off the base class.
+  `copy_submodules` follows the worktree branch's own `.gitmodules` (never
+  written): it copies only paths the main checkout also declares and has on
+  disk, and skips the rest with a note. No `git submodule update` runs, so the
+  copied content mirrors the main checkout.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
   hides its autonomous launch argv, host login dir, staged login files, and
   login advice behind a small method interface; `VALID_HARNESSES` and the

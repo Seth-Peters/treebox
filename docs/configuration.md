@@ -197,5 +197,6 @@ the branch commits `.env/`, or an agent created one - treebox leaves it
 untouched and skips the copy with a warning (`.env not copied: ... is a
 directory in this worktree`); `create` and `enter` still succeed, and
 `treebox list --json` reports `"env": "absent"` for that worktree. Rename or
-remove the directory on the branch to get the copy back. `.gitmodules` follows
-the same rule.
+remove the directory on the branch to get the copy back. Treebox never copies
+`.gitmodules`: the worktree keeps its branch's own file (see
+[submodule copies](usage.md#submodule-copies-and-recovery)).
