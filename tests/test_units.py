@@ -789,6 +789,37 @@ def test_docker_regenerates_config_each_run(tmp_path: Path, fake_common_dir):
     assert creds_marker.exists()  # bind-mounted creds dir spared
 
 
+def test_docker_renders_build_helpers_only_when_the_template_has_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
+):
+    """The bundled Dockerfile COPYs its build helpers from the build context,
+    so the rendered context carries them byte for byte. They are optional: a
+    template without them (scaffolded before they existed) still renders."""
+    import shutil
+
+    from treebox import assets
+
+    monkeypatch.setenv("TREEBOX_HOME", str(tmp_path / "treebox-home"))
+    monkeypatch.delenv("TREEBOX_TEMPLATE_DIR", raising=False)
+    bundled = assets.template_dir("default")
+    runner = DockerRunner(Config(isolation="docker"))
+    wt = _boxed_worktree(tmp_path)
+    runner._write_config(wt, cold=True)
+    for helper in assets.TEMPLATE_HELPER_FILES:
+        rendered = runner._config_dir(wt) / helper
+        assert rendered.read_bytes() == (bundled / helper).read_bytes()
+
+    tpl = tmp_path / "tpl"
+    shutil.copytree(bundled, tpl)
+    for helper in assets.TEMPLATE_HELPER_FILES:
+        (tpl / helper).unlink()
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tpl))
+    assert assets.missing_template_files(tpl) == []
+    runner._write_config(wt, cold=True)
+    for helper in assets.TEMPLATE_HELPER_FILES:
+        assert not (runner._config_dir(wt) / helper).exists()
+
+
 def test_docker_build_and_run_commands(tmp_path: Path, fake_common_dir):
     """The exact docker argv contract: build tags the deterministic (lowercase)
     slug from the config-dir context; run is detached with an init process, the
@@ -4020,10 +4051,9 @@ def test_bundled_dockerfile_pins_every_version_and_checksum():
     assert not re.search(r"\|\s*(ba)?sh\b", text)
     assert "latest" not in text
     # Downloads go through treebox-fetch (checksum + host-naming failure): only
-    # the helper's own body, a heredoc, calls curl, and nothing calls wget.
-    outside_heredocs = re.sub(r"<<'EOF'.*?^EOF$", "", text, flags=re.M | re.S)
-    assert not re.search(r"\b(curl|wget)\s+-", outside_heredocs)
-    assert outside_heredocs.count('treebox-fetch "https://') >= 6
+    # the helper itself calls curl, and nothing calls wget.
+    assert not re.search(r"\b(curl|wget)\s+-", text)
+    assert text.count('treebox-fetch "https://') >= 6
     # npm installs name an exact version for every package.
     for line in re.findall(r"npm install -g (.+?)(?:&&|$)", text, flags=re.M):
         for pkg in line.split():
@@ -4045,15 +4075,102 @@ def test_bundled_container_json_does_not_override_dockerfile_pins():
 
 
 def test_bundled_dockerfile_copies_only_rendered_template_files():
-    # The docker runner renders only TEMPLATE_FILES into the build context, so a
-    # COPY of any other file would build from `template init` output but fail
-    # from the rendered context.
+    # The docker runner renders only TEMPLATE_FILES and TEMPLATE_HELPER_FILES
+    # into the build context, so a COPY of any other file would build from
+    # `template init` output but fail from the rendered context.
     import treebox.assets as assets
 
     text, _ = _bundled_dockerfile_args()
-    sources = re.findall(r"^COPY (?!--chmod=\d+ <<)(?:--\S+ )*(\S+) ", text, flags=re.M)
+    sources = re.findall(r"^COPY (?:--\S+ )*(\S+) ", text, flags=re.M)
     assert sources
-    assert set(sources) <= set(assets.TEMPLATE_FILES)
+    assert set(sources) <= set(assets.TEMPLATE_FILES + assets.TEMPLATE_HELPER_FILES)
+    # Every helper the runner renders is one the bundled Dockerfile uses.
+    assert set(assets.TEMPLATE_HELPER_FILES) <= set(sources)
+
+
+# Flags Docker's legacy builder accepts, per instruction. Every other flag
+# (RUN --mount/--network/--security, COPY/ADD --chmod/--link/--parents/
+# --exclude, ADD --checksum/--keep-git-dir) needs BuildKit.
+_LEGACY_BUILDER_FLAGS = {
+    "FROM": {"platform"},
+    "COPY": {"from", "chown"},
+    "ADD": {"chown"},
+    "HEALTHCHECK": {"interval", "timeout", "start-period", "retries"},
+}
+# Build args that only BuildKit sets automatically.
+_BUILDKIT_AUTOMATIC_ARGS = re.compile(
+    r"\b(TARGET|BUILD)(PLATFORM|OS|ARCH|VARIANT)\b|\bBUILDKIT_\w+|\bBUILDX_\w+"
+)
+
+
+def _dockerfile_instructions(text: str) -> list[tuple[str, str]]:
+    """(INSTRUCTION, rest) for each instruction, with comment lines dropped
+    and backslash continuations joined, as the Dockerfile parser reads them."""
+    instructions: list[tuple[str, str]] = []
+    current = ""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        current += line.rstrip()
+        if current.endswith("\\"):
+            current = current[:-1] + " "
+            continue
+        if current.strip():
+            keyword, _, rest = current.strip().partition(" ")
+            instructions.append((keyword.upper(), rest.strip()))
+        current = ""
+    return instructions
+
+
+def _legacy_builder_violations(text: str) -> list[str]:
+    """What in Dockerfile ``text`` needs BuildKit: a parser directive, a
+    heredoc, a BuildKit-only flag, or a BuildKit-only automatic build arg."""
+    found = [
+        f"parser directive {line!r}"
+        for line in text.lstrip().splitlines()[:5]
+        if re.match(r"#\s*(syntax|check)\s*=", line, re.I)
+    ]
+    for keyword, rest in _dockerfile_instructions(text):
+        if "<<" in rest:
+            found.append(f"heredoc in {keyword} {rest[:60]}")
+        leading = re.match(r"(?:--\S+\s+)*", rest)
+        flags = set(re.findall(r"--([a-z-]+)", leading.group(0) if leading else ""))
+        extra = flags - _LEGACY_BUILDER_FLAGS.get(keyword, set())
+        if extra:
+            found.append(f"{keyword} --{', --'.join(sorted(extra))}")
+        if _BUILDKIT_AUTOMATIC_ARGS.search(rest):
+            found.append(f"BuildKit-only build arg in {keyword} {rest[:60]}")
+    return found
+
+
+def test_bundled_dockerfile_builds_with_the_legacy_builder():
+    # A host without the docker-buildx plugin (Debian/Ubuntu docker.io, many
+    # servers) builds with Docker's legacy builder, which a plain `docker build`
+    # and DOCKER_BUILDKIT=0 select. The bundled image must build there too, so
+    # its Dockerfile must not use BuildKit-only syntax.
+    text, _ = _bundled_dockerfile_args()
+    assert _dockerfile_instructions(text)[0][0] == "FROM"
+    assert _legacy_builder_violations(text) == []
+
+
+@pytest.mark.parametrize(
+    "construct",
+    [
+        "# syntax=docker/dockerfile:1\n",
+        "COPY --chmod=0755 post-create.sh /usr/local/bin/x\n",
+        "COPY --link post-create.sh /usr/local/bin/x\n",
+        "ADD --checksum=sha256:00 https://example.com/x /x\n",
+        "RUN --mount=type=cache,target=/root/.npm \\\n    npm ci\n",
+        "COPY <<'EOF' /usr/local/bin/x\n#!/bin/sh\nEOF\n",
+        "RUN <<EOF\necho hi\nEOF\n",
+        'RUN echo "$TARGETARCH"\n',
+    ],
+)
+def test_legacy_builder_guard_catches_buildkit_syntax(construct: str):
+    # The guard must fail on each construct it exists to keep out.
+    text, _ = _bundled_dockerfile_args()
+    bad = construct + text if construct.startswith("#") else text + construct
+    assert _legacy_builder_violations(bad)
 
 
 def test_template_init_refuses_overwrite_without_force(template_home: Path):

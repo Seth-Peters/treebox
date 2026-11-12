@@ -97,6 +97,7 @@ A template is a directory. Copy it out (below) and these become yours:
 | `container.json`                    | How the container runs — most edits touch only `postCreate` here. Schema below.   |
 | `post-create.sh`                    | The default setup script `postCreate` runs. Edit inline or point elsewhere.       |
 | `init-firewall.sh` · `allowed-domains.sh` | Egress rules, applied only when the firewall is on.                         |
+| `treebox-fetch` · `treebox-online`  | Build helpers the default `Dockerfile` copies in. Optional: a template needs them only if its `Dockerfile` copies them. |
 | `firewall.json`                     | Overrides merged onto `container.json` when the firewall is on.                    |
 
 ### 1. Scaffold a template
@@ -239,6 +240,12 @@ treebox: this build needs network access to nodejs.org.
 
 The egress firewall (`--firewall`) does not apply to the build: it only
 limits the running container.
+
+**Builders.** The bundled `Dockerfile` uses no BuildKit-only syntax (no
+heredocs, no `COPY --chmod`, no `RUN --mount`, no `# syntax=` line). So it
+builds with BuildKit and also with Docker's legacy builder, which is what
+`docker build` uses on a host without the buildx plugin (for example Debian or
+Ubuntu `docker.io` without `docker-buildx`) or with `DOCKER_BUILDKIT=0`.
 
 ## Environment variables
 

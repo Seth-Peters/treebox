@@ -559,6 +559,10 @@ class DockerRunner:
             if not src.is_file():
                 raise RuntimeError(f"{f} not found in template dir: {tpl}")
             shutil.copy(src, dc / f)
+        for f in assets.TEMPLATE_HELPER_FILES:
+            src = tpl / f
+            if src.is_file():
+                shutil.copy(src, dc / f)
         for script in ("post-create.sh", "init-firewall.sh"):
             p = dc / script
             if p.exists():
