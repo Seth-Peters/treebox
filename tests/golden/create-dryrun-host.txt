@@ -10,6 +10,7 @@
     isolation       host  →  claude
 
     $ git -C __ROOT__/repo fetch origin --quiet
+    # reserve port block 20000-20009 in __ROOT__/tbhome/ports.json (TREEBOX_PORT_BASE=20000, TREEBOX_PORT_COUNT=10; a dry run reserves nothing)
     $ git -C __ROOT__/repo worktree add -b golden-host __ROOT__/wts/golden-host origin/main
     # install pre-push guard: per-worktree core.hooksPath -> <private git dir>/treebox-hooks (treebox/* refs are un-pushable)
     $ cp .env __ROOT__/wts/golden-host/.env

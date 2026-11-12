@@ -73,7 +73,13 @@ def test_setup_print_json_enter_and_list_expose_the_same_identity(
     printed = _run(["create", "svc", "--repo", str(repo), "--root", root, "--print"])
     assert printed.exit_code == 0, printed.output
     wt_path = Path(root) / "svc"
-    expected = {"TREEBOX_NAME": "svc", "TREEBOX_ID": worktree_id(wt_path)}
+    expected = {
+        "TREEBOX_NAME": "svc",
+        "TREEBOX_ID": worktree_id(wt_path),
+        # The first block of the default range (an empty ledger).
+        "TREEBOX_PORT_BASE": "20000",
+        "TREEBOX_PORT_COUNT": "10",
+    }
     assert ID_RE.match(expected["TREEBOX_ID"])
 
     # Setup saw them.
@@ -91,12 +97,14 @@ def test_setup_print_json_enter_and_list_expose_the_same_identity(
         _run(["enter", "svc", "--repo", str(repo), "--root", root, "--json"]).stdout
     )
     assert entered["id"] == expected["TREEBOX_ID"]
+    assert (entered["port_base"], entered["port_count"]) == (20000, 10)
     assert _treebox_vars(_replay(entered["entry_command"])) == expected
 
-    # list --json reports the same id.
+    # list --json reports the same values.
     listed = json.loads(_run(["list", "--repo", str(repo), "--root", root, "--json"]).stdout)
     (row,) = listed["worktrees"]
     assert row["id"] == expected["TREEBOX_ID"]
+    assert (row["port_base"], row["port_count"]) == (20000, 10)
 
 
 def test_setup_rerun_by_enter_sees_the_same_identity(

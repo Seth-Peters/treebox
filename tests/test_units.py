@@ -2098,12 +2098,40 @@ def test_record_setup_result_roundtrips_and_v1_records_upgrade_to_pending(tmp_pa
 
     path = record.record_path(wt)
     data = json.loads(path.read_text())
-    del data["setup"]
+    del data["setup"], data["ports"]
     data["schemaVersion"] = 1
     path.write_text(json.dumps(data))
     upgraded = record.load(wt)
     assert upgraded.setup == lifecycle.SetupResult()  # pending
     assert upgraded.same_policy(_record_for(wt))
+
+
+def test_record_port_block_roundtrips_and_v2_records_upgrade_without_one(tmp_path):
+    """Version 3 keeps the copy of the worktree's port block; a version-2
+    record upgrades with none (the next enter reserves one). The block is not
+    policy: a resumed create never conflicts over it."""
+    import dataclasses
+    import json
+
+    from treebox import lifecycle, record
+    from treebox.models import PortBlock
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    rec = dataclasses.replace(_record_for(wt), ports=PortBlock(20010, 10))
+    record.save(rec)
+    assert record.load(wt) == rec
+    assert rec.same_policy(_record_for(wt))
+
+    path = record.record_path(wt)
+    data = json.loads(path.read_text())
+    del data["ports"]
+    data["schemaVersion"] = 2
+    data["setup"] = lifecycle.SetupResult.done("h").to_json()
+    path.write_text(json.dumps(data))
+    upgraded = record.load(wt)
+    assert upgraded.ports is None
+    assert upgraded.setup == lifecycle.SetupResult.done("h")
 
 
 def test_sandbox_written_state_file_is_never_read(tmp_path, monkeypatch):
@@ -2188,9 +2216,12 @@ def test_record_save_is_atomic(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     [
-        (lambda d: d.update(schemaVersion=3), "schemaVersion"),
+        (lambda d: d.update(schemaVersion=4), "schemaVersion"),
         (lambda d: d.update(schemaVersion=True), "schemaVersion"),
         (lambda d: d.update(schemaVersion=1), "unknown key"),  # v1 has no setup
+        (lambda d: d.update(schemaVersion=2), "unknown key"),  # v2 has no ports
+        (lambda d: d.update(ports={"base": 20000}), "ports"),
+        (lambda d: d.update(ports={"base": "1", "count": 10}), "ports"),
         (lambda d: d.pop("setup"), "missing key"),
         (lambda d: d.update(setup={"status": "done"}), "setup must be an object"),
         (lambda d: d["setup"].update(status="ready"), "setup.status"),

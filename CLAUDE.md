@@ -139,7 +139,21 @@ Module map:
   setup `pending`): a sandbox that could mark its own setup done could make
   treebox skip setup forever or report stale deps fresh, so nothing in the
   sandbox-writable git dir is read for any decision (the legacy
-  `treebox-state.json` there is ignored).
+  `treebox-state.json` there is ignored). Version 3 adds `ports`, the copy of
+  the worktree's port block (a version 2 record upgrades with none, and the
+  next `enter` reserves one).
+- **`ports.py`** is the machine-wide port-block allocator behind
+  `TREEBOX_PORT_BASE` / `TREEBOX_PORT_COUNT`. Its ledger
+  (`$TREEBOX_HOME/ports.json`, lock `ports.lock`) is the one source of truth
+  for which blocks are taken, across every repo and root; the record holds
+  only a copy. `reserve` (create, enter: ledger first, then the record copy)
+  and `release` (teardown, after the record is gone) run under
+  `locking.ports_lock`, a waiting lock taken after the worktree lock. A stale
+  entry (no directory, no git registration, no lock holder) is reclaimed by
+  the next allocation, so a crash between two writes neither leaks nor
+  double-allocates a block. The range and block size are user config only
+  (`[ports]`, `config.PortRange`); a full range is `PORTS_EXHAUSTED` (exit 5)
+  before anything is made.
 - **`lifecycle.py`** holds the two lifecycle models every command derives its
   decisions from: the **setup model** (`SetupResult`: `pending` / `failed` /
   `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,

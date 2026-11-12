@@ -35,8 +35,15 @@ setup (``setup``, see the setup model in ``lifecycle.py``): a sandbox that
 could mark its own setup done could make treebox skip setup forever or report
 stale dependencies as fresh, so that fact is host-owned too.
 
+Besides the setup result it keeps a copy of the worktree's port block
+(``ports``, see ``ports.py``): the ledger in the treebox home is the one source
+of truth for which blocks are taken; the record copy lets ``list`` and the
+entry commands read the block without the ledger lock.
+
 Versions: 1 (policy only) is upgraded on read with ``setup`` pending - nothing
-says setup finished, so the next ``enter`` runs it again; 2 adds ``setup``.
+says setup finished, so the next ``enter`` runs it again; 2 adds ``setup``;
+3 adds ``ports`` (a version 1 or 2 record upgrades with no block, and the next
+``enter`` reserves one).
 """
 
 from __future__ import annotations
@@ -51,9 +58,9 @@ from pathlib import Path
 from typing import Any
 
 from .lifecycle import SetupResult, setup_log_path
-from .models import is_valid_template_name, same_path
+from .models import PortBlock, is_valid_template_name, same_path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Sibling of the worktrees under one parent, like `.locks/` and `.containers/`.
 RECORD_DIR = ".records"
@@ -61,7 +68,8 @@ RECORD_DIR = ".records"
 _V1_KEYS = frozenset(
     {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template"}
 )
-_KEYS = _V1_KEYS | {"setup"}
+_V2_KEYS = _V1_KEYS | {"setup"}
+_KEYS = _V2_KEYS | {"ports"}
 
 
 @dataclass(frozen=True)
@@ -72,7 +80,9 @@ class WorktreeRecord:
     registries by the CLI, like every other boundary string); ``template`` is
     a template identifier (``models.is_valid_template_name``); ``firewall`` is
     always a real bool (``False`` for host worktrees). ``setup`` is not
-    policy: it is the result of the last setup attempt (``lifecycle.py``)."""
+    policy: it is the result of the last setup attempt (``lifecycle.py``). ``ports`` is
+    not policy either: the copy of this worktree's ledger entry (``ports.py``),
+    None until one is reserved."""
 
     worktree: Path
     base: str
@@ -81,10 +91,12 @@ class WorktreeRecord:
     firewall: bool
     template: str
     setup: SetupResult = dataclasses.field(default_factory=SetupResult)
+    ports: PortBlock | None = None
 
     def same_policy(self, other: WorktreeRecord) -> bool:
-        """Whether ``other`` states the same creation policy (setup aside)."""
-        return dataclasses.replace(self, setup=other.setup) == other
+        """Whether ``other`` states the same creation policy (setup and port
+        block aside)."""
+        return dataclasses.replace(self, setup=other.setup, ports=other.ports) == other
 
 
 class RecordError(RuntimeError):
@@ -146,11 +158,11 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
     if not isinstance(data, dict):
         raise _invalid(worktree, path, "not a JSON object")
     version = data.get("schemaVersion")
-    if type(version) is not int or version not in (1, SCHEMA_VERSION):
+    if type(version) is not int or version not in (1, 2, SCHEMA_VERSION):
         raise _invalid(
             worktree, path, f"unsupported schemaVersion {version!r} (expected {SCHEMA_VERSION})"
         )
-    keys = _V1_KEYS if version == 1 else _KEYS
+    keys = {1: _V1_KEYS, 2: _V2_KEYS}.get(version, _KEYS)
     unknown = sorted(set(data) - keys)
     if unknown:
         raise _invalid(worktree, path, f"unknown key(s) {', '.join(unknown)}")
@@ -174,6 +186,9 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
             setup = SetupResult.from_json(data["setup"])
         except ValueError as exc:
             raise _invalid(worktree, path, str(exc)) from exc
+    # Versions 1 and 2 recorded no block: none, and the next enter reserves one
+    # (or takes back the ledger's entry for this path).
+    ports = _parse_ports(worktree, path, data["ports"]) if version >= 3 else None
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
@@ -182,7 +197,25 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         firewall=data["firewall"],
         template=data["template"],
         setup=setup,
+        ports=ports,
     )
+
+
+def _parse_ports(worktree: Path, path: Path, value: Any) -> PortBlock | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"base", "count"}
+        or type(value["base"]) is not int
+        or type(value["count"]) is not int
+        or value["base"] < 1
+        or value["count"] < 1
+    ):
+        raise _invalid(
+            worktree, path, "ports must be null or an object with integer base and count"
+        )
+    return PortBlock(value["base"], value["count"])
 
 
 def save(rec: WorktreeRecord) -> None:
@@ -200,6 +233,7 @@ def save(rec: WorktreeRecord) -> None:
         "firewall": rec.firewall,
         "template": rec.template,
         "setup": rec.setup.to_json(),
+        "ports": None if rec.ports is None else {"base": rec.ports.base, "count": rec.ports.count},
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

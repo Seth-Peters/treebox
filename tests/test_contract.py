@@ -199,6 +199,8 @@ CREATE_KEYS = {
     "name",
     "worktree_path",
     "id",
+    "port_base",
+    "port_count",
     "branch",
     "base",
     "entry_command",
@@ -221,6 +223,8 @@ LIST_ROW_KEYS = {
     "env",
     "health",
     "setup",
+    "port_base",
+    "port_count",
 }
 TEARDOWN_RECORD_KEYS = {
     "name",

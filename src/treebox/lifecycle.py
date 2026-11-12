@@ -25,7 +25,8 @@ order and records every step that did not finish::
 
     1. runner resources   (container, image, volumes, sandbox files)
     2. worktree           (directory + git registration)
-    3. ownership          (host-owned record, setup log)
+    3. ownership          (host-owned record, setup log), then the port block
+                          (ports.release: the record is gone, the block is free)
 
 A step runs only when every earlier step is complete, and the ownership
 record (and the runner's resource manifest) are removed only when everything

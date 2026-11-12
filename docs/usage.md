@@ -499,23 +499,26 @@ scripting.
 
 Several worktrees of one repo often need their own copy of a service: a dev
 server, a database, a Compose stack. treebox does not start or manage these
-services. It gives setup and the agent the identity a repo-owned script needs
-to keep each worktree's services apart:
+services. It gives setup and the agent the identity and the port numbers a
+repo-owned script needs to keep each worktree's services apart:
 
 | Variable | Value |
 | -------- | ----- |
 | `TREEBOX_NAME` | The worktree name: its directory leaf, the name you pass to `enter` (`feature--auth` for branch `feature/auth`). Not unique: the same name can exist in two repos, or twice under nested roots. |
 | `TREEBOX_ID` | Unique on this machine. Exactly 10 lowercase hexadecimal characters (`[0-9a-f]{10}`), derived from the registered worktree path (the first 10 characters of its SHA-256). Stable for the life of the worktree; a new worktree at the same path gets the same id. |
+| `TREEBOX_PORT_BASE` | The first port of the worktree's port block, a decimal integer. |
+| `TREEBOX_PORT_COUNT` | The number of ports in the block. The worktree may use `TREEBOX_PORT_BASE` through `TREEBOX_PORT_BASE + TREEBOX_PORT_COUNT - 1`. |
 
 Both runners export them to every setup step (the detected package manager or
 your `setup_hook`; the docker template's `postCreate`) and to the agent. The
 `--print` and `--json` entry commands carry them too, so a replayed command
 gives the agent the same values: the host command exports them before `exec`
-(`sh -c 'cd … && export TREEBOX_NAME=… TREEBOX_ID=… && exec claude …'`), and
-the docker command passes them with `-e` on `docker exec`. They are passed on
-every exec and not stored in the container, so a container that was stopped
-and started again, or that an older treebox created, gets them as well.
-`create --json`, `enter --json` and `list --json` include the id as `id`.
+(`sh -c 'cd … && export TREEBOX_NAME=… TREEBOX_ID=… TREEBOX_PORT_BASE=…
+TREEBOX_PORT_COUNT=… && exec claude …'`), and the docker command passes them
+with `-e` on `docker exec`. They are passed on every exec and not stored in
+the container, so a container that was stopped and started again, or that an
+older treebox created, gets them as well. `create --json`, `enter --json` and
+`list --json` report them as `id`, `port_base` and `port_count`.
 
 The `TREEBOX_ID` format is contract: use it where a name must be unique on the
 machine and use a restricted alphabet, for example a Compose project name
@@ -526,6 +529,73 @@ PostgreSQL identifier). The docker runner's container and image are named
 The path is spelled the way your configured root spells it: if you later reach
 the same root through another spelling (a symlink, or `/var` instead of
 `/private/var` on macOS), the id changes, like the docker sandbox name.
+
+### Port blocks
+
+`create` reserves one block per worktree, before it makes anything: the
+lowest free block of the configured range. The default range is
+`20000`-`26999` in blocks of `10` (700 worktrees); set
+[`[ports]`](configuration.md#port-blocks) in your user config to change it.
+The block stays the same for every `enter`, across a `docker stop` and
+`docker restart`, until `teardown` completes. A teardown that does not finish
+(`TEARDOWN_INCOMPLETE`) keeps the block for the retry. A worktree from an
+older treebox gets its block on its next `enter`.
+
+Blocks never overlap across every repo and worktree root on the machine. The
+reservations live in one ledger in the user-level treebox home,
+`$TREEBOX_HOME/ports.json` (default `~/.treebox/ports.json`), never in a
+repository; the worktree's [host-owned record](how-it-works.md#port-blocks)
+keeps a copy. A full range is a classified failure before anything is made
+(`PORTS_EXHAUSTED`, exit `5`, with a hint). A dry run shows the block a real
+run would reserve now, and reserves nothing.
+
+What this does **not** do:
+
+- It prevents overlap among treebox's own allocations. It cannot reserve a
+  host socket: any other program can still bind a port in a block, and a
+  service that finds its port in use must fail like it would without
+  treebox.
+- It starts no service. Service startup, database creation and Compose stay
+  in the repo's own scripts, which read the variables above.
+- In docker isolation, each sandbox has its own network namespace, so its
+  services cannot collide with the host or other sandboxes. The block is
+  still reserved and exported, so the same scripts work in both modes.
+
+A repo-owned `Makefile` can derive every port from the block and keep a
+default for runs outside treebox:
+
+```make
+# Makefile - treebox exports TREEBOX_ID and TREEBOX_PORT_BASE.
+PORT_BASE ?= $(or $(TREEBOX_PORT_BASE),3000)
+APP_PORT  := $(PORT_BASE)
+DB_PORT   := $(shell expr $(PORT_BASE) + 1)
+DB_NAME   := app_$(or $(TREEBOX_ID),dev)
+
+.PHONY: services env
+services:  ## start this worktree's own stack
+	APP_PORT=$(APP_PORT) DB_PORT=$(DB_PORT) docker compose up -d --wait
+
+env:  ## show what this worktree uses
+	@echo "app :$(APP_PORT)  db :$(DB_PORT)  database $(DB_NAME)"
+```
+
+and a `compose.yaml` that gives each worktree its own project name, so two
+worktrees never share containers, networks or volumes:
+
+```yaml
+name: app-${TREEBOX_ID:-dev}
+services:
+  app:
+    image: nginx:1.27-alpine
+    ports: ["127.0.0.1:${APP_PORT}:80"]
+  db:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:${DB_PORT}:6379"]
+```
+
+Run `make services` in host isolation, from setup (`setup_hook =
+["make services"]`) or from the agent. A docker sandbox has no Docker engine,
+so inside a sandbox start the services as plain processes on the same ports.
 
 ## Scripting against treebox
 
@@ -569,7 +639,7 @@ Current success payloads:
 
 | Command | Top-level fields |
 | ------- | ---------------- |
-| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `id`, `branch`, `base`, `entry_command`, `created` |
+| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `id`, `port_base`, `port_count`, `branch`, `base`, `entry_command`, `created` |
 | `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands` |
 | `list --json` | `schemaVersion`, `worktrees` |
 | `teardown --json` | `schemaVersion`, `worktrees` |
@@ -577,7 +647,7 @@ Current success payloads:
 
 `list` rows contain `name`, `id`, `branch`, `unnamed`, `missing`, `last_commit`,
 `commit_epoch`, `path`, `base`, `isolation`, `harness`, `deps`, `env`,
-`health`, and `setup`. `id` is the [`TREEBOX_ID`](#services-in-parallel-worktrees) of the worktree. `deps` is `fresh`, `stale`, or `unknown`: `fresh` and
+`health`, `setup`, `port_base`, and `port_count`. `id` is the [`TREEBOX_ID`](#services-in-parallel-worktrees) of the worktree; `port_base` and `port_count` are its [port block](#port-blocks), `null` when the record holds none (a missing or invalid record, or a worktree from an older treebox before its next `enter`). `deps` is `fresh`, `stale`, or `unknown`: `fresh` and
 `stale` only after a finished setup (a matching lockfile hash alone is never
 fresh); `env` is `present` or `absent`. `setup` is the
 [setup model](how-it-works.md#lifecycle-setup-and-cleanup) state - `pending`,
@@ -644,7 +714,8 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `SETUP_FAILED` | `1` | A setup step exited non-zero. The message names the step and its exit status; `error.path` is its output. The worktree is kept, marked unfinished; `enter` or the same `create` retries the setup. |
-| `TEARDOWN_INCOMPLETE` | `1` | A teardown step did not finish (a container, image or volume removal failed, Docker is not reachable, or git refused to remove the worktree). The message names what remains; the worktree and its ownership record are kept, so the same `teardown` retries. |
+| `TEARDOWN_INCOMPLETE` | `1` | A teardown step did not finish (a container, image or volume removal failed, Docker is not reachable, or git refused to remove the worktree). The message names what remains; the worktree and its ownership record are kept, so the same `teardown` retries. The worktree keeps its [port block](#port-blocks) too. |
+| `PORT_LEDGER_INVALID` | `1` | The [port-block ledger](#port-blocks) (`$TREEBOX_HOME/ports.json`, in `error.path`) cannot be read or trusted. treebox never rewrites it: fix it or move it aside (each worktree then takes its recorded block back on its next `enter`). |
 | `ERROR` | `1` | Runtime failure, including a staged credential refresh failure. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
@@ -655,7 +726,8 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `WORKTREE_LOCKED` | `5` | Teardown target is locked with `git worktree lock`; treebox never removes it (also with `--force`). Unlock it first. |
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
-| `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. |
+| `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock, or has held the machine-wide port-block ledger lock for over 30 seconds (the hint says which). |
+| `PORTS_EXHAUSTED` | `5` | `create` (or `enter` of a worktree that has no block yet) finds no free [port block](#port-blocks) in the configured range. Nothing is made. Tear down worktrees you no longer need, or widen `[ports]` in the user config. `error.path` is the ledger. |
 | `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (a record from another treebox version, or hand-edited). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
 | `RECORD_MISSING` | `5` | The worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (created by an older treebox, or the record was deleted) - `treebox adopt <name> --isolation <mode>`, or `teardown <name> --isolation <mode>`. |

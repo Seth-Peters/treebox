@@ -36,13 +36,21 @@ setup_hook = ["uv sync --frozen", "uv run python -m scripts.seed"]
 [caches]
 uv  = "/mnt/fast/cache/uv"
 npm = "/mnt/fast/cache/npm"
+
+# The machine-wide port blocks each worktree gets (TREEBOX_PORT_BASE,
+# TREEBOX_PORT_COUNT). start and end are inclusive.
+[ports]
+start      = 20000
+end        = 26999
+block_size = 10
 ```
 
 Every key is optional, but the vocabulary is closed: an unknown top-level key
 (a typo like `isolatoin`) is a loud error (exit `2`, with a did-you-mean
 suggestion), never silently ignored - a typo'd `isolation` or `firewall` would
 otherwise drop your security posture without warning. Only the subkeys inside
-`[caches]` are open-ended (ecosystem cache names).
+`[caches]` are open-ended (ecosystem cache names); `[ports]` takes exactly
+`start`, `end` and `block_size`.
 
 Path-valued keys understand a leading `~`: `root`, `env_file`, and every
 `caches` entry expand `~/…` to your home directory before use, as do quoted
@@ -77,6 +85,29 @@ Docker teardown ownership and missing-manifest behavior, see the
 | `template` | `default`            | Which operator template defines the sandbox.              |
 | `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. They run in order; one that exits non-zero fails `create` / `enter` (`SETUP_FAILED`). |
 | `caches`   | *(standard env vars)* | Per-ecosystem shared cache locations treebox installs from and mounts. |
+| `ports`    | `20000`-`26999`, blocks of `10` | The range and block size of the [port blocks](#port-blocks). |
+
+## Port blocks
+
+Every worktree gets a block of `block_size` consecutive ports, cut from
+`start` through `end`, for its repo-owned services (see
+[services in parallel worktrees](usage.md#services-in-parallel-worktrees)).
+Like every key, `[ports]` is read only from the user-level config, never from a
+repo: a repo cannot claim a range for itself.
+
+The defaults are a stated choice. `20000`-`26999` lies above the well-known
+ports (`0`-`1023`) and below both ephemeral ranges that the kernel hands to
+outgoing connections (Linux `32768`-`60999`, macOS and IANA `49152`-`65535`),
+and it stays clear of common development ports (`3000`, `5432`, `6379`,
+`8080`, `9000`, `27017`). A block of `10` is enough for an app, a database
+and a few helpers, and the range then holds 700 worktrees.
+
+Values must satisfy `1024 <= start <= end <= 65535` and
+`1 <= block_size <= end - start + 1`; anything else is `INVALID_CONFIG`
+(exit `2`). A change applies to new reservations only: a worktree keeps the
+block it has, and a new block never overlaps one reserved under an older
+setting. When the range is full, `create` fails with `PORTS_EXHAUSTED` before
+it makes anything.
 
 ## Customizing the sandbox
 
@@ -183,7 +214,7 @@ container config in the target repo itself is deliberately ignored — see
 
 | Variable          | Effect                                                        |
 | ----------------- | ------------------------------------------------------------- |
-| `TREEBOX_HOME`    | Base dir for `config.toml` and `templates/` (default `~/.treebox`). |
+| `TREEBOX_HOME`    | Base dir for `config.toml`, `templates/` and the port-block ledger `ports.json` (default `~/.treebox`). |
 | `TREEBOX_CONFIG`  | Explicit path to the config file (overrides `TREEBOX_HOME`). Setting it asserts the file exists — a missing file here is a loud error (exit `2`), not a silent fall-back to defaults. |
 | `TREEBOX_TEMPLATE_DIR` | Explicit template dir; wins for any `--template` name. |
 | `XDG_CACHE_HOME`  | Standard XDG base for the shared package caches treebox mounts. |

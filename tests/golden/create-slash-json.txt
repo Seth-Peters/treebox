@@ -6,12 +6,14 @@
   "name": "golden--slash",
   "worktree_path": "__ROOT__/wts/golden--slash",
   "id": "__HASH__",
+  "port_base": 20020,
+  "port_count": 10,
   "branch": "golden/slash",
   "base": "main",
   "entry_command": [
     "sh",
     "-c",
-    "cd __ROOT__/wts/golden--slash && export TREEBOX_NAME=golden--slash TREEBOX_ID=__HASH__ && exec claude --dangerously-skip-permissions"
+    "cd __ROOT__/wts/golden--slash && export TREEBOX_NAME=golden--slash TREEBOX_ID=__HASH__ TREEBOX_PORT_BASE=20020 TREEBOX_PORT_COUNT=10 && exec claude --dangerously-skip-permissions"
   ],
   "created": true
 }
