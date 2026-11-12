@@ -92,7 +92,7 @@ Module map:
   `.containers/<worktree>/treebox-resources.json` manifest outside the
   sandbox mount, never in sandbox-writable worktree state.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
-  list / teardown <ref>... / template <init|list|path> / doctor / version`
+  adopt <ref> / list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
   `template list`). The `template` sub-app
   scaffolds and inspects operator-owned sandbox templates via `assets.py`'s
@@ -103,11 +103,12 @@ Module map:
   worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
   so the printed `entry_command` is never dead on replay).
-  `_reconcile_with_state` folds recorded
-  creation-time choices into existing-worktree sessions before the runner and
-  harness objects are resolved: recorded isolation conflicts with a mismatched
-  explicit `--isolation`, while recorded firewall/harness/template protect an
-  existing worktree from config-default drift.
+  `_reconcile_with_record` folds the host-owned record (`record.py`) into
+  existing-worktree sessions before the runner and harness objects are
+  resolved: recorded isolation conflicts with a mismatched explicit
+  `--isolation`, recorded firewall always wins, and recorded harness/template
+  win over config defaults while `--harness` / `--template` stay per-session
+  operator overrides.
   It enforces **stable exit codes** (`0` ok · `1` runtime/doctor hard-check ·
   `2` usage · `3` not-found · `4` auth/fetch · `5` conflict) and **`--json`**
   output carrying a `schemaVersion` that only gains fields within a version —
@@ -120,18 +121,29 @@ Module map:
   same plan a real run executes; `ensure_cache_dirs` is the one filesystem
   effect and only real setup calls it. `detect` reads a checked-out tree,
   `detect_revision` reads a git revision (what a dry run plans against).
-- **`state.py`** stores per-worktree state (lockfile hash + provisioning
-  choices) inside the worktree's private git dir (`.git/worktrees/<id>/`), so it
-  never appears in `git status` and is pruned with the worktree. The lockfile
-  hash is what lets `enter` re-sync only when deps changed (the recorded
-  `provisioned` flag makes `enter` finish an interrupted setup even when the
-  hash matches); the recorded choices are what let `enter`/`teardown` recover
-  the worktree's created-time isolation, firewall, harness, and template
-  defaults. This state is sandbox-writable and therefore never authorizes
-  destructive host cleanup. `teardown` reads the non-destructive choices
-  through the repo's own worktree
-  registration (`load_registered`) rather than the worktree's `.git` pointer,
-  so a corrupt tree's recorded choices still drive container cleanup.
+- **`record.py`** is the host-owned worktree record: the authority for a
+  worktree's creation policy (isolation, firewall, template, harness, base),
+  at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
+  Versioned (`schemaVersion`; unknown keys and versions are refused), bound to
+  the registered worktree path, written atomically and only under the
+  worktree lock - by `create` before any runner resource depends on it, and
+  by `adopt` (the operator's explicit migration step for legacy worktrees).
+  API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
+  `save(record)`, `remove(path)`, `record_path(path)`. To extend it, add a
+  field to `WorktreeRecord`, bump `SCHEMA_VERSION`, and teach `_parse` to
+  upgrade older versions. A missing or invalid record is a classified error
+  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) with an `adopt` recovery
+  path, never a fallback to config defaults or to `state.py`.
+- **`state.py`** stores per-worktree *observations* only (lockfile hash +
+  `provisioned`) inside the worktree's private git dir
+  (`.git/worktrees/<id>/`), so it never appears in `git status` and is pruned
+  with the worktree. The lockfile hash is what lets `enter` re-sync only when
+  deps changed (the `provisioned` flag makes `enter` finish an interrupted
+  setup even when the hash matches). This state is sandbox-writable, so it
+  never decides policy and never authorizes destructive host cleanup; it is
+  read and written without following links (a planted symlink reads as no
+  state and is replaced, not written through). `list` reads it through the
+  repo's own worktree registration (`load_registered`).
 - **`models.py`** holds the `Worktree` value object and the path-as-identity
   rule: the registered *path* identifies a worktree (the *name* is only its
   directory leaf, and can repeat under a nested root); the *branch* is a
@@ -202,6 +214,10 @@ What a sandboxed backend must **guarantee** (the security invariants):
   never exposed to the sandbox (they hold host-executed config).
 - The sandbox-defining config is rendered outside the mount, so a boxed
   agent cannot edit the definition of its own box.
+- The creation policy (isolation, firewall, template, harness) is read only
+  from the host-owned record outside the mount, never from sandbox-writable
+  state; a template name is an identifier resolved only through the
+  operator-owned locations, never a path.
 - Destructive cleanup trusts only runner-owned metadata outside the mount;
   sandbox-writable worktree state never records Docker volume ownership.
 - The shared `.git/hooks` is presented read-only (host git executes it).
@@ -217,7 +233,8 @@ What a backend may **assume** (host locality):
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
   bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, and the lockfile hash stats host files.
+  host-side private git dir, the record lives beside the worktree, and the
+  lockfile hash stats host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud
