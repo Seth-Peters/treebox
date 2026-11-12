@@ -3966,6 +3966,96 @@ def test_template_init_json_reports_validity(template_home: Path):
     assert payload["template"]["missing"] == []
 
 
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def test_template_init_output_is_the_bundled_template(template_home: Path):
+    # `template init` must hand the operator the exact bundled template - the
+    # same pinned build, byte for byte - so a scaffolded template never drifts
+    # from the image the default builds.
+    import treebox.assets as assets
+
+    bundled = assets.template_dir("default")
+    assert _cli(["template", "init", "webdev"]).exit_code == 0
+    assert _tree_bytes(template_home / "templates" / "webdev") == _tree_bytes(bundled)
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _bundled_dockerfile_args() -> tuple[str, dict[str, str]]:
+    import treebox.assets as assets
+
+    text = (assets._bundled_template_dir() / "Dockerfile").read_text(encoding="utf-8")
+    args = dict(re.findall(r"^ARG ([A-Z0-9_]+)=(\S*)$", text, flags=re.M))
+    return text, args
+
+
+def test_bundled_dockerfile_pins_the_base_image_by_digest():
+    text, _ = _bundled_dockerfile_args()
+    froms = re.findall(r"^FROM (\S+)", text, flags=re.M)
+    assert len(froms) == 1
+    assert re.fullmatch(r"[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}", froms[0]), froms[0]
+
+
+def test_bundled_dockerfile_pins_every_version_and_checksum():
+    text, args = _bundled_dockerfile_args()
+    versions = {k: v for k, v in args.items() if k.endswith("_VERSION")}
+    # The agent CLIs are explicit, like every other tool.
+    assert {"CLAUDE_CODE_VERSION", "CODEX_CLI_VERSION"} <= versions.keys()
+    for name, value in versions.items():
+        assert re.fullmatch(r"\d+(\.\d+)+", value), f"{name}={value!r} is not an exact version"
+    # Every checksum-verified download has one SHA-256 for each architecture.
+    for name, value in args.items():
+        if "_SHA256_" in name:
+            assert _SHA256_RE.match(value), f"{name}={value!r} is not a SHA-256"
+            stem, _, arch = name.rpartition("_")
+            assert arch in {"AMD64", "ARM64"}, name
+            other = "ARM64" if arch == "AMD64" else "AMD64"
+            assert _SHA256_RE.match(args.get(f"{stem}_{other}", "")), f"{stem}_{other} missing"
+    # No installer is piped into a shell, and nothing floats at `latest`.
+    assert not re.search(r"\|\s*(ba)?sh\b", text)
+    assert "latest" not in text
+    # Downloads go through treebox-fetch (checksum + host-naming failure): only
+    # the helper's own body, a heredoc, calls curl, and nothing calls wget.
+    outside_heredocs = re.sub(r"<<'EOF'.*?^EOF$", "", text, flags=re.M | re.S)
+    assert not re.search(r"\b(curl|wget)\s+-", outside_heredocs)
+    assert outside_heredocs.count('treebox-fetch "https://') >= 6
+    # npm installs name an exact version for every package.
+    for line in re.findall(r"npm install -g (.+?)(?:&&|$)", text, flags=re.M):
+        for pkg in line.split():
+            if pkg.startswith('"'):
+                assert re.search(r'.@\$\{[A-Z_]+_VERSION\}"$', pkg), pkg
+
+
+def test_bundled_container_json_does_not_override_dockerfile_pins():
+    # Version pins live in the Dockerfile next to their checksums. A build arg
+    # in container.json would silently override them (it did: "latest").
+    import treebox.assets as assets
+
+    _, args = _bundled_dockerfile_args()
+    config = json.loads(
+        (assets._bundled_template_dir() / assets.CONFIG_FILE).read_text(encoding="utf-8")
+    )
+    pinned = {k for k in args if k.endswith("_VERSION") or "_SHA256_" in k}
+    assert pinned.isdisjoint(config["build"]["args"])
+
+
+def test_bundled_dockerfile_copies_only_rendered_template_files():
+    # The docker runner renders only TEMPLATE_FILES into the build context, so a
+    # COPY of any other file would build from `template init` output but fail
+    # from the rendered context.
+    import treebox.assets as assets
+
+    text, _ = _bundled_dockerfile_args()
+    sources = re.findall(r"^COPY (?!--chmod=\d+ <<)(?:--\S+ )*(\S+) ", text, flags=re.M)
+    assert sources
+    assert set(sources) <= set(assets.TEMPLATE_FILES)
+
+
 def test_template_init_refuses_overwrite_without_force(template_home: Path):
     assert _cli(["template", "init", "webdev"]).exit_code == 0
     # A second init is a conflict (exit 5), never a silent clobber.
@@ -4276,7 +4366,7 @@ def test_default_template_highlights_match_bundled_dockerfile(template_home: Pat
 
     node_major = re.search(r"Node\.js (\d+)", highlights)
     assert node_major is not None
-    assert f"NODE_MAJOR={node_major.group(1)}" in dockerfile
+    assert f"NODE_VERSION={node_major.group(1)}." in dockerfile
 
 
 def test_template_ls_is_alias_for_list(template_home: Path):
