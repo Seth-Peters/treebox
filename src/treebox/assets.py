@@ -86,6 +86,11 @@ TEMPLATE_FILES = (
     "init-firewall.sh",
     "allowed-domains.sh",
 )
+# Build helpers the bundled Dockerfile COPYs. The docker runner renders them
+# into the build context when the template has them. They are not required: a
+# template whose Dockerfile does not use them (one scaffolded before they
+# existed, or written from scratch) stays valid.
+TEMPLATE_HELPER_FILES = ("treebox-fetch", "treebox-online")
 FIREWALL_FILE = "firewall.json"
 
 # ``resources.as_file`` may materialize the bundled template to a temporary

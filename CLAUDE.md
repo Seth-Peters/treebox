@@ -253,7 +253,7 @@ above is about the agents treebox launches, not this tooling.
 
 - Conventional Commit subjects (`feat(...)`, `fix:`, `docs:`); keep commits
   scoped and separate docs-only edits when practical.
-- Bundled bash assets (`Dockerfile`, `*.sh`, `container.json`) under
-  `src/treebox/assets/` ship as package data and are read via
+- Bundled bash assets (`Dockerfile`, `*.sh`, the `treebox-fetch` /
+  `treebox-online` build helpers, `container.json`) under `src/treebox/assets/` ship as package data and are read via
   `importlib.resources` — edit them in place rather than rewriting in Python.
 - Do not commit secrets or generated `.env` files.

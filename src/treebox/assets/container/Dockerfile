@@ -19,43 +19,16 @@ ARG USERNAME=agent
 ENV TZ="$TZ"
 ENV DEBIAN_FRONTEND=noninteractive
 
-# treebox-fetch URL SHA256 FILE: download URL to FILE, then check its SHA-256.
-# A failed download names the host it could not reach (after redirects).
-COPY --chmod=0755 <<'EOF' /usr/local/bin/treebox-fetch
-#!/bin/sh
-set -eu
-url=$1 sha256=$2 file=$3
-rc=0
-effective=$(curl -fsSL --retry 3 --connect-timeout 30 -o "$file" -w '%{url_effective}' "$url") || rc=$?
-if [ "$rc" -ne 0 ]; then
-  host=${effective:-$url}
-  host=${host#*://}
-  host=${host%%[/:?]*}
-  echo "treebox: cannot download $url (curl exit $rc)." >&2
-  echo "treebox: this build needs network access to $host." >&2
-  exit 1
-fi
-if ! echo "$sha256  $file" | sha256sum -c --status -; then
-  echo "treebox: SHA-256 mismatch for $url" >&2
-  echo "treebox:   expected $sha256" >&2
-  echo "treebox:   got      $(sha256sum "$file" | cut -d' ' -f1)" >&2
-  exit 1
-fi
-EOF
-
-# treebox-online HOST[,HOST...] COMMAND...: run COMMAND, which downloads from
-# package registries; if it fails, name the hosts it needs.
-COPY --chmod=0755 <<'EOF' /usr/local/bin/treebox-online
-#!/bin/sh
-set -u
-hosts=$1
-shift
-"$@" && exit 0
-rc=$?
-echo "treebox: $1 failed (exit $rc)." >&2
-echo "treebox: this step needs network access to $hosts." >&2
-exit "$rc"
-EOF
+# Build helpers, plain files of this template:
+# - treebox-fetch URL SHA256 FILE: download URL to FILE, then check its SHA-256.
+#   A failed download names the host it could not reach (after redirects).
+# - treebox-online HOST[,HOST...] COMMAND...: run COMMAND, which downloads from
+#   package registries; if it fails, name the hosts it needs.
+# This file uses no BuildKit-only syntax (no heredoc, no COPY --chmod), so it
+# also builds with Docker's legacy builder, on a host without docker-buildx.
+COPY treebox-fetch /usr/local/bin/treebox-fetch
+COPY treebox-online /usr/local/bin/treebox-online
+RUN chmod 0755 /usr/local/bin/treebox-fetch /usr/local/bin/treebox-online
 
 # apt-get update exits 0 when it cannot fetch an index; --error-on=any makes an
 # unreachable archive fail here instead of as a later "Unable to locate package".
