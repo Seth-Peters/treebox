@@ -44,11 +44,13 @@ jobs:
 
       - name: In-container checks
         run: |
-          # Ubuntu 23.10+ blocks unprivileged user namespaces, which Chromium's
-          # sandbox needs; this is a host setting, the same for any image.
+          # Chromium's sandbox needs user namespaces. Ubuntu 23.10+ blocks them
+          # for unprivileged users and Docker's default seccomp profile blocks
+          # them in containers. This is the same for the #70 image (see the
+          # baseline-sandbox job), and Docker Desktop on macOS allows them.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           mkdir -p out && chmod 777 out
-          docker run --rm -v "$PWD/.github/i72-check.sh:/check.sh:ro" -v "$PWD/out:/out" i72-after:latest bash /check.sh
+          docker run --rm --security-opt seccomp=unconfined -v "$PWD/.github/i72-check.sh:/check.sh:ro" -v "$PWD/out:/out" i72-after:latest bash /check.sh
 
       - uses: actions/upload-artifact@v4
         if: always()
