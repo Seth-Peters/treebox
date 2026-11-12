@@ -2875,6 +2875,7 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             "worktree_path",
             "branch",
             "commands",
+            "resources",
         }
     )
     assert warm["schemaVersion"] == cold["schemaVersion"] == 1

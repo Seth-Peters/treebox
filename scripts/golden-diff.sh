@@ -215,6 +215,7 @@ run_case doctor-docker        "$HOME_FAKE" doctor "${R[@]}" --isolation docker
 run_case doctor-docker-json   "$HOME_FAKE" doctor "${R[@]}" --isolation docker --json
 run_case create-dryrun-docker      "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run
 run_case create-dryrun-docker-json "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run --json
+run_case create-dryrun-docker-limits "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --cpus 2 --memory 4g --pids-limit 512 --dry-run
 run_case create-docker-print  "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --print
 run_case create-docker-json   "$HOME_FAKE" create golden-docker-json "${RW[@]}" --isolation docker --json
 run_case enter-docker-print   "$HOME_FAKE" enter golden-docker "${RW[@]}" --print

@@ -101,6 +101,9 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
             "--firewall",
             "--no-firewall",
             "--template",
+            "--cpus",
+            "--memory",
+            "--pids-limit",
             "--dry-run",
             "-n",
             "--print",
@@ -110,13 +113,14 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
     "enter": (
         _COMMON_LIST
         | _VERBOSITY
-        | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"},
+        | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"}
+        | {"--cpus", "--memory", "--pids-limit"},
         ["ref", "args"],
     ),
     "adopt": (
         {"--repo", "--root", "--json", "--quiet", "-q"}
         | {"--isolation", "--harness", "-H", "--firewall", "--no-firewall"}
-        | {"--template", "--base", "--force"},
+        | {"--template", "--base", "--force", "--cpus", "--memory", "--pids-limit"},
         ["ref"],
     ),
     "list": (_COMMON_LIST, []),
@@ -202,8 +206,17 @@ CREATE_KEYS = {
     "base",
     "entry_command",
     "created",
+    "resources",
 }
-DRY_RUN_KEYS = {"schemaVersion", "dry_run", "name", "worktree_path", "branch", "commands"}
+DRY_RUN_KEYS = {
+    "schemaVersion",
+    "dry_run",
+    "name",
+    "worktree_path",
+    "branch",
+    "commands",
+    "resources",
+}
 LIST_ROW_KEYS = {
     "name",
     "branch",
@@ -215,6 +228,7 @@ LIST_ROW_KEYS = {
     "base",
     "isolation",
     "harness",
+    "resources",
     "deps",
     "env",
 }

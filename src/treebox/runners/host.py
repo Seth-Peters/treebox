@@ -18,6 +18,7 @@ from .. import ecosystems
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter, StepError
+from ..resources import ResourceLimitError, ResourceLimits
 from ..system import have
 from .base import RunnerFacts, RunnerTeardownResult
 
@@ -39,6 +40,8 @@ def _render_cache_env(command: str, env: dict[str, str]) -> str:
 
 class HostRunner:
     name = "host"
+    # No sandbox, so no cgroup to cap: the agent runs as the operator.
+    supported_resources: frozenset[str] = frozenset()
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -49,6 +52,17 @@ class HostRunner:
 
     def facts(self) -> RunnerFacts:
         return _FACTS
+
+    def template_resources(self) -> ResourceLimits:
+        return ResourceLimits()
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        # The CLI refuses explicit limits for this runner first; this keeps a
+        # direct caller from silently running uncapped.
+        if limits.names():
+            raise ResourceLimitError(
+                limits.names()[0], "The host runner cannot apply resource limits."
+            )
 
     def initialize(self, wt: Worktree) -> None:
         # The host runner owns no per-worktree resources outside the worktree.

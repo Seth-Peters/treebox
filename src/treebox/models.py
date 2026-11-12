@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 # Branches treebox generates carry this prefix. It marks the name as
 # machine-made: the pre-push guard refuses to push them, so a placeholder can
@@ -119,6 +119,9 @@ class WorktreeRow(TypedDict):
     base: str
     isolation: str
     harness: str
+    # The recorded limits ({cpus, memory, pids}, null = no treebox cap);
+    # null when the worktree has no valid host-owned record.
+    resources: dict[str, Any] | None
     deps: DepsFreshness
     env: Literal["present", "absent"]
 

@@ -2170,7 +2170,10 @@ def test_record_save_is_atomic(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     [
-        (lambda d: d.update(schemaVersion=2), "schemaVersion"),
+        (lambda d: d.update(schemaVersion=3), "schemaVersion"),
+        (lambda d: d.update(resources={"memory": "lots"}), "memory"),
+        (lambda d: d.update(resources={"swap": "1g"}), "unknown key"),
+        (lambda d: d.pop("resources"), "missing key"),
         (lambda d: d.update(schemaVersion=True), "schemaVersion"),
         (lambda d: d.update(worktree="/elsewhere/w"), "bound to worktree"),
         (lambda d: d.update(template="/etc"), "not a template name"),

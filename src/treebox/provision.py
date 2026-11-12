@@ -110,14 +110,16 @@ class RecordConflictError(ProvisionError):
         super().__init__(
             f"Worktree '{name}' was created with different settings: isolation "
             f"{prior.isolation}, firewall {'on' if prior.firewall else 'off'}, template "
-            f"{prior.template}, harness {prior.harness}, base {prior.base}."
+            f"{prior.template}, harness {prior.harness}, base {prior.base}, limits "
+            f"{prior.resources.describe()}."
         )
         self.path = record.record_path(prior.worktree)
         firewall = "--firewall" if prior.firewall else "--no-firewall"
+        limits = "".join(f" {a}" for a in prior.resources.cli_flags())
         self.hint = (
             f"Finish it with the recorded settings: treebox create {name} "
             f"--isolation {prior.isolation} {firewall} --template {prior.template} "
-            f"-H {prior.harness} --base {prior.base} - or tear it down "
+            f"-H {prior.harness} --base {prior.base}{limits} - or tear it down "
             f"(treebox teardown {name}) and create it again."
         )
 
@@ -440,6 +442,7 @@ def _creation_record(
         harness=harness,
         firewall=config.firewall,
         template=config.template,
+        resources=config.resources,
     )
 
 

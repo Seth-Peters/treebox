@@ -3,8 +3,8 @@
 A sandboxed agent can write its worktree and the repo's git common dir (both
 are bind-mounted), so nothing it can reach may decide how its *next* session
 runs. The policy a worktree was created with - isolation, firewall, sandbox
-template, harness, base - therefore lives here, in a file outside every sandbox
-mount, beside the lock and the docker runner's config dir::
+template, harness, base, and the effective resource limits - therefore lives
+here, in a file outside every sandbox mount, beside the lock and the docker runner's config dir::
 
     <worktree parent>/.records/<worktree leaf>.json
 
@@ -37,20 +37,25 @@ import contextlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .models import is_valid_template_name, same_path
+from .resources import ResourceLimitError, ResourceLimits, from_mapping
 
-SCHEMA_VERSION = 1
+# 2 added ``resources`` (the effective CPU/memory/process limits). A version-1
+# record has no limits and still loads: it means "no treebox cap".
+SCHEMA_VERSION = 2
+_SUPPORTED_VERSIONS = (1, 2)
 
 # Sibling of the worktrees under one parent, like `.locks/` and `.containers/`.
 RECORD_DIR = ".records"
 
-_KEYS = frozenset(
+_V1_KEYS = frozenset(
     {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template"}
 )
+_KEYS = _V1_KEYS | {"resources"}
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,9 @@ class WorktreeRecord:
     ``isolation`` and ``harness`` are registry names (validated against the
     registries by the CLI, like every other boundary string); ``template`` is
     a template identifier (``models.is_valid_template_name``); ``firewall`` is
-    always a real bool (``False`` for host worktrees)."""
+    always a real bool (``False`` for host worktrees). ``resources`` are the
+    limits the sandbox was created with (unset = no treebox cap; always unset
+    for a runner that applies none, such as host)."""
 
     worktree: Path
     base: str
@@ -68,6 +75,7 @@ class WorktreeRecord:
     harness: str
     firewall: bool
     template: str
+    resources: ResourceLimits = field(default_factory=ResourceLimits)
 
 
 class RecordError(RuntimeError):
@@ -129,14 +137,15 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
     if not isinstance(data, dict):
         raise _invalid(worktree, path, "not a JSON object")
     version = data.get("schemaVersion")
-    if type(version) is not int or version != SCHEMA_VERSION:
+    if type(version) is not int or version not in _SUPPORTED_VERSIONS:
         raise _invalid(
             worktree, path, f"unsupported schemaVersion {version!r} (expected {SCHEMA_VERSION})"
         )
-    unknown = sorted(set(data) - _KEYS)
+    keys = _V1_KEYS if version == 1 else _KEYS
+    unknown = sorted(set(data) - keys)
     if unknown:
         raise _invalid(worktree, path, f"unknown key(s) {', '.join(unknown)}")
-    missing = sorted(_KEYS - set(data))
+    missing = sorted(keys - set(data))
     if missing:
         raise _invalid(worktree, path, f"missing key(s) {', '.join(missing)}")
     for key in ("worktree", "base", "isolation", "harness", "template"):
@@ -148,6 +157,11 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         raise _invalid(worktree, path, f"template {data['template']!r} is not a template name")
     if not same_path(data["worktree"], worktree):
         raise _invalid(worktree, path, f"it is bound to worktree {data['worktree']!r}")
+    try:
+        # Version 1 predates limits: no treebox cap.
+        limits = from_mapping(data.get("resources", {}), source="resources")
+    except ResourceLimitError as exc:
+        raise _invalid(worktree, path, str(exc).rstrip(".")) from exc
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
@@ -155,6 +169,7 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         harness=data["harness"],
         firewall=data["firewall"],
         template=data["template"],
+        resources=limits,
     )
 
 
@@ -172,6 +187,7 @@ def save(rec: WorktreeRecord) -> None:
         "harness": rec.harness,
         "firewall": rec.firewall,
         "template": rec.template,
+        "resources": rec.resources.to_json(),
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
