@@ -72,7 +72,7 @@ jobs:
           c=$(docker ps --format '{{.Names}}' | grep '^treebox-i72-fw-')
           docker exec "$c" sh -c 'curl -sS --connect-timeout 5 https://example.com >/dev/null && echo "example.com reachable (BAD)" || echo "example.com blocked (expected)"'
           docker exec "$c" sh -c 'curl -sS --connect-timeout 5 https://api.github.com/zen'
-          docker exec "$c" sh -c 'claude --version && codex --version && ls -la .venv/bin/python'
+          docker exec -w "$ROOT/i72-fw" "$c" sh -c 'claude --version && codex --version && .venv/bin/python --version'
           tb list --json --repo "$REPO" --root "$ROOT"
           tb teardown i72-plain i72-fw --force --repo "$REPO" --root "$ROOT" || true
 
