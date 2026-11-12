@@ -36,13 +36,21 @@ setup_hook = ["uv sync --frozen", "uv run python -m scripts.seed"]
 [caches]
 uv  = "/mnt/fast/cache/uv"
 npm = "/mnt/fast/cache/npm"
+
+# Default CPU, memory, and process limits for every new sandbox
+# (docker isolation). Omit a key for no treebox cap. See "Resource limits".
+[resources]
+cpus   = 2        # CPUs (a decimal is fine: 1.5)
+memory = "4g"     # Docker's memory syntax
+pids   = 512      # most processes + threads at once
 ```
 
 Every key is optional, but the vocabulary is closed: an unknown top-level key
 (a typo like `isolatoin`) is a loud error (exit `2`, with a did-you-mean
 suggestion), never silently ignored - a typo'd `isolation` or `firewall` would
 otherwise drop your security posture without warning. Only the subkeys inside
-`[caches]` are open-ended (ecosystem cache names).
+`[caches]` are open-ended (ecosystem cache names); `[resources]` accepts only
+`cpus`, `memory` and `pids`.
 
 Path-valued keys understand a leading `~`: `root`, `env_file`, and every
 `caches` entry expand `~/…` to your home directory before use, as do quoted
@@ -77,6 +85,66 @@ Docker teardown ownership and missing-manifest behavior, see the
 | `template` | `default`            | Which operator template defines the sandbox.              |
 | `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. |
 | `caches`   | *(standard env vars)* | Per-ecosystem shared cache locations treebox installs from and mounts. |
+| `resources` | *(no limits)*       | Default `cpus` / `memory` / `pids` limits for a new sandbox; see [resource limits](#resource-limits). |
+
+## Resource limits
+
+By default a docker sandbox has **no** CPU, memory, or process limit. Set them
+per worktree so one sandboxed build or test run cannot starve the other tasks
+on the same machine:
+
+```bash
+treebox create fix-auth --isolation docker --cpus 2 --memory 4g --pids-limit 512
+```
+
+| Flag | `[resources]` key | Template `resources` key | Value | Docker maps it to |
+| ---- | ----------------- | ------------------------ | ----- | ----------------- |
+| `--cpus N` | `cpus` | `cpus` | CPUs, a decimal (`2`, `1.5`); at least `0.01`, at most the engine's CPU count | `docker run --cpus` |
+| `--memory SIZE` | `memory` | `memory` | Docker's memory syntax: a number and a unit `b`, `k`, `m`, `g`, `t` or `p` (binary multiples, an optional `b` / `ib`, any case; a bare number is bytes); at least `6m` | `docker run --memory` |
+| `--pids-limit N` | `pids` | `pids` | A positive whole number of processes and threads | `docker run --pids-limit` |
+
+**Precedence**, field by field: explicit flag, then `[resources]` in the user
+config, then the operator template's `resources` object (in its
+`container.json`). An omitted value means no treebox cap. No resource policy
+is ever read from the target repo.
+
+**Validation happens before provisioning.** A bad value (`--memory lots`,
+`--cpus 0`, `--pids-limit -5`, `--memory 1m`, or `--cpus 99` on an engine with
+fewer CPUs) exits `2` with `INVALID_RESOURCE` and leaves no worktree, branch,
+image or container behind. A bad `[resources]` table is `INVALID_CONFIG`
+(exit `2`); a bad template `resources` object is `TEMPLATE_INVALID` (exit `1`).
+
+**The limits are fixed when the sandbox is created.** The effective limits are
+written to the worktree's [host-owned record](how-it-works.md#the-host-owned-record),
+and from then on they are what the sandbox has: on `enter`, after a
+`docker stop` / `docker restart`, and when `enter` has to re-create a removed
+container. `list --json` and `create --dry-run` show them (`resources`). A
+container's limits cannot change in place, so:
+
+- `enter --memory 8g` on a sandbox recorded with another value is a conflict
+  (exit `5`, `RESOURCE_MISMATCH`) whose hint gives the exact re-create commands
+  (`treebox teardown <name> && treebox create <name> --checkout <branch> ...`).
+  Restating the recorded value is fine.
+- A `[resources]` or template value that now differs from the record is a
+  warning on every `enter`, with the same re-create commands. The sandbox keeps
+  its recorded limits.
+
+**Raw `runArgs` limits.** A template may already set `--cpus`, `--memory` /
+`-m` or `--pids-limit` in `runArgs`. That keeps working: treebox reads it as the
+template's own value (the lowest tier, like the template `resources` object),
+records it, and passes it to `docker run` once. When a flag or the config sets
+the same limit, treebox drops the raw `runArgs` flag and passes only its own
+value, so the result never depends on Docker's last-flag-wins. A template that
+sets one limit twice with different values (for example `resources.memory` and
+`runArgs` `--memory`) is `TEMPLATE_INVALID`. A worktree recorded without a
+limit (for example one created before limits existed) keeps the template's raw
+`runArgs` unchanged.
+
+**Host isolation** has no sandbox to cap. An explicit `--cpus` / `--memory` /
+`--pids-limit` with `--isolation host` is refused (exit `2`,
+`RESOURCE_UNSUPPORTED`), never ignored. A `[resources]` table in config is a
+default for sandboxes, so it does not make host worktrees fail: `create` notes
+that it is not applied and records no limits.
 
 ## Customizing the sandbox
 
@@ -172,6 +240,8 @@ First run builds your image (cached after that), provisions the worktree, runs
 - `build.dockerfile` / `build.args` → feed `docker build`
 - `user`, `env`, `mounts` (docker `--mount` syntax, with `${workspaceName}`
   substituted per worktree), `runArgs` → feed `docker run`
+- `resources` → default `cpus` / `memory` / `pids` limits for new sandboxes
+  (the lowest [precedence](#resource-limits) tier)
 - `postCreate` → the command exec'd in the workspace after the container starts
 
 When the firewall is enabled (`firewall = true` in config, or `--firewall` per

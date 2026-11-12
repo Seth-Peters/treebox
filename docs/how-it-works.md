@@ -91,7 +91,9 @@ the link instead of writing through it. A forged observation can at most make
 ### The host-owned record
 
 The worktree's **creation policy** - isolation, firewall, sandbox template,
-harness, and base - lives in a host-owned record outside every sandbox mount:
+harness, base, and the effective
+[resource limits](configuration.md#resource-limits) - lives in a host-owned
+record outside every sandbox mount:
 
 ```text
 <worktree-parent>/.records/<name>.json
@@ -102,7 +104,8 @@ can be below the configured discovery root (the same parent that holds
 `.locks/` and `.containers/`). `create` writes the record atomically, under the
 worktree lock, before any runner resource depends on it. The record is
 versioned (`schemaVersion`) and bound to the registered worktree path it
-describes. `enter` and `teardown` read the policy only from this record:
+describes (version `2` added `resources`; a version-`1` record still loads
+and means no treebox cap). `enter` and `teardown` read the policy only from this record:
 `enter` reuses the recorded isolation, firewall, and template, and the
 recorded harness unless a per-session `--harness` is passed; a per-session
 `--template` is the operator's override for one session. An explicit

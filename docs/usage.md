@@ -88,6 +88,9 @@ treebox create fix-auth --isolation docker
 | `--no-fetch`     | Opt out of the required `origin` fetch and accept possibly stale refs.    |
 | `--firewall/--no-firewall` | Enable/disable the container firewall (docker isolation). Unset: the config default applies. |
 | `--template NAME`| Operator-owned sandbox template to render.                                |
+| `--cpus N`       | CPU limit for the sandbox (`2`, `1.5`). See [resource limits](configuration.md#resource-limits). |
+| `--memory SIZE`  | Memory limit in Docker's memory syntax (`512m`, `4g`).                    |
+| `--pids-limit N` | Process limit (`512`). All three: docker isolation only; `--isolation host` refuses them (exit `2`). |
 | `--dry-run, -n`  | Print a stable command plan; change nothing.                              |
 | `--print`        | Provision, then print the launch command instead of launching.            |
 | `--json`         | Provision, then print a JSON result instead of launching.                 |
@@ -243,6 +246,13 @@ Both conditions stop `create` or `enter` with an
 [`ERROR` failure](#scripting-against-treebox); inspect their contents before
 removing the conflict.
 
+The sandbox keeps the CPU, memory and process limits it was created with
+(they are in the record). `enter --cpus` / `--memory` / `--pids-limit` only
+restates them: a different value exits `5` (`RESOURCE_MISMATCH`) with the
+exact re-create commands, and a config or template value that now differs is a
+warning with the same commands. See
+[resource limits](configuration.md#resource-limits).
+
 A container that stopped since setup (host reboot, manual `docker stop`)
 is restarted with the firewall re-established
 before the agent launches - and before a `--print`/`--json` command is
@@ -272,7 +282,9 @@ legacy worktrees (no record yet - see [`adopt`](#adopt-record-a-legacy-worktree)
 or worktrees with an invalid record show `unknown`
 instead of being mislabeled with the current config default. The muted
 **Root** footer shows the discovery root. It does not show the intermediate
-directories of nested worktrees; use `list --json` for each full `path`.
+directories of nested worktrees; use `list --json` for each full `path`
+and for the recorded `resources` limits (`null` when the worktree has no
+usable record).
 On a narrow terminal, the commit-subject column is omitted first so
 identity, isolation, age, dependency freshness, and `.env` state stay legible.
 If name and branch still cannot fit side by side, the branch moves below its
@@ -425,7 +437,10 @@ other options default to your config, exactly as for `create`. treebox never
 reads the policy from the worktree's own state, because a sandboxed agent can
 write that state. A worktree that already has a record is `RECORD_EXISTS`;
 `--force` replaces it (also the recovery for `RECORD_INVALID`, for example after
-the worktree root was moved). `--json` prints the recorded policy.
+the worktree root was moved). `--json` prints the recorded policy. Resource
+limits are the exception to the config defaults: pass `--cpus` / `--memory` /
+`--pids-limit` with the values the sandbox was created with; an omitted one is
+recorded as no treebox cap, never taken from config.
 
 ## `doctor` — is this host ready?
 
@@ -513,8 +528,8 @@ Current success payloads:
 
 | Command | Top-level fields |
 | ------- | ---------------- |
-| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created` |
-| `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands` |
+| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created`, `resources` |
+| `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands`, `resources` |
 | `list --json` | `schemaVersion`, `worktrees` |
 | `teardown --json` | `schemaVersion`, `worktrees` |
 | `doctor --json` | `schemaVersion`, `ok`, `isolation`, `checks`, `advisories` |
@@ -556,6 +571,8 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | ------------ | :--: | -------------- |
 | `INVALID_CONFIG` | `2` | Bad config file or invalid `--isolation` / `--harness` / `--template` (a template name is an identifier, never a path). |
 | `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, or uses the reserved `treebox/` prefix; or a `template init` / `template path` name is not a template identifier. |
+| `INVALID_RESOURCE` | `2` | A `--cpus` / `--memory` / `--pids-limit` (or `[resources]` / template) value treebox or the Docker engine would refuse. Nothing is provisioned. |
+| `RESOURCE_UNSUPPORTED` | `2` | An explicit limit flag for a runner that cannot apply it (`--isolation host`). |
 | `INVALID_BRANCH` | `2` | `create NAME` or `--checkout` names an invalid git ref. |
 | `NOT_A_REPO` | `2` | `--repo` is not a git repo. |
 | `AMBIGUOUS_REF` | `2` | A ref matches more than one worktree. |
@@ -579,6 +596,7 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `RECORD_MISSING` | `5` | The worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (created by an older treebox, or the record was deleted) - `treebox adopt <name> --isolation <mode>`, or `teardown <name> --isolation <mode>`. |
 | `RECORD_INVALID` | `5` | The host-owned record cannot be trusted (unreadable, unsupported `schemaVersion`, or bound to another path) - `treebox adopt <name> --force --isolation <mode>`. |
 | `RECORD_CONFLICT` | `5` | A resumed `create` of a half-built worktree asks for different settings than its record holds - re-run with the recorded settings from the hint, or tear it down. |
+| `RESOURCE_MISMATCH` | `5` | `enter` asks for a limit that differs from the one the sandbox was created with - drop the flag, or re-create with the commands in the hint. |
 | `RECORD_EXISTS` | `5` | `adopt` found a record already in place - pass `--force` to replace it. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |

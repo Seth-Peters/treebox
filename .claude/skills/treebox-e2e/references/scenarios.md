@@ -306,6 +306,16 @@ one behind on purpose.
       running (the `e2e-` name means `e2e_cleanup` still reaps it later); the
       worktree dir is always removed. Container/image cleanup is best-effort —
       `container: "failed"` is a warning, not a teardown failure.
+- [ ] **H7 resource limits** - `tb create e2e-lim … --isolation docker --cpus 1
+      --memory 512m --pids-limit 64 --json`; then `tb enter e2e-lim … --memory 1g
+      --json`; then `tb create e2e-lim-host … --memory 4g --json` (host isolation)
+      Expect: create exit 0 with `resources: {cpus: 1, memory: "512m", pids: 64}`,
+      and `docker inspect` of the container shows `HostConfig.Memory` 536870912,
+      `NanoCpus` 1000000000, `PidsLimit` 64 (`list --json` shows the same
+      `resources`); the enter exits 5 `RESOURCE_MISMATCH` with re-create commands
+      in the hint; the host create exits 2 `RESOURCE_UNSUPPORTED` and leaves no
+      worktree. A bad value (`--memory lots`) exits 2 `INVALID_RESOURCE` with no
+      worktree, branch or image left behind.
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 
