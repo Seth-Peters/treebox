@@ -11,8 +11,8 @@ mount, beside the lock and the docker runner's config dir::
 Only host-side treebox writes it, and only under the worktree lock: ``create``
 writes it before any runner resource depends on it, and ``adopt`` (the
 operator's explicit migration step) writes it for a worktree that has none.
-The sandbox-writable state in ``state.py`` keeps only observations (lockfile
-hash, setup progress) and is never promoted to authority.
+Nothing in the sandbox-writable git dir is read for any decision; the
+``treebox-state.json`` files older treebox versions wrote there are ignored.
 
 The record is bound to the registered worktree path it describes: a record
 whose ``worktree`` names another path (a copied or moved file) is invalid.
@@ -29,11 +29,20 @@ Extending it: add a field to ``WorktreeRecord``, bump ``SCHEMA_VERSION``, and
 teach ``_parse`` to read (and upgrade) every older supported version. Unknown
 keys and unknown versions are rejected, so an older treebox never silently
 drops a newer policy field - it refuses the record instead.
+
+Besides the policy, the record holds the host-observed result of the last
+setup (``setup``, see the setup model in ``lifecycle.py``): a sandbox that
+could mark its own setup done could make treebox skip setup forever or report
+stale dependencies as fresh, so that fact is host-owned too.
+
+Versions: 1 (policy only) is upgraded on read with ``setup`` pending - nothing
+says setup finished, so the next ``enter`` runs it again; 2 adds ``setup``.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import tempfile
@@ -41,16 +50,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .lifecycle import SetupResult, setup_log_path
 from .models import is_valid_template_name, same_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Sibling of the worktrees under one parent, like `.locks/` and `.containers/`.
 RECORD_DIR = ".records"
 
-_KEYS = frozenset(
+_V1_KEYS = frozenset(
     {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template"}
 )
+_KEYS = _V1_KEYS | {"setup"}
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,8 @@ class WorktreeRecord:
     ``isolation`` and ``harness`` are registry names (validated against the
     registries by the CLI, like every other boundary string); ``template`` is
     a template identifier (``models.is_valid_template_name``); ``firewall`` is
-    always a real bool (``False`` for host worktrees)."""
+    always a real bool (``False`` for host worktrees). ``setup`` is not
+    policy: it is the result of the last setup attempt (``lifecycle.py``)."""
 
     worktree: Path
     base: str
@@ -68,6 +80,11 @@ class WorktreeRecord:
     harness: str
     firewall: bool
     template: str
+    setup: SetupResult = dataclasses.field(default_factory=SetupResult)
+
+    def same_policy(self, other: WorktreeRecord) -> bool:
+        """Whether ``other`` states the same creation policy (setup aside)."""
+        return dataclasses.replace(self, setup=other.setup) == other
 
 
 class RecordError(RuntimeError):
@@ -129,14 +146,15 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
     if not isinstance(data, dict):
         raise _invalid(worktree, path, "not a JSON object")
     version = data.get("schemaVersion")
-    if type(version) is not int or version != SCHEMA_VERSION:
+    if type(version) is not int or version not in (1, SCHEMA_VERSION):
         raise _invalid(
             worktree, path, f"unsupported schemaVersion {version!r} (expected {SCHEMA_VERSION})"
         )
-    unknown = sorted(set(data) - _KEYS)
+    keys = _V1_KEYS if version == 1 else _KEYS
+    unknown = sorted(set(data) - keys)
     if unknown:
         raise _invalid(worktree, path, f"unknown key(s) {', '.join(unknown)}")
-    missing = sorted(_KEYS - set(data))
+    missing = sorted(keys - set(data))
     if missing:
         raise _invalid(worktree, path, f"missing key(s) {', '.join(missing)}")
     for key in ("worktree", "base", "isolation", "harness", "template"):
@@ -148,6 +166,14 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         raise _invalid(worktree, path, f"template {data['template']!r} is not a template name")
     if not same_path(data["worktree"], worktree):
         raise _invalid(worktree, path, f"it is bound to worktree {data['worktree']!r}")
+    # Version 1 recorded no setup result: pending (never "done"), so the next
+    # enter runs setup again instead of trusting anything else.
+    setup = SetupResult()
+    if version >= 2:
+        try:
+            setup = SetupResult.from_json(data["setup"])
+        except ValueError as exc:
+            raise _invalid(worktree, path, str(exc)) from exc
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
@@ -155,6 +181,7 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         harness=data["harness"],
         firewall=data["firewall"],
         template=data["template"],
+        setup=setup,
     )
 
 
@@ -172,6 +199,7 @@ def save(rec: WorktreeRecord) -> None:
         "harness": rec.harness,
         "firewall": rec.firewall,
         "template": rec.template,
+        "setup": rec.setup.to_json(),
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -187,6 +215,8 @@ def save(rec: WorktreeRecord) -> None:
 
 
 def remove(worktree: Path) -> None:
-    """Delete the record for ``worktree`` (teardown). Missing is fine."""
-    with contextlib.suppress(FileNotFoundError):
-        record_path(worktree).unlink()
+    """Delete the record for ``worktree`` and its setup log (the last step of
+    a complete teardown). Missing is fine."""
+    for path in (record_path(worktree), setup_log_path(worktree)):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()

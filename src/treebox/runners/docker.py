@@ -824,12 +824,16 @@ class DockerRunner:
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Remove the worktree's container/image (and, when this runner was
         constructed with ``remove_volumes``, its per-workspace volumes). Every
-        step runs even when an earlier one failed: the caller deletes the
-        worktree's recorded state right after this returns, so a skipped step
-        could never be retried and its resources would leak forever."""
+        step runs even when an earlier one failed, and each resource a step
+        could not remove is reported in ``remaining``; the host-owned resource
+        manifest (in the sandbox files dir) is then kept, so a retry still
+        knows what this worktree owns."""
         if not self._available():
-            reporter.note("container", "skipped; Docker unavailable")
-            return RunnerTeardownResult.skipped()
+            reporter.fail("container", "not checked · Docker unavailable")
+            return RunnerTeardownResult(
+                "skipped", remaining=("Docker resources (Docker is not reachable)",)
+            )
+        remaining: list[str] = []
         ids = self._container_ids(wt)
         manifest: ResourceManifest | None = None
         if ids or self._remove_volumes:
@@ -849,46 +853,62 @@ class DockerRunner:
             # Intersect with the live engine list to keep retries quiet.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
             volumes = sorted(set(manifest["volumes"]) & existing)
-        container_failed = False
+        container_failed = container_kept = False
         if ids:
             image = self._container_image(ids)
+            owned_image = bool(image) and manifest is not None and image == manifest["image"]
             if self._engine_attempt(["rm", "-f", *ids], reporter=reporter):
                 reporter.ok("container", f"removed {' '.join(ids)}")
                 # A failed container rm skips image removal because it remains
                 # in use. Otherwise only the exact host-recorded image is ours.
-                if image and manifest is not None and image == manifest["image"]:
-                    container_failed = not self._engine_attempt(
-                        ["image", "rm", image], reporter=reporter
-                    )
+                if owned_image:
+                    if self._engine_attempt(["image", "rm", str(image)], reporter=reporter):
+                        reporter.ok("image", f"removed {image}")
+                    else:
+                        container_failed = True
+                        remaining.append(f"image {image} (docker image rm failed)")
                 elif image:
                     reporter.warn(
                         f"image removal skipped: {image!r} is not authorized by "
                         "the host-owned resource manifest"
                     )
             else:
-                container_failed = True
+                container_failed = container_kept = True
+                remaining.append(f"container {' '.join(ids)} (docker rm failed)")
+                if owned_image:
+                    remaining.append(f"image {image} (in use by the container)")
         else:
             reporter.note("container", "none found")
         volumes_removed = False
         if self._remove_volumes:
-            if volumes and self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
-                reporter.ok("volumes", f"removed {' '.join(volumes)}")
-                volumes_removed = True
-            elif not volumes:
+            if volumes and not container_kept:
+                if self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
+                    reporter.ok("volumes", f"removed {' '.join(volumes)}")
+                    volumes_removed = True
+                else:
+                    remaining.append(f"volumes {' '.join(volumes)} (docker volume rm failed)")
+            elif volumes:
+                # A container that is still there still uses its volumes.
+                remaining.append(f"volumes {' '.join(volumes)} (in use by the container)")
+            else:
                 # Never silent: the operator asked for volume removal, so say
                 # when no removable volume could be found from any source.
                 reporter.note("volumes", "none found")
         elif container_volumes:
             reporter.note("volumes", f"kept {' '.join(container_volumes)}")
 
-        # Remove the host-side config/build-context dir too.
+        # Remove the host-side config/build-context dir too - but only when
+        # nothing remains: it holds the resource manifest a retry needs.
         cfg_dir = self._config_dir(wt)
-        if cfg_dir.exists():
+        if remaining:
+            reporter.note("sandbox files", "kept · the retry needs the resource manifest")
+        elif cfg_dir.exists():
             shutil.rmtree(cfg_dir, ignore_errors=True)
             reporter.ok("sandbox files", "removed")
         return RunnerTeardownResult(
             "failed" if container_failed else "cleaned",
             volumes_removed=volumes_removed,
+            remaining=tuple(remaining),
         )
 
 

@@ -673,6 +673,7 @@ class WorktreeRecord:
     path: str
     branch: str | None
     prunable: bool = False  # git's own signal that the working dir is gone
+    locked: bool = False  # `git worktree lock`: git refuses to remove or prune it
 
 
 def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
@@ -681,11 +682,13 @@ def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
     path: str | None = None
     branch: str | None = None
     prunable = False
+    locked = False
     for line in [*out.splitlines(), ""]:
         if line.startswith("worktree "):
             path = line[len("worktree ") :]
             branch = None
             prunable = False
+            locked = False
         elif line.startswith("branch "):
             ref = line[len("branch ") :]
             branch = ref.removeprefix("refs/heads/")
@@ -693,11 +696,14 @@ def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
             # A registration whose working dir was removed out from under git
             # (e.g. a manual rm, or a stale nested tree from an old create bug).
             prunable = True
+        elif line == "locked" or line.startswith("locked "):
+            locked = True
         elif line == "" and path is not None:
-            records.append(WorktreeRecord(path, branch, prunable))
+            records.append(WorktreeRecord(path, branch, prunable, locked))
             path = None
             branch = None
             prunable = False
+            locked = False
     return records
 
 

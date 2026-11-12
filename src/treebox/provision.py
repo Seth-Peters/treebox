@@ -4,14 +4,17 @@ create()/enter() orchestrate the steps the target state lays out:
 
   fetch -> resolve branch -> worktree add -> push guard (every worktree)
         -> copy submodules -> copy .env -> runner.setup (cache-backed)
-        -> record lockfile hash -> hand to runner
+        -> record the setup result -> hand to runner
 
 Provisioning is identical for every runner; setup/refresh, entry command,
-launch, and teardown are the runner-owned seam.
+launch, and teardown are the runner-owned seam. Setup results follow the
+setup model in ``lifecycle.py``; ``worktree_health`` is the one place a
+worktree's health is classified.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
 import stat
@@ -19,11 +22,11 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from . import ecosystems, git, record, state
+from . import ecosystems, git, lifecycle, record
 from .config import Config
 from .harnesses import Harness
-from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
-from .output import Reporter
+from .models import Health, Worktree, expand_user, is_placeholder, same_path, worktree_root
+from .output import Reporter, StepError
 from .runners.base import Runner
 from .submodule_copy import SubmoduleCopyError, UnsafeDestinationError, copy_submodule
 
@@ -119,6 +122,42 @@ class RecordConflictError(ProvisionError):
             f"--isolation {prior.isolation} {firewall} --template {prior.template} "
             f"-H {prior.harness} --base {prior.base} - or tear it down "
             f"(treebox teardown {name}) and create it again."
+        )
+
+
+class SetupFailedError(ProvisionError):
+    """A setup step exited non-zero (exit 1, SETUP_FAILED). The worktree is
+    kept with its setup recorded as failed; ``path`` is the step's output."""
+
+    def __init__(self, wt: Worktree, step: str, exit_status: int, log: Path) -> None:
+        super().__init__(
+            f"Setup of worktree '{wt.name}' failed: step '{step}' exited with status "
+            f"{exit_status}. Its output is in {log}."
+        )
+        self.path = log
+        self.hint = (
+            "The worktree is kept and marked unfinished. Fix the cause, then retry the "
+            f"setup: treebox enter {wt.name} (or run the same treebox create again)."
+        )
+
+
+class InvalidLinkageError(ProvisionError):
+    """The worktree directory exists, but its git linkage is unusable (exit 5,
+    INVALID_LINKAGE): git commands inside it would act on the main checkout."""
+
+    def __init__(self, path: Path, health: Health) -> None:
+        reason = (
+            "its .git pointer is missing or does not lead to its git registration"
+            if health == "invalid_linkage"
+            else "git has no registration for it"
+        )
+        super().__init__(f"Worktree '{path.name}' has an invalid git linkage: {reason}.")
+        self.path = path
+        self.hint = (
+            f"Recover with `treebox teardown {path.name}` (it removes the directory and "
+            "git's stale registration), then create it again."
+            if health == "invalid_linkage"
+            else f"Remove the stray directory by hand: rm -rf {path}"
         )
 
 
@@ -443,92 +482,125 @@ def _creation_record(
     )
 
 
-def _check_resume_policy(wt: Worktree, policy: record.WorktreeRecord) -> bool:
-    """Whether ``wt`` already has a record; raise unless it equals ``policy``.
+def _check_resume_policy(
+    wt: Worktree, policy: record.WorktreeRecord
+) -> record.WorktreeRecord | None:
+    """The record ``wt`` already has (None when it has none); raise unless it
+    states the same policy as ``policy``.
 
-    A resumed create (an earlier run died before setup finished) must restate
-    the recorded policy: the sandbox-writable ``provisioned`` flag decides
-    whether create resumes, so a resume must never be a way to change the
-    policy of an existing worktree. An unreadable record is not overwritten
-    either (``adopt --force`` is the explicit way to replace one). Read-only,
-    so ``--dry-run`` fails exactly like a real run."""
+    A resumed create (an earlier run did not finish setup) must restate the
+    recorded policy, so a resume is never a way to change the policy of an
+    existing worktree. An unreadable record is not overwritten either
+    (``adopt --force`` is the explicit way to replace one). Read-only, so
+    ``--dry-run`` fails exactly like a real run."""
     try:
         prior = record.load(wt.path)
     except record.RecordMissingError:
-        return False
-    if prior != policy:
+        return None
+    if not prior.same_policy(policy):
         raise RecordConflictError(wt.name, prior)
-    return True
+    return prior
 
 
-def _record_policy(wt: Worktree, policy: record.WorktreeRecord) -> None:
-    """Persist the host-owned record *before* any runner resource depends on
-    it. Setup is what builds a docker image and starts its container, so if it
-    fails we'd otherwise be left with a container and no record of which runner
-    owns it - an un-tearable orphan."""
-    if not _check_resume_policy(wt, policy):
-        record.save(policy)
+def _record_policy(
+    wt: Worktree, policy: record.WorktreeRecord
+) -> tuple[record.WorktreeRecord, bool]:
+    """Persist the host-owned record *before* the worktree and any runner
+    resource exist, with setup pending. A create that dies at any later point
+    then leaves a worktree that ``create`` resumes and ``teardown`` can drive,
+    never a container with no record of which runner owns it. Returns the
+    record and whether this call wrote it."""
+    prior = _check_resume_policy(wt, policy)
+    if prior is not None:
+        return prior, False
+    record.save(policy)
+    return policy, True
 
 
-def _record_setup_started(wt: Worktree, runner: Runner) -> None:
-    """Initialize runner-owned metadata (so destructive host cleanup never
-    needs to trust sandbox-writable state), then observe that setup has not
-    completed yet."""
-    runner.initialize(wt)
-    state.save(wt.path, state.WorktreeState(lockfile_hash="", provisioned=False))
-
-
-def _record_hash(worktree: Worktree) -> None:
-    state.save(
-        worktree.path,
-        state.WorktreeState(
-            lockfile_hash=ecosystems.lockfile_hash(worktree.path), provisioned=True
-        ),
-    )
+def _run_setup(
+    runner: Runner, wt: Worktree, rec: record.WorktreeRecord, *, cold: bool, reporter: Reporter
+) -> None:
+    """Run ``runner.setup`` and record its result in the host-owned record
+    (the setup model in ``lifecycle.py``): pending before the attempt, then
+    done with the lockfile hash, or failed with the step and its exit status.
+    Any other interruption leaves the result pending, which is retried too."""
+    rec = dataclasses.replace(rec, setup=lifecycle.SetupResult())
+    record.save(rec)
+    try:
+        runner.setup(wt, cold=cold, reporter=reporter)
+    except StepError as exc:
+        log = lifecycle.setup_log_path(wt.path)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            exc.log if exc.log.strip() else "(no output captured; --verbose streams it)\n",
+            encoding="utf-8",
+        )
+        record.save(
+            dataclasses.replace(rec, setup=lifecycle.SetupResult.failed(exc.label, exc.returncode))
+        )
+        raise SetupFailedError(wt, exc.label, exc.returncode, log) from exc
+    done = lifecycle.SetupResult.done(ecosystems.lockfile_hash(wt.path))
+    record.save(dataclasses.replace(rec, setup=done))
 
 
 def _finish_setup(
     config: Config,
     runner: Runner,
     wt: Worktree,
+    rec: record.WorktreeRecord,
     *,
     harness: Harness,
     cold: bool,
     reporter: Reporter,
 ) -> Outcome:
-    """The shared tail of every create path: record, guard, submodules, .env,
-    setup."""
-    # The creation policy is on disk, outside every sandbox mount, before
-    # anything depends on it: `enter`/`teardown` read it back instead of the
-    # config default or the sandbox-writable state.
-    _record_policy(wt, _creation_record(config, runner, wt, harness.name))
+    """The shared tail of every create path: guard, submodules, .env, setup.
+    The record ``rec`` is already on disk, outside every sandbox mount:
+    `enter`/`teardown` read the policy back from it, never from config
+    defaults or sandbox-writable state."""
     ensure_root_ignored(wt.repo, config.root)
     install_push_guard(wt, reporter)
     copy_submodules(wt.repo, wt.path, reporter)
     copy_env(wt.repo, wt.path, config.env_file, reporter)
-    _record_setup_started(wt, runner)
-    runner.setup(wt, cold=cold, reporter=reporter)
-    _record_hash(wt)
+    # Runner-owned metadata first, so destructive host cleanup never needs to
+    # trust sandbox-writable state.
+    runner.initialize(wt)
+    _run_setup(runner, wt, rec, cold=cold, reporter=reporter)
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=[]), created=True)
 
 
 # --- orchestration -----------------------------------------------------------
 
 
-def links_to_worktree_gitdir(repo: str, path: Path) -> bool:
-    """Whether ``path`` is a healthy linked worktree of ``repo``: its ``.git``
-    pointer FILE resolves to a per-worktree git dir under the repo's common git
-    dir. A missing/corrupt pointer (e.g. an interrupted teardown that rm-rf'd it
-    but left git's registration) makes git commands inside ``path`` silently
-    resolve to the MAIN repo — which we must never "finish setup" against."""
+def worktree_health(repo: str, path: Path) -> Health:
+    """The one classification of a worktree's health (``models.Health``),
+    shared by create, enter, list (``health`` in --json) and teardown.
+    Read-only."""
+    if not path.is_dir():
+        return "directory_missing"
+    admin = git.registered_gitdir(repo, path)
+    if admin is None:
+        return "unregistered"
+    if not _links_to(path, admin):
+        return "invalid_linkage"
+    try:
+        record.load(path)
+    except record.RecordError:
+        return "unreadable_state"
+    return "healthy"
+
+
+def _links_to(path: Path, admin: Path) -> bool:
+    """Whether the ``.git`` pointer FILE of ``path`` leads to exactly its own
+    registration dir ``admin``. A missing/corrupt pointer (e.g. an interrupted
+    teardown that rm-rf'd it but left git's registration) makes git commands
+    inside ``path`` silently resolve to the MAIN repo - which we must never
+    "finish setup" against, ask for dirtiness, or remove through git."""
     if not (path / ".git").is_file():
         return False
     try:
-        gitdir = Path(git.git_dir(path)).resolve()
-        worktrees = (git.common_dir(repo) / "worktrees").resolve()
+        return Path(git.git_dir(path)).resolve() == admin.resolve()
     except git.GitError:
         return False
-    return worktrees in gitdir.parents
 
 
 def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictError:
@@ -536,13 +608,17 @@ def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictErr
     matches what is actually there (``teardown`` only sees registered
     worktrees, so it is never promised for a directory git does not know)."""
     conflict = SlugConflictError(wt.name, wt.path)
-    registered = git.worktree_registered(repo, str(wt.path))
-    healthy = links_to_worktree_gitdir(repo, wt.path) and (
-        registered or bool(git.branch_for_path(repo, str(wt.path)))
-    )
-    if healthy:
+    health = worktree_health(repo, wt.path)
+    if health == "healthy":
         return conflict  # the default hint (enter / teardown / pick another name) applies
-    if registered:
+    if health == "unreadable_state":
+        conflict.hint = (
+            f"It has no usable host-owned record (a worktree from an older treebox?). "
+            f"Restate how it was created: treebox adopt {wt.name} --isolation "
+            f"<host|docker> - then enter it - or tear it down: treebox teardown "
+            f"{wt.name} --isolation <host|docker>."
+        )
+    elif health == "invalid_linkage":
         conflict.hint = (
             "The directory is not a healthy registered worktree (likely leftover "
             f"from an interrupted teardown). Recover with `treebox teardown {wt.name}` "
@@ -560,12 +636,13 @@ def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictErr
 
 
 def _is_resumable_unprovisioned_worktree(repo: str, wt: Worktree, branch: str) -> bool:
-    """Whether real create would finish setup in this existing worktree."""
-    if not links_to_worktree_gitdir(repo, wt.path):
+    """Whether real create would finish setup in this existing worktree: a
+    healthy worktree on the exact expected branch whose host-owned record says
+    setup is not done (``lifecycle.resumable``)."""
+    if worktree_health(repo, wt.path) != "healthy":
         return False
-    prior = state.load(wt.path)
     actual = git.branch_for_path(repo, str(wt.path)) or ""
-    return actual == branch and not (prior is not None and prior.provisioned)
+    return actual == branch and lifecycle.resumable(record.load(wt.path).setup)
 
 
 def _check_requested_branch(
@@ -648,18 +725,22 @@ def create(
     installs the pre-push guard; only placeholders are affected by it.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
+    policy = _creation_record(config, runner, wt, harness.name)
 
     # An existing target directory is a conflict except when a prior run created
-    # the dir on this exact branch but died before setup finished (state is
-    # recorded only after runner.setup completes). Launching into that
-    # half-built tree would be the "said Ready, then failed" bug; finish it.
+    # it on this exact branch and setup did not finish (pending or failed in the
+    # host-owned record). Launching into that half-built tree would be the
+    # "said Ready, then failed" bug; finish it.
     if wt.path.exists():
-        # Resume ONLY a genuinely half-built treebox worktree: linkage intact,
+        # Resume ONLY a genuinely half-built treebox worktree: healthy,
         # registered with git on the exact expected branch, setup unfinished.
         # Anything else is a conflict.
         if _is_resumable_unprovisioned_worktree(repo, wt, branch):
-            reporter.note("worktree", "exists but unprovisioned — finishing setup")
-            return _finish_setup(config, runner, wt, harness=harness, cold=cold, reporter=reporter)
+            rec, _ = _record_policy(wt, policy)
+            reporter.note("worktree", "exists but setup unfinished - finishing setup")
+            return _finish_setup(
+                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter
+            )
         raise _slug_conflict_for_existing_path(repo, wt)
 
     # Freshness is the whole point: a fetch is REQUIRED by default and fails
@@ -730,10 +811,16 @@ def create(
         "track-remote": f"tracking {plan.start_point}",
         "new": f"{plan.name} from {plan.start_point}",
     }[plan.kind]
-    with reporter.task("worktree", detail):
-        git.worktree_add(repo, wt.path, plan)
+    rec, wrote = _record_policy(wt, policy)
+    try:
+        with reporter.task("worktree", detail):
+            git.worktree_add(repo, wt.path, plan)
+    except BaseException:
+        if wrote:
+            record.remove(wt.path)  # nothing exists yet that the record could describe
+        raise
 
-    return _finish_setup(config, runner, wt, harness=harness, cold=cold, reporter=reporter)
+    return _finish_setup(config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter)
 
 
 def enter(
@@ -748,26 +835,19 @@ def enter(
     args: list[str],
     reporter: Reporter,
 ) -> Outcome:
-    """Re-prepare an existing worktree: refresh .env, re-run setup if the
-    lockfile changed since last setup or a prior setup never completed
-    (observed provisioned=False). The branch is read live - the agent may
-    have renamed it since create. ``config`` is already reconciled with the
-    host-owned record (``cli._reconcile_with_record``) and ``base`` is the
-    recorded base; nothing here reads policy from sandbox-writable state."""
+    """Re-prepare an existing worktree: refresh .env, and run setup when the
+    setup model says so (``lifecycle.setup_reason``: setup pending or failed,
+    or the lockfile changed since it finished). The branch is read live - the
+    agent may have renamed it since create. ``config`` is already reconciled
+    with the host-owned record (``cli._reconcile_with_record``) and ``base``
+    is the recorded base; nothing here reads sandbox-writable state."""
     # ``path`` is the exact registered path the ref resolved to (possibly a
     # descendant of the configured root), never a root/name reconstruction.
     wt = Worktree.at(repo, path)
-    if not wt.path.is_dir():
-        raise NotFoundError(f"Worktree not found: {wt.path}")
-
-    # Same guard as create's resume path: without a healthy .git pointer,
-    # every git command below (and the state read/write) silently resolves
-    # to the MAIN repo, and the launched agent would operate on the user's
-    # real checkout. Refuse loudly with the teardown recovery hint instead.
-    if not links_to_worktree_gitdir(repo, wt.path):
-        raise _slug_conflict_for_existing_path(repo, wt)
-
-    prior = state.load(wt.path)
+    _require_usable(repo, wt.path)
+    # Re-read under the lock: the setup result may have changed since the
+    # caller read the policy.
+    rec = record.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
     wt = Worktree.at(repo, path, branch=branch, base=base)
 
@@ -777,16 +857,10 @@ def enter(
     # not ride the lockfile-hash cache that gates setup below.
     runner.refresh(wt, reporter=reporter)
 
-    current = ecosystems.lockfile_hash(wt.path)
-    unfinished = prior is not None and not prior.provisioned
-    changed = prior is None or prior.lockfile_hash != current
-    if unfinished or changed:
-        if unfinished:
-            reporter.info("setup never completed — finishing setup")
-        else:
-            reporter.info("dependencies changed since last setup — re-syncing")
-        runner.setup(wt, cold=cold, reporter=reporter)
-        _record_hash(wt)
+    reason = lifecycle.setup_reason(rec.setup, ecosystems.lockfile_hash(wt.path))
+    if reason is not None:
+        reporter.info(reason)
+        _run_setup(runner, wt, rec, cold=cold, reporter=reporter)
     else:
         reporter.note("deps", "unchanged · skipping setup")
 
@@ -798,11 +872,21 @@ def adopt(repo: str, path: Path, policy: record.WorktreeRecord, *, force: bool) 
     legacy worktree from before records existed) or, with ``force``, replace
     an existing one. This is the operator's explicit migration step: the
     policy comes only from what the operator states, never from the
-    worktree's sandbox-writable state. Callers hold the worktree lock."""
-    if not path.is_dir():
-        raise NotFoundError(f"Worktree not found: {path}")
-    if not links_to_worktree_gitdir(repo, path):
-        raise _slug_conflict_for_existing_path(repo, Worktree.at(repo, path))
+    worktree's sandbox-writable state. The setup result starts pending, so
+    the next ``enter`` runs setup under the adopted policy. Callers hold the
+    worktree lock."""
+    _require_usable(repo, path)
     if record.exists(path) and not force:
         raise RecordExistsError(path)
-    record.save(policy)
+    record.save(dataclasses.replace(policy, setup=lifecycle.SetupResult()))
+
+
+def _require_usable(repo: str, path: Path) -> None:
+    """Refuse a worktree whose directory or git linkage is unusable, by its
+    health: without a healthy ``.git`` pointer every git command (and the
+    launched agent) would act on the MAIN checkout."""
+    health = worktree_health(repo, path)
+    if health == "directory_missing":
+        raise NotFoundError(f"Worktree not found: {path}")
+    if health in ("invalid_linkage", "unregistered"):
+        raise InvalidLinkageError(path, health)

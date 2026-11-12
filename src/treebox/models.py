@@ -100,6 +100,20 @@ def path_is_under(path: str | Path, root: str | Path) -> bool:
 
 DepsFreshness = Literal["fresh", "stale", "unknown"]
 
+# The setup model's states (see ``lifecycle.py``).
+SetupStatus = Literal["pending", "failed", "done"]
+
+# The one classification of a worktree's health (``provision.worktree_health``):
+#   healthy            registered, linked to its own registration, record readable
+#   directory_missing  the directory is gone (a registration may remain)
+#   unregistered       a directory git has no registration for
+#   invalid_linkage    registered, but its .git pointer is missing or leads
+#                      elsewhere: git inside it would act on the main checkout
+#   unreadable_state   git is fine, but the host-owned record is missing or invalid
+Health = Literal[
+    "healthy", "directory_missing", "unregistered", "invalid_linkage", "unreadable_state"
+]
+
 
 class WorktreeRow(TypedDict):
     """One worktree as shown by ``list`` and the teardown chooser.
@@ -112,7 +126,9 @@ class WorktreeRow(TypedDict):
     name: str
     branch: str
     unnamed: bool  # branch is a treebox/<name> placeholder
-    missing: bool  # registration whose working dir is gone (prunable)
+    # Kept for older consumers: true when ``health`` is directory_missing or
+    # invalid_linkage (only the git registration is reliable).
+    missing: bool
     last_commit: str
     commit_epoch: int
     path: str
@@ -121,6 +137,8 @@ class WorktreeRow(TypedDict):
     harness: str
     deps: DepsFreshness
     env: Literal["present", "absent"]
+    health: Health
+    setup: SetupStatus | Literal[""]  # "" when the record is missing or invalid
 
 
 class TemplateRow(TypedDict):
