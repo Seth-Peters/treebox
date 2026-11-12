@@ -67,7 +67,8 @@ remains the deliberate human escape hatch.
 
 `--checkout` checks out an **existing** branch (local or `origin/`) exactly —
 for resuming work or reviewing a PR. The worktree's name derives from the
-branch (`feature/auth` → `feature--auth`) unless you pass `NAME` too. It is
+branch (`feature/auth` → `feature--auth`; a placeholder drops its `treebox/`
+prefix first, so `treebox/a/b` → `a--b`) unless you pass `NAME` too. It is
 also the deliberate way to resume a branch you own: `create NAME` for a branch
 that already exists (locally or on origin) is a loud `BRANCH_EXISTS` conflict,
 never a silent adoption of old work.
@@ -534,6 +535,7 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, or uses the reserved `treebox/` prefix. |
 | `INVALID_BRANCH` | `2` | `create NAME` or `--checkout` names an invalid git ref. |
 | `NOT_A_REPO` | `2` | `--repo` is not a git repo. |
+| `INVALID_ROOT` | `2` | The worktree root (`--root` or `root` in config), or its nearest existing parent, is not a directory. Every command that takes `--root` checks it. |
 | `AMBIGUOUS_REF` | `2` | A ref matches more than one worktree. |
 | `NOT_FOUND` | `3` | The requested worktree, checkout branch, or base branch does not exist. |
 | `FETCH_FAILED` | `4` | Required fetch/auth failed. |

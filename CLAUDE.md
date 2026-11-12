@@ -142,8 +142,10 @@ Module map:
   registration becomes a candidate (it also owns root-alias spelling). See the
   [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable).
   Branch-shaped inputs (`create feature/auth`,
-  `create --checkout feature/auth`) derive the name by flattening slashes to
-  `--` (`feature--auth`); generated names come from `names.py`. Also home to
+  `create --checkout feature/auth`) derive the name in one place,
+  `derive_name`: drop a `treebox/` placeholder prefix, then flatten slashes to
+  `--` (`feature--auth`, `treebox/a/b` -> `a--b`), so treebox never nests a
+  worktree; generated names come from `names.py`. Also home to
   `expand_user`, the tolerant `~`-expansion helper every path-consuming module
   shares (an unresolvable `~user` stays literal instead of raising).
 - **`config.py`** is **user-level TOML only** (`$TREEBOX_CONFIG`, else
