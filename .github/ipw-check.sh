@@ -24,7 +24,7 @@ cd /tmp/ws && git init -q . && playwright-cli install --skills >/dev/null 2>&1 |
 timeout 90 playwright-cli open http://127.0.0.1:8765/ 2>&1 | head -20
 msg=$(timeout 30 playwright-cli eval "document.querySelector('#msg').textContent" 2>&1)
 echo "$msg" | head -5
-browser=$(pgrep -a -f chrome-headless-shell | grep -v -e '--type=' | head -1)
+browser=$(pgrep -a -f '^/opt/google/chrome/chrome ' | grep -v -e '--type=' | head -1)
 if [[ $browser == *--no-sandbox* ]]; then echo "browser process has --no-sandbox"; else echo "browser process has no --no-sandbox: ${browser:0:160}"; fi
 timeout 30 playwright-cli screenshot --filename="$out/playwright-cli.png" 2>&1 | tail -2
 timeout 30 playwright-cli close-all >/dev/null 2>&1
