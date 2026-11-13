@@ -297,7 +297,12 @@ def test_json_error_shape_is_pinned(repo: Path, root: str, hermetic_config):
 
 
 def test_exit_and_error_code_matrix(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    non_root_identity,
 ):
     """One table for the whole scripting contract: scenario → (exit, error.code).
     Every case runs in --json mode so the code agents branch on is asserted too."""

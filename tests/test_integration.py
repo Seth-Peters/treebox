@@ -1425,7 +1425,7 @@ def _rewrite_state_runner(wt: Path, runner_name: str) -> None:
 
 
 def test_enter_prefers_recorded_runner(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """enter without --isolation must use the isolation mode the worktree was provisioned
     with, not the config default (host) — otherwise a docker-sandboxed worktree
@@ -1449,7 +1449,7 @@ def test_enter_prefers_recorded_runner(
 
 
 def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """enter --print/--json with an unchanged lockfile must still make the
     sandbox entry-ready (docker: restart a stopped container and re-lock
@@ -1521,7 +1521,7 @@ def test_enter_explicit_runner_mismatch_is_conflict(repo: Path, root: str, herme
 
 
 def test_enter_preflights_the_runner_so_a_stopped_daemon_is_not_a_lost_worktree(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """A stopped Docker daemon must surface on `enter` as the same clean
     DOCKER_UNAVAILABLE error create/doctor give — never the misleading "no
@@ -3164,7 +3164,7 @@ def test_teardown_chooser_with_no_worktrees_says_so(
 
 
 def test_doctor_surfaces_runner_preflight_hint_as_advisory(
-    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """A failing isolation preflight must reach the doctor payload as a failed
     check plus its remediation hint in advisories — and exit 1 (hard check)."""

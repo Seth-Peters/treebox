@@ -1859,7 +1859,9 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     assert run.config.template == "hardened"  # recovered from state, not the config default
 
 
-def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
+def test_docker_doctor_gates_on_binary_and_daemon(
+    monkeypatch: pytest.MonkeyPatch, non_root_identity
+):
     """doctor is the only safety gate before a sandboxed create: each missing
     dependency must raise its own loud PreflightError carrying a stable machine
     code and a remediation hint. Docker is the whole dependency: the binary and
