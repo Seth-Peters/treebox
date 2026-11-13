@@ -23,9 +23,12 @@ Invariants (part of this module's interface, relied on by every caller):
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
+import subprocess
+import sys
 from collections.abc import Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
@@ -54,10 +57,24 @@ class Harness:
     # authenticate plus its user-level settings. Everything else in the live
     # dir (state, history, host-executed hooks) stays on the host.
     _credential_files: tuple[str, ...]
+    # The one staged file that holds the subscription login itself (a JSON
+    # object); the other staged files are settings.
+    _login_file: str
+    # The macOS Keychain service where the CLI keeps its login on that
+    # platform instead of ``_login_file`` (None: the file is the only store).
+    _keychain_service: str | None = None
+
+    def __post_init__(self) -> None:
+        if self._login_file not in self._credential_files:
+            raise ValueError(f"{self.name}: the login file must be one of the staged files")
 
     def launch_argv(self, extra: Sequence[str]) -> list[str]:
         """The exact fully-autonomous agent argv (extra args appended verbatim)."""
         return [*self._argv, *extra]
+
+    def binary(self) -> str:
+        """The executable the launch argv starts (looked up on PATH)."""
+        return self._argv[0]
 
     def login_dir(self) -> str:
         """The host login dir as shown to humans (``~/.claude``)."""
@@ -67,10 +84,46 @@ class Harness:
         """The expanded host login dir: doctor's row detail, staging's source."""
         return Path(self._credential_dir).expanduser()
 
-    def credentials_present(self) -> bool:
-        """True when the subscription-login dir exists and is non-empty."""
-        d = self.credential_path()
-        return d.is_dir() and any(d.iterdir())
+    def login_file(self) -> Path:
+        """The host file that holds the subscription login: the one file a
+        sandbox needs a copy of to authenticate."""
+        return self.credential_path() / self._login_file
+
+    def sandbox_login(self) -> str | None:
+        """Where a sandbox's login comes from, or None when there is none.
+
+        A sandbox only ever gets a copy of ``login_file``, so only a real
+        login file counts: a regular file that holds a non-empty JSON object.
+        A login dir that is merely non-empty (settings, history) is no login.
+        """
+        path = self.login_file()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        return str(path) if isinstance(data, dict) and data else None
+
+    def host_login(self) -> str | None:
+        """Where an agent launched on the host finds its login, or None.
+
+        The login file first; on macOS, also the Keychain item the CLI keeps
+        its login in there. The Keychain probe reads only the item's
+        attributes (never the secret), so it never asks for anything.
+        """
+        found = self.sandbox_login()
+        if found or self._keychain_service is None or sys.platform != "darwin":
+            return found
+        try:
+            probe = subprocess.run(
+                ["security", "find-generic-password", "-s", self._keychain_service],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return f"macOS Keychain ({self._keychain_service})" if probe.returncode == 0 else None
 
     def login_hint(self) -> str:
         """How to obtain a login, for launch errors and doctor advice."""
@@ -155,6 +208,8 @@ CLAUDE = Harness(
     _argv=("claude", "--dangerously-skip-permissions"),
     _credential_dir="~/.claude",
     _credential_files=(".credentials.json", "settings.json"),
+    _login_file=".credentials.json",
+    _keychain_service="Claude Code-credentials",
 )
 
 CODEX = Harness(
@@ -162,6 +217,7 @@ CODEX = Harness(
     _argv=("codex", "--dangerously-bypass-approvals-and-sandbox"),
     _credential_dir="~/.codex",
     _credential_files=("auth.json", "config.toml"),
+    _login_file="auth.json",
 )
 
 # The registry. Order is user-facing: doctor's login rows and help text list

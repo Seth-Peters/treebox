@@ -319,10 +319,16 @@ def _batch_env() -> dict[str, str]:
 
     The single definition of 'non-interactive' shared by the fetch cascade and
     doctor's reachability probe — they must agree on what never-prompts means.
+    Forced, never defaulted: an exported ``GIT_TERMINAL_PROMPT=1`` or a custom
+    ``GIT_SSH_COMMAND`` must not turn a silent attempt into a prompt on the
+    terminal (git and ssh ask on ``/dev/tty``, so even a closed stdin would
+    not stop them). Git Credential Manager is told not to open its dialogs.
     """
     env = dict(os.environ)
-    env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    env.setdefault("GIT_SSH_COMMAND", env.get("GIT_SSH_COMMAND") or "ssh -o BatchMode=yes")
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    ssh = env.get("GIT_SSH_COMMAND") or "ssh"
+    env["GIT_SSH_COMMAND"] = f"{ssh} -o BatchMode=yes"
     return env
 
 
@@ -380,6 +386,7 @@ def _silent_fetch(repo: str | Path, attempt: _SilentAttempt) -> tuple[int, str]:
             ]
         ),
         env=_batch_env(),
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -387,15 +394,23 @@ def _silent_fetch(repo: str | Path, attempt: _SilentAttempt) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "").strip()
 
 
-def _fetch_prompt(repo: str | Path) -> int:
+def _fetch_prompt(repo: str | Path) -> tuple[int, str]:
     """Terminal-attached ``git fetch origin`` so ssh/git can prompt.
 
-    Inherits stdio so an SSH key passphrase or HTTPS credential prompt reaches
-    the user, then continues — exactly like a manual ``git pull``.
+    git and ssh ask for an SSH key passphrase or HTTPS credentials on the
+    terminal itself (``/dev/tty``), then continue - exactly like a manual
+    ``git pull``. Its output is captured, like the silent attempts', so a
+    failure reaches the caller as the error detail and never as raw text on
+    stderr (where ``--json`` keeps exactly one error object).
     """
-    return _spawn(
-        _git(["-C", str(repo), "fetch", "origin", "--quiet"]), env=dict(os.environ)
-    ).returncode
+    proc = _spawn(
+        _git(["-C", str(repo), "fetch", "origin", "--quiet"]),
+        env=dict(os.environ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc.returncode, (proc.stdout or "").strip()
 
 
 def fetch_origin(repo: str | Path, *, required: bool, interactive: bool = False) -> bool:
@@ -424,8 +439,11 @@ def fetch_origin(repo: str | Path, *, required: bool, interactive: bool = False)
             return True
         detail = out or detail
 
-    if interactive and _fetch_prompt(repo) == 0:
-        return True
+    if interactive:
+        code, out = _fetch_prompt(repo)
+        if code == 0:
+            return True
+        detail = out or detail
 
     if required:
         detail = detail.strip().rstrip(".")
@@ -458,6 +476,7 @@ def origin_reachable(repo: str | Path) -> bool | None:
                 ]
             ),
             env=_batch_env(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

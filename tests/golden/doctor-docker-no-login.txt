@@ -1,0 +1,59 @@
+# treebox doctor --repo __ROOT__/repo --isolation docker --json
+# exit: 1
+# --- stdout ---
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "isolation": "docker",
+  "checks": [
+    {
+      "name": "git",
+      "ok": true,
+      "detail": "__GITVER__"
+    },
+    {
+      "name": "repo",
+      "ok": true,
+      "detail": "__ROOT__/repo"
+    },
+    {
+      "name": "uid/gid",
+      "ok": true,
+      "detail": "__UID__:__GID__"
+    },
+    {
+      "name": "agent: claude",
+      "ok": true,
+      "detail": "in the docker sandbox image \u00b7 checked at launch"
+    },
+    {
+      "name": "login: claude",
+      "ok": false,
+      "detail": "no login at __ROOT__/home-empty/.claude/.credentials.json"
+    },
+    {
+      "name": "login: codex",
+      "ok": false,
+      "detail": "no login at __ROOT__/home-empty/.codex/auth.json"
+    },
+    {
+      "name": ".env",
+      "ok": true,
+      "detail": "__ROOT__/repo/.env"
+    },
+    {
+      "name": "git auth",
+      "ok": true,
+      "detail": "authenticated \u00b7 fresh fetch will succeed"
+    },
+    {
+      "name": "isolation: docker",
+      "ok": true,
+      "detail": "docker daemon ok"
+    }
+  ],
+  "advisories": [
+    "Install the claude CLI and log in (writes ~/.claude) before launching. A docker sandbox gets a copy of __ROOT__/home-empty/.claude/.credentials.json, so that file must hold the login."
+  ]
+}
+# --- stderr ---

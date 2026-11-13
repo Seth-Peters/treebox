@@ -22,14 +22,19 @@
       "detail": "__UID__:__GID__"
     },
     {
+      "name": "agent: claude",
+      "ok": true,
+      "detail": "in the docker sandbox image \u00b7 checked at launch"
+    },
+    {
       "name": "login: claude",
       "ok": true,
-      "detail": "__ROOT__/home/.claude"
+      "detail": "__ROOT__/home/.claude/.credentials.json"
     },
     {
       "name": "login: codex",
       "ok": true,
-      "detail": "__ROOT__/home/.codex"
+      "detail": "__ROOT__/home/.codex/auth.json"
     },
     {
       "name": ".env",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -398,7 +399,12 @@ def test_env_directory_on_branch_is_kept_and_does_not_block_create_or_enter(
 
     entered = _run(["enter", "envdir", *base, "--json"])
     assert entered.exit_code == 0, entered.output
-    assert json.loads(entered.stdout)["created"] is False
+    payload = json.loads(entered.stdout)
+    assert payload["created"] is False
+    # Under --json the skipped copy is not printed, but it is in the payload.
+    assert entered.stderr == ""
+    (warning,) = payload["warnings"]
+    assert warning.startswith(".env not copied") and str(kept) in warning
     assert (kept / "keep.txt").read_text() == "must survive\n"
 
     # A completed create is a normal conflict again, not a crash loop.
@@ -686,7 +692,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         def facts(self):
             from treebox.runners import RunnerFacts
 
-            return RunnerFacts(preflight_detail="", login_required=True)
+            return RunnerFacts(preflight_detail="", sandboxed=False)
 
         def setup(self, wt, *, cold, reporter):
             calls.append("setup")
@@ -975,7 +981,7 @@ def test_teardown_delete_branch(repo: Path, root: str, hermetic_config):
     assert not git.local_branch_exists(str(repo), "feature-gone")
 
 
-def test_fetch_is_required_and_fails_loudly(repo: Path, root: str, hermetic_config):
+def test_fetch_is_required_and_fails_loudly(repo: Path, root: str, hermetic_config, agent_ready):
     # Break origin so no fetch can succeed.
     subprocess.run(
         ["git", "-C", str(repo), "remote", "set-url", "origin", "/nonexistent/x.git"],
@@ -2325,36 +2331,51 @@ def test_create_explicit_name_with_checkout(repo: Path, root: str, hermetic_conf
 
 
 def test_launch_propagates_the_agent_exit_code(
-    repo: Path, root: str, hermetic_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, agent_ready: Path
 ):
     """The full launch path: without --print/--json, create provisions, prints
-    the Ready line, launches the harness, and exits with the AGENT's exit code."""
-    import os
+    the Ready line, launches the harness, and exits with the AGENT's exit code.
+    A non-zero agent exit ends with the one fixed-prefix line (the contract a
+    caller tells an agent exit from a treebox failure by); exit 0 has none."""
+    from treebox.cli import AGENT_EXIT_PREFIX
 
-    bin_dir = tmp_path / "fake-bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "claude"
-    fake.write_text("#!/bin/sh\nexit 7\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-
+    (agent_ready / "claude").write_text("#!/bin/sh\nexit 7\n")
     res = _run(["create", "launchy", "--repo", str(repo), "--root", root])
     assert res.exit_code == 7, res.output  # the fake agent's exit code, verbatim
     assert "Ready" in res.stderr and "launching claude" in res.stderr
+    assert AGENT_EXIT_PREFIX == "treebox: agent exited with status "
+    assert res.stderr.splitlines()[-1] == "treebox: agent exited with status 7"
+
+    (agent_ready / "claude").write_text("#!/bin/sh\nexit 0\n")
+    res = _run(["enter", "launchy", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 0, res.output
+    assert AGENT_EXIT_PREFIX not in res.stderr
 
 
 def test_launch_missing_harness_is_a_clean_error(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, agent_ready: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A harness CLI absent from PATH must exit 1 with an instructive message,
-    not a traceback."""
-    from treebox.runners import host as host_mod
+    """A harness CLI absent from PATH is a classified failure (exit 1,
+    HARNESS_MISSING) with an instructive hint, not a traceback - and a launch
+    fails before anything is provisioned. --json never launches, so it needs
+    no agent."""
+    (agent_ready / "claude").unlink()
+    # Hide any real claude elsewhere on PATH, too.
+    path = [d for d in os.environ["PATH"].split(os.pathsep) if not (Path(d) / "claude").exists()]
+    monkeypatch.setenv("PATH", os.pathsep.join(path))
+    base = ["--repo", str(repo), "--root", root]
 
-    monkeypatch.setattr(host_mod, "have", lambda c: False)
-    res = _run(["create", "nocli", "--repo", str(repo), "--root", root])
+    res = _run(["create", "nocli", *base])
     assert res.exit_code == 1
     assert "not found on PATH" in res.stderr
     assert "Traceback" not in res.output
+    assert not (Path(root) / "nocli").exists()  # nothing provisioned
+
+    assert _run(["create", "nocli", *base, "--json"]).exit_code == 0
+    res = _run(["--non-interactive", "enter", "nocli", *base, "--json"])
+    assert res.exit_code == 0, res.output
+    res = _run(["enter", "nocli", *base, "--json", "--print"])
+    assert res.exit_code == 0, res.output
 
 
 def test_fetch_failed_publickey_hint_mentions_ssh(
@@ -2770,7 +2791,7 @@ def test_doctor_human_path_reports_blocked_and_exits_1(tmp_path: Path, hermetic_
     assert "repo" in res.stdout
 
 
-def test_doctor_human_path_healthy_repo_exits_0(repo: Path, hermetic_config):
+def test_doctor_human_path_healthy_repo_exits_0(repo: Path, hermetic_config, agent_ready):
     res = _run(["doctor", "--repo", str(repo)])
     assert res.exit_code == 0, res.output
     assert "doctor" in res.stdout
@@ -2924,6 +2945,7 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             "worktree_path",
             "branch",
             "commands",
+            "warnings",
         }
     )
     assert warm["schemaVersion"] == cold["schemaVersion"] == 1

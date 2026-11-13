@@ -89,12 +89,15 @@ class RunnerFacts:
 
     Kept out of the operational methods so presentation vocabulary never
     leaks into the run seam: the checklist detail shown when ``preflight``
-    passes, and whether a missing subscription login is a hard gate in
-    ``doctor``'s machine verdict for this runner.
+    passes, and where the agent runs. ``sandboxed`` decides what ``doctor``
+    checks for the selected harness: on the host (False) the harness binary
+    on ``PATH`` and the host login; in a sandbox (True) the login file the
+    sandbox gets a copy of (the binary is part of the sandbox image and is
+    checked at launch).
     """
 
     preflight_detail: str
-    login_required: bool
+    sandboxed: bool
 
 
 @runtime_checkable

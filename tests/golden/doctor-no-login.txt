@@ -1,5 +1,5 @@
 # treebox doctor --repo __ROOT__/repo
-# exit: 0
+# exit: 1
 # --- stdout ---
 
   ● doctor   isolation: host
@@ -7,12 +7,15 @@
     ✓ git               __GITVER__
     ✓ repo              __ROOT__/repo
     ✓ uid/gid           __UID__:__GID__
-    ✗ login: claude     __ROOT__/home-empty/.claude
-    ✗ login: codex      __ROOT__/home-empty/.codex
+    ✓ agent: claude     __ROOT__/shim/claude
+    ✗ login: claude     no login at __ROOT__/home-empty/.claude/.credentials.json
+    · login: codex      no login at __ROOT__/home-empty/.codex/auth.json · optional
     ✓ .env              __ROOT__/repo/.env
     ✓ git auth          authenticated · fresh fetch will succeed
     ✓ isolation: host   no container dependencies
 
-  ! no subscription login in ~/.claude / ~/.codex — run claude once to log in
+  ! Install the claude CLI and log in (writes ~/.claude) before launching.
+
+  ✗ blocked: login: claude
 
 # --- stderr ---

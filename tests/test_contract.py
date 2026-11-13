@@ -82,6 +82,8 @@ _TEARDOWN_OPTS = (
         "--delete-branch",
         "--remove-volumes",
         "--force",
+        "--yes",
+        "-y",
         "--skip-container",
     }
 )
@@ -105,7 +107,7 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
             "-n",
             "--print",
         },
-        ["name"],
+        ["name", "args"],
     ),
     "enter": (
         _COMMON_LIST
@@ -121,7 +123,7 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
     ),
     "list": (_COMMON_LIST, []),
     "teardown": (_TEARDOWN_OPTS, ["refs"]),
-    "doctor": ({"--repo", "--isolation", "--json"}, []),
+    "doctor": ({"--repo", "--isolation", "--harness", "-H", "--json"}, []),
     # `template` is a sub-app (group), so its own param surface is empty; its
     # subcommands are pinned in test_template_subcommand_surface_is_pinned.
     "template": (set(), []),
@@ -202,8 +204,17 @@ CREATE_KEYS = {
     "base",
     "entry_command",
     "created",
+    "warnings",
 }
-DRY_RUN_KEYS = {"schemaVersion", "dry_run", "name", "worktree_path", "branch", "commands"}
+DRY_RUN_KEYS = {
+    "schemaVersion",
+    "dry_run",
+    "name",
+    "worktree_path",
+    "branch",
+    "commands",
+    "warnings",
+}
 LIST_ROW_KEYS = {
     "name",
     "branch",
@@ -250,6 +261,7 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
         _run(["create", "shape", "--repo", str(repo), "--root", root, "--json"]).stdout
     )
     assert set(created) == CREATE_KEYS
+    assert created["warnings"] == []  # additive: empty when nothing was skipped
     assert isinstance(created["entry_command"], list)
     assert created["created"] is True
     entered = json.loads(
@@ -270,7 +282,7 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
     torn = json.loads(
         _run(["teardown", "shape", "--repo", str(repo), "--root", root, "--force", "--json"]).stdout
     )
-    assert set(torn) == {"schemaVersion", "worktrees"}
+    assert set(torn) == {"schemaVersion", "worktrees", "warnings"}
     (record,) = torn["worktrees"]
     assert set(record) == TEARDOWN_RECORD_KEYS
     assert record["container"] in CONTAINER_VALUES
@@ -408,3 +420,12 @@ def test_exit_and_error_code_matrix(
     assert res.exit_code == EXIT_ERROR
     err = json.loads(res.stderr)["error"]
     assert err["code"] == "MISSING_DEPENDENCY" and "hint" in err
+
+
+def test_app_level_non_interactive_option():
+    """The global unattended switch: an option on the app (before the
+    command) with an environment-variable twin, both documented contract."""
+    group = typer.main.get_command(app)
+    param = next(p for p in group.params if "--non-interactive" in p.opts)
+    assert param.envvar == "TREEBOX_NON_INTERACTIVE"
+    assert _run(["--non-interactive", "version"]).exit_code == 0
