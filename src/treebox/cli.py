@@ -35,6 +35,7 @@ from . import (
     lifecycle,
     locking,
     names,
+    ports,
     provision,
     record,
     resolve,
@@ -57,6 +58,7 @@ from .models import (
     path_is_under,
     placeholder_branch,
     same_path,
+    worktree_id,
     worktree_path,
     worktree_root,
 )
@@ -384,8 +386,12 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(
             EXIT_CONFLICT,
             "LOCK_HELD",
-            "Another run holds this worktree — wait, then retry.",
+            exc.hint or "Another run holds this worktree — wait, then retry.",
         )
+    if isinstance(exc, ports.PortsExhaustedError):
+        return _ErrorInfo(EXIT_CONFLICT, "PORTS_EXHAUSTED", exc.hint)
+    if isinstance(exc, ports.LedgerInvalidError):
+        return _ErrorInfo(EXIT_ERROR, "PORT_LEDGER_INVALID", exc.hint)
     if isinstance(exc, git.FetchError):
         msg = str(exc).lower()
         if "publickey" in msg or "permission denied" in msg:
@@ -461,7 +467,8 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         error_code=error_code,
         hint=hint,
         path=str(exc.path)
-        if isinstance(exc, (provision.ProvisionError, record.RecordError)) and exc.path
+        if isinstance(exc, (provision.ProvisionError, record.RecordError, ports.PortsError))
+        and exc.path
         else None,
         json_out=json_out,
     )
@@ -486,11 +493,15 @@ def _emit_result(
 ) -> None:
     """Write the machine/script-facing result to stdout. ``warnings`` are the
     run's warnings (an additive payload field: empty when nothing was skipped)."""
+    block = outcome.worktree.ports
     if json_out:
         payload = {
             "schemaVersion": SCHEMA_VERSION,
             "name": outcome.worktree.name,
             "worktree_path": str(outcome.worktree.path),
+            "id": outcome.worktree.id,
+            "port_base": block.base if block else None,
+            "port_count": block.count if block else None,
             "branch": outcome.worktree.branch,
             "base": outcome.worktree.base,
             "entry_command": outcome.entry_command,
@@ -646,6 +657,14 @@ def create(
     A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
     exit status, and the file with its output). The worktree is kept and
     marked unfinished; `treebox enter NAME` or the same create retries setup.
+
+    Setup and the agent get, for repo-owned service scripts: TREEBOX_NAME
+    (the worktree name), TREEBOX_ID (10 lowercase hex characters, unique on
+    this machine, derived from the worktree path), and TREEBOX_PORT_BASE and
+    TREEBOX_PORT_COUNT (a port block no other treebox worktree on the machine
+    has; the ports table of the user config sets the range). --print and
+    --json commands carry them too. A full range fails before anything is made
+    (exit 5, PORTS_EXHAUSTED); --dry-run reserves nothing.
 
     To start the agent on a task, put its args after NAME and --
     (create fix-auth -- -p "fix the login race"). A nameless create takes
@@ -829,6 +848,10 @@ def enter(
 
     An unfinished or failed setup runs again; if a setup step fails, enter
     fails too (exit 1, SETUP_FAILED) and the next enter retries it.
+
+    Setup and the agent get the same TREEBOX_NAME, TREEBOX_ID,
+    TREEBOX_PORT_BASE and TREEBOX_PORT_COUNT as at create; --print and --json
+    commands carry them too.
 
     When it launches (no --json, --print), enter exits with the agent's exit
     code; a non-zero one is named in the last stderr line ("treebox: agent
@@ -1095,6 +1118,12 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         rows.append(
             WorktreeRow(
                 name=wt_path.name,
+                # Spelled like enter spells it (git may canonicalize a root alias
+                # such as /var -> /private/var), so list shows the id the
+                # worktree's setup and agent get.
+                id=worktree_id(
+                    Path(resolve.Candidate.registered(repo_path, cfg.root, rec.path, None).path)
+                ),
                 branch=rec.branch or "detached",
                 unnamed=is_placeholder(rec.branch),
                 missing=missing,
@@ -1108,6 +1137,8 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
                 env="present" if env_present else "absent",
                 health=health,
                 setup=policy.setup.status if policy else "",
+                port_base=policy.ports.base if policy and policy.ports else None,
+                port_count=policy.ports.count if policy and policy.ports else None,
             )
         )
 
@@ -1441,8 +1472,9 @@ def teardown(
 
     An incomplete cleanup fails teardown (exit 1, TEARDOWN_INCOMPLETE): it
     names what remains (for example a container docker could not remove) and
-    keeps the worktree and its record, so the same command retries. A
-    worktree locked with `git worktree lock` is never removed.
+    keeps the worktree, its record and its port block, so the same command
+    retries. A complete teardown releases the port block. A worktree locked
+    with `git worktree lock` is never removed.
 
     Unattended (--json, --non-interactive, or no terminal) there is no
     prompt: pass --yes to confirm. --yes keeps the uncommitted-changes
@@ -1782,6 +1814,12 @@ def _teardown_one(
         reporter.note("worktree", f"kept · cleanup incomplete · {shown}")
     else:
         reporter.fail("worktree", f"kept · {shown}")
+    if result.port_error is not None:
+        reporter.warn(
+            f"port block not released now (the next create reclaims it): {result.port_error}"
+        )
+    elif result.released_ports is not None:
+        reporter.ok("ports", f"released {result.released_ports}")
     if not result.complete:
         reporter.note("record", "kept · the same teardown retries")
     elif result.branch_error is not None:

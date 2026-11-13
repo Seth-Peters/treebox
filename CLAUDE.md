@@ -139,17 +139,19 @@ Module map:
   output carrying a `schemaVersion` that only gains fields within a version —
   a breaking reshape bumps it (git-porcelain discipline). Agents
   branch on these, so don't change their meanings casually.
-- **`locking.py`** holds the two cross-process locks, on two keys.
+- **`locking.py`** holds the three cross-process locks, on three keys.
   `worktree_lock(path)` is per worktree and non-blocking: a second operation
   on the *same* worktree fails fast (`LOCK_HELD`). `repo_lock(path)` is per
   repository (keyed by the git common dir, so every root and linked worktree
   shares it) and *waits*: `create` holds it from the fetch through
-  `git worktree add` (the record is written before it, under the worktree
-  lock only), `teardown` around `worktree remove`/`prune`/branch
+  `git worktree add` (the port block and the record are written before it,
+  under the worktree lock only), `teardown` around `worktree remove`/`prune`/branch
   delete, and the small writers of shared files (`extensions.worktreeConfig`,
   `info/exclude`) take it too. Anything that writes git state shared by the
   whole repository belongs under it; setup, container work, and the agent
-  session never do. Lock order is always worktree, then repo.
+  session never do. `ports_lock` is machine-wide (see `ports.py`) and also
+  waits. Lock order is always worktree, then repo or ports; the repo and ports
+  locks are never nested in each other.
 - **`ecosystems.py`** detects package managers (uv, npm, pnpm, go, cargo),
   drives their cache-backed setup, and defines which manifest files feed the
   SHA-256 hash. "Warmth" lives in shared host caches, not the tree. Its
@@ -177,7 +179,21 @@ Module map:
   policy the record holds the host-observed `setup` result (a required key):
   a sandbox that could mark its own setup done could make treebox skip setup
   forever or report stale deps fresh, so nothing in the sandbox-writable git
-  dir is read for any decision.
+  dir is read for any decision. The record also keeps `ports` (a required
+  key, null or a base and count), the copy of the worktree's port block.
+- **`ports.py`** is the machine-wide port-block allocator behind
+  `TREEBOX_PORT_BASE` / `TREEBOX_PORT_COUNT`. Its ledger
+  (`$TREEBOX_HOME/ports.json`, lock `ports.lock`) is the one source of truth
+  for which blocks are taken, across every repo and root; the record holds
+  only a copy. `reserve` (create, enter: ledger first, then the record copy)
+  and `release` (teardown, after the record is gone) run under
+  `locking.ports_lock`, a waiting lock taken after the worktree lock and never
+  inside `repo_lock` (create reserves before it, teardown releases after it). A stale
+  entry (no directory, no git registration, no lock holder) is reclaimed by
+  the next allocation, so a crash between two writes neither leaks nor
+  double-allocates a block. The range and block size are user config only
+  (`[ports]`, `config.PortRange`); a full range is `PORTS_EXHAUSTED` (exit 5)
+  before anything is made.
 - **`lifecycle.py`** holds the **setup model** (`SetupResult`: `pending` / `failed` /
   `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,
   `resumable` whether a same-name `create` finishes it, `freshness` what
@@ -185,7 +201,8 @@ Module map:
   (`SETUP_FAILED`, exit 1, output in `<parent>/.logs/<leaf>.setup.log`).
 - **`cleanup.py`** owns one worktree's cleanup through `cleanup_one`: runner
   resources, then the worktree, git registration and branch (under
-  `locking.repo_lock`), then the ownership record, last.
+  `locking.repo_lock`), then the ownership record, then the port release
+  (both outside the repo lock).
   A failed step keeps the resources and records a retry needs (the record,
   and the docker resource manifest that picks the runner when the record is
   missing or invalid). Git refusal never falls back to filesystem deletion.
@@ -209,7 +226,11 @@ Module map:
   `create --checkout feature/auth`) derive the name in one place,
   `derive_name`: drop a `treebox/` placeholder prefix, then flatten slashes to
   `--` (`feature--auth`, `treebox/a/b` -> `a--b`), so treebox never nests a
-  worktree; generated names come from `names.py`. Also home to
+  worktree; generated names come from `names.py`.
+  `worktree_id(path)` is the one path hash: `TREEBOX_ID` (10 lowercase hex,
+  documented contract) and the docker container/image name suffix.
+  `Worktree.treebox_env()` is what both runners export to setup and the agent
+  entry (and carry in the `--print`/`--json` entry command). Also home to
   `expand_user`, the tolerant `~`-expansion helper every path-consuming module
   shares (an unresolvable `~user` stays literal instead of raising).
 - **`config.py`** is **user-level TOML only** (`$TREEBOX_CONFIG`, else

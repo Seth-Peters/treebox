@@ -65,7 +65,6 @@ open-egress run.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import re
@@ -392,11 +391,11 @@ class DockerRunner:
         return f"treebox.workspace={wt.path}"
 
     def _slug(self, wt: Worktree) -> str:
-        """Deterministic container name and image tag. The path hash makes it
-        unique across repos whose branches share a name, and reproducible so
-        ``run``, ``exec``, and ``--print`` all address the same container."""
-        digest = hashlib.sha256(str(wt.path).encode()).hexdigest()[:10]
-        return f"treebox-{_sanitize(wt.name)[:40]}-{digest}"
+        """Deterministic container name and image tag. The worktree id (the
+        path hash, ``TREEBOX_ID``) makes it unique across repos whose branches
+        share a name, and reproducible so ``run``, ``exec``, and ``--print``
+        all address the same container."""
+        return f"treebox-{_sanitize(wt.name)[:40]}-{wt.id}"
 
     def initialize(self, wt: Worktree) -> None:
         """Create the host-owned resource manifest before Docker setup.
@@ -691,12 +690,20 @@ class DockerRunner:
         user: str | None = None,
         stdin: bool = False,
         tty: bool = False,
+        treebox_env: bool = False,
     ) -> list[str]:
+        """A ``docker exec`` argv. ``treebox_env`` passes the worktree's
+        ``TREEBOX_*`` variables (setup and agent entry): given on every exec,
+        not baked in at ``docker run``, so a restarted container gets them
+        too."""
         cmd = ["docker", "exec"]
         if stdin:
             cmd.append("-i")
         if tty:
             cmd.append("-t")
+        if treebox_env:
+            for key, value in wt.treebox_env().items():
+                cmd += ["-e", f"{key}={value}"]
         cmd += ["-u", user or self._user(wt), "-w", str(wt.path), self._slug(wt), *argv]
         return cmd
 
@@ -762,7 +769,7 @@ class DockerRunner:
             reporter.step(
                 "setup",
                 "post-create complete",
-                self._exec_command(wt, ["sh", "-c", str(post_create)]),
+                self._exec_command(wt, ["sh", "-c", str(post_create)], treebox_env=True),
             )
 
     def _firewall_command(self, wt: Worktree) -> list[str]:
@@ -873,7 +880,9 @@ class DockerRunner:
             cmds.append(shlex.join(self._firewall_command(wt)))
         post_create = config.get("postCreate")
         if post_create:
-            cmds.append(shlex.join(self._exec_command(wt, ["sh", "-c", str(post_create)])))
+            cmds.append(
+                shlex.join(self._exec_command(wt, ["sh", "-c", str(post_create)], treebox_env=True))
+            )
         return cmds
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
@@ -885,6 +894,7 @@ class DockerRunner:
             harness.launch_argv(args),
             stdin=True,
             tty=sys.stdin.isatty(),
+            treebox_env=True,
         )
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:

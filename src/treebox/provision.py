@@ -14,6 +14,7 @@ worktree's health is classified.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import shutil
@@ -23,10 +24,18 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
-from . import ecosystems, git, lifecycle, locking, record
+from . import ecosystems, git, lifecycle, locking, ports, record
 from .config import Config
 from .harnesses import Harness
-from .models import Health, Worktree, expand_user, is_placeholder, same_path, worktree_root
+from .models import (
+    Health,
+    PortBlock,
+    Worktree,
+    expand_user,
+    is_placeholder,
+    same_path,
+    worktree_root,
+)
 from .output import Reporter, StepError
 from .runners.base import Runner
 from .submodule_copy import SubmoduleCopyError, UnsafeDestinationError, copy_submodule
@@ -241,20 +250,33 @@ def dry_run_plan(
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
+    policy = _creation_record(config, runner, wt, config.harness)
     if wt.path.exists():
         resuming = _is_resumable_unprovisioned_worktree(repo, wt, branch)
         if not resuming:
             raise _slug_conflict_for_existing_path(repo, wt)
-        _check_resume_policy(wt, _creation_record(config, runner, wt, config.harness))
     else:
         _check_requested_branch(repo, branch=branch, existing_branch=existing_branch)
         _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
         _check_base_exists(repo, base=base, existing_branch=existing_branch)
+    prior = _check_resume_policy(wt, policy)
+    # Read-only: the block a real run would reserve now (exhaustion fails the
+    # dry run like the real one); the plan shows it, the ledger is untouched.
+    block = ports.preview(wt.path, config.ports, preferred=prior.ports if prior else None)
+    wt = dataclasses.replace(wt, ports=block)
+    reserve = (
+        f"# reserve port block {block} in {ports.ledger_path()} "
+        f"(TREEBOX_PORT_BASE={block.base}, TREEBOX_PORT_COUNT={block.count}; "
+        "a dry run reserves nothing)"
+    )
     cmds: list[str] = []
     source_ref: str | None = None
     if resuming:
         cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
+        cmds.append(reserve)
     else:
+        # The real create reserves the block before it takes the repo lock.
+        cmds.append(reserve)
         if fetch:
             cmds.append(f"git -C {repo} fetch origin --quiet")
         plan = git.resolve_branch(repo, branch, base)
@@ -562,15 +584,45 @@ def _record_policy(
     wt: Worktree, policy: record.WorktreeRecord
 ) -> tuple[record.WorktreeRecord, bool]:
     """Persist the host-owned record *before* the worktree and any runner
-    resource exist, with setup pending. A create that dies at any later point
-    then leaves a worktree that ``create`` resumes and ``teardown`` can drive,
-    never a container with no record of which runner owns it. Returns the
-    record and whether this call wrote it."""
+    resource exist, with setup pending and the copy of the port block
+    ``wt.ports`` (already in the ledger). A create that dies at any later
+    point then leaves a worktree that ``create`` resumes and ``teardown`` can
+    drive, never a container with no record of which runner owns it. Returns
+    the record and whether this call created it."""
     prior = _check_resume_policy(wt, policy)
     if prior is not None:
+        if prior.ports != wt.ports:
+            prior = dataclasses.replace(prior, ports=wt.ports)
+            record.save(prior)
         return prior, False
-    record.save(policy)
-    return policy, True
+    rec = dataclasses.replace(policy, ports=wt.ports)
+    record.save(rec)
+    return rec, True
+
+
+def _reserve_ports(
+    config: Config, wt: Worktree, recorded: PortBlock | None, reporter: Reporter
+) -> tuple[Worktree, bool]:
+    """``wt`` with its port block, reserved in the machine-wide ledger
+    (``ports.py``) before the record copy is written. ``recorded`` is the
+    block the record already holds. Returns whether this call reserved it."""
+    block, reserved = ports.reserve(wt.path, wt.repo, config.ports, preferred=recorded)
+    if recorded is not None and block != recorded:
+        reporter.warn(
+            f"port block changed from {recorded} to {block}: the ledger no longer "
+            "had this worktree's block and another worktree holds it now"
+        )
+    reporter.ok("ports", f"{block} · TREEBOX_PORT_BASE={block.base}")
+    return dataclasses.replace(wt, ports=block), reserved
+
+
+def _release_new_block(wt: Worktree, reserved: bool) -> None:
+    """Undo a block this create reserved, when the create fails before the
+    worktree exists. Best effort: a block left behind is stale (no directory,
+    no registration) and the next allocation reclaims it."""
+    if reserved:
+        with contextlib.suppress(ports.PortsError, locking.LockError, OSError):
+            ports.release(wt.path)
 
 
 def _run_setup(
@@ -885,6 +937,8 @@ def create(
         # registered with git on the exact expected branch, setup unfinished.
         # Anything else is a conflict.
         if _is_resumable_unprovisioned_worktree(repo, wt, branch):
+            prior = _check_resume_policy(wt, policy)
+            wt, _ = _reserve_ports(config, wt, prior.ports if prior else None, reporter)
             rec, _ = _record_policy(wt, policy)
             reporter.note("worktree", "exists but setup unfinished - finishing setup")
             return _finish_setup(
@@ -892,10 +946,18 @@ def create(
             )
         raise _slug_conflict_for_existing_path(repo, wt)
 
-    # The record is written under the worktree lock the caller holds, before
-    # the repo lock and before `git worktree add`; a failed add removes it, as
-    # nothing exists yet that it could describe.
-    rec, wrote = _record_policy(wt, policy)
+    # The port block first (a full range fails here, before anything exists),
+    # then the record copy. Both are written under the worktree lock the
+    # caller holds, before the repo lock (the ports lock is never nested in
+    # it) and before `git worktree add`; a failed add removes both, as nothing
+    # exists yet that they could describe.
+    prior = _check_resume_policy(wt, policy)
+    wt, reserved = _reserve_ports(config, wt, prior.ports if prior else None, reporter)
+    try:
+        rec, wrote = _record_policy(wt, policy)
+    except BaseException:
+        _release_new_block(wt, reserved)
+        raise
     try:
         # Every step from the fetch to `git worktree add` writes git state the
         # whole repository shares, so creates of *different* names queue here
@@ -916,6 +978,7 @@ def create(
     except BaseException:
         if wrote:
             record.remove(wt.path)
+        _release_new_block(wt, reserved)
         raise
 
     return _finish_setup(
@@ -950,6 +1013,13 @@ def enter(
     rec = record.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
     wt = Worktree.at(repo, path, branch=branch, base=base)
+    # The ledger entry first, then the record copy. The ledger normally has
+    # the recorded block; if it lost the entry, this takes the block back (or
+    # a free one when another worktree holds it now).
+    wt, _ = _reserve_ports(config, wt, rec.ports, reporter)
+    if rec.ports != wt.ports:
+        rec = dataclasses.replace(rec, ports=wt.ports)
+        record.save(rec)
 
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential

@@ -939,7 +939,10 @@ def test_autonomous_launch_argv_is_exact(tmp_path: Path, harness_name: str, argv
     # worktree directory: pasting it anywhere runs in the box.
     cmd = host.entry_command(wt, harness=harness, args=[])
     assert cmd[:2] == ["sh", "-c"]
-    assert cmd[2] == f"cd {shlex.quote(str(wt.path))} && exec {shlex.join(argv)}"
+    assert cmd[2] == (
+        f"cd {shlex.quote(str(wt.path))} && export TREEBOX_NAME=wt TREEBOX_ID={wt.id} "
+        f"&& exec {shlex.join(argv)}"
+    )
     assert host.entry_command(wt, harness=harness, args=["--continue"])[2].endswith(
         f"exec {shlex.join([*argv, '--continue'])}"
     )
@@ -2287,6 +2290,25 @@ def test_record_setup_result_roundtrips(tmp_path):
         assert record.load(wt).same_policy(_record_for(wt))
 
 
+def test_record_port_block_roundtrips(tmp_path):
+    """The record keeps the copy of the worktree's port block, as a required
+    key of its one schema version (null or a base and count; a record without
+    it is invalid, see test_record_invalid_contents_are_classified). The block
+    is not policy: a resumed create never conflicts over it."""
+    import dataclasses
+
+    from treebox import record
+    from treebox.models import PortBlock
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    for block in (PortBlock(20010, 10), None):
+        rec = dataclasses.replace(_record_for(wt), ports=block)
+        record.save(rec)
+        assert record.load(wt) == rec
+        assert rec.same_policy(_record_for(wt))
+
+
 def test_sandbox_written_state_file_is_never_read(tmp_path, monkeypatch):
     """A treebox-state.json in the sandbox-writable git dir is inert:
     a forged "provisioned: true" with a matching hash can make neither list
@@ -2372,6 +2394,9 @@ def test_record_save_is_atomic(tmp_path, monkeypatch):
         (lambda d: d.update(schemaVersion=2), "schemaVersion"),
         (lambda d: d.update(schemaVersion=0), "schemaVersion"),
         (lambda d: d.update(schemaVersion=True), "schemaVersion"),
+        (lambda d: d.pop("ports"), "missing key"),
+        (lambda d: d.update(ports={"base": 20000}), "ports"),
+        (lambda d: d.update(ports={"base": "1", "count": 10}), "ports"),
         (lambda d: d.pop("setup"), "missing key"),
         (lambda d: d.update(setup={"status": "done"}), "setup must be an object"),
         (lambda d: d["setup"].update(status="ready"), "setup.status"),

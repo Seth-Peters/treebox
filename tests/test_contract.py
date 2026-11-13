@@ -195,6 +195,9 @@ CREATE_KEYS = {
     "schemaVersion",
     "name",
     "worktree_path",
+    "id",
+    "port_base",
+    "port_count",
     "branch",
     "base",
     "entry_command",
@@ -212,6 +215,7 @@ DRY_RUN_KEYS = {
 }
 LIST_ROW_KEYS = {
     "name",
+    "id",
     "branch",
     "unnamed",
     "missing",
@@ -225,6 +229,8 @@ LIST_ROW_KEYS = {
     "env",
     "health",
     "setup",
+    "port_base",
+    "port_count",
 }
 TEARDOWN_RECORD_KEYS = {
     "name",

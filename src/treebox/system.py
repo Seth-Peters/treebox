@@ -12,7 +12,7 @@ import os
 import signal
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from shutil import which
 from typing import Any
@@ -63,6 +63,7 @@ def run_agent(
     argv: list[str],
     *,
     cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
     stop: Callable[[subprocess.Popen[bytes], int], None] | None = None,
     grace: float = STOP_GRACE_SECONDS,
 ) -> tuple[int, int | None]:
@@ -73,7 +74,8 @@ def run_agent(
     process). If the agent is still running ``grace`` seconds after the
     first one, ``stop(proc, SIGKILL)`` ends it. Returns ``(exit code, the
     first cancel signal or None)`` once the child process has exited; a
-    negative code means the child was killed by that signal.
+    negative code means the child was killed by that signal. ``env`` is
+    the child's whole environment (default: treebox's own).
     """
 
     def default_stop(proc: subprocess.Popen[bytes], signum: int) -> None:
@@ -83,7 +85,7 @@ def run_agent(
     forward = stop or default_stop
     received: list[int] = []
     timer: threading.Timer | None = None
-    proc = subprocess.Popen(argv, cwd=cwd)
+    proc = subprocess.Popen(argv, cwd=cwd, env=env)
 
     def on_signal(signum: int, _frame: object) -> None:
         nonlocal timer

@@ -2,8 +2,9 @@
 
 Callers resolve the runner, validate the batch and hold the worktree lock.
 This module owns runner resources, worktree removal and ownership record
-removal, and takes the repository lock (after the worktree lock) for the git
-steps. Runner adapters retain ownership of their resource manifests.
+removal and port release, and takes the repository lock (after the worktree
+lock) for the git steps; the port release stays outside it. Runner adapters
+retain ownership of their resource manifests.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ import shutil
 from dataclasses import dataclass
 from typing import Literal
 
-from . import git, locking, provision, record
-from .models import Worktree, same_path
+from . import git, locking, ports, provision, record
+from .models import PortBlock, Worktree, same_path
 from .output import Reporter
 from .runners import Runner
 from .runners.base import RunnerTeardownResult
@@ -36,6 +37,8 @@ class CleanupResult:
     branch_deleted: bool = False
     runner_error: str | None = None
     branch_error: str | None = None
+    released_ports: PortBlock | None = None
+    port_error: str | None = None
 
     @property
     def complete(self) -> bool:
@@ -108,6 +111,15 @@ def cleanup_one(
     # mode. It is not shared git state, so it stays outside the repo lock; the
     # worktree lock the caller holds already covers it.
     record.remove(wt.path)
+    # The record is gone, so a failed release leaves a stale ledger entry.
+    # The next allocation can reclaim it without a teardown retry. Outside the
+    # repo lock: the ports lock is never nested in it.
+    released_ports = None
+    port_error = None
+    try:
+        released_ports = ports.release(wt.path)
+    except (ports.PortsError, locking.LockError) as exc:
+        port_error = str(exc)
     return CleanupResult(
         resources,
         removal,
@@ -115,6 +127,8 @@ def cleanup_one(
         branch_deleted=branch_deleted,
         runner_error=runner_error,
         branch_error=branch_error,
+        released_ports=released_ports,
+        port_error=port_error,
     )
 
 

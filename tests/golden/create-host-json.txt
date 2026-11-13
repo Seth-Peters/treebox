@@ -5,12 +5,15 @@
   "schemaVersion": 1,
   "name": "golden-host-json",
   "worktree_path": "__ROOT__/wts/golden-host-json",
+  "id": "__HASH__",
+  "port_base": 20010,
+  "port_count": 10,
   "branch": "golden-host-json",
   "base": "main",
   "entry_command": [
     "sh",
     "-c",
-    "cd __ROOT__/wts/golden-host-json && exec claude --dangerously-skip-permissions"
+    "cd __ROOT__/wts/golden-host-json && export TREEBOX_NAME=golden-host-json TREEBOX_ID=__HASH__ TREEBOX_PORT_BASE=20010 TREEBOX_PORT_COUNT=10 && exec claude --dangerously-skip-permissions"
   ],
   "created": true,
   "warnings": []

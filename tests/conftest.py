@@ -41,6 +41,17 @@ def isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def isolated_treebox_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the user-level treebox home at a per-test directory before any
+    CLI call: ``create`` and ``enter`` write the machine-wide port-block
+    ledger there, and a test must never touch the real ``~/.treebox``. Tests
+    that need their own home set ``TREEBOX_HOME`` again (that wins)."""
+    home = tmp_path / "treebox-home"
+    monkeypatch.setenv("TREEBOX_HOME", str(home))
+    return home
+
+
+@pytest.fixture(autouse=True)
 def scratch_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point HOME at an empty scratch dir for every test.
 

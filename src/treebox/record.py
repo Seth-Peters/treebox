@@ -35,6 +35,11 @@ Besides the policy, the record holds the host-observed result of the last
 setup (``setup``, see the setup model in ``lifecycle.py``): a sandbox that
 could mark its own setup done could make treebox skip setup forever or report
 stale dependencies as fresh, so that fact is host-owned too.
+
+Besides the setup result it keeps a copy of the worktree's port block
+(``ports``, see ``ports.py``): the ledger in the treebox home is the one source
+of truth for which blocks are taken; the record copy lets ``list`` and the
+entry commands read the block without the ledger lock.
 """
 
 from __future__ import annotations
@@ -50,7 +55,7 @@ from typing import Any
 
 from .harnesses import VALID_HARNESSES
 from .lifecycle import SetupResult, setup_log_path
-from .models import is_valid_template_name, same_path
+from .models import PortBlock, is_valid_template_name, same_path
 from .runners import VALID_ISOLATION
 
 SCHEMA_VERSION = 1
@@ -59,7 +64,17 @@ SCHEMA_VERSION = 1
 RECORD_DIR = ".records"
 
 _KEYS = frozenset(
-    {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template", "setup"}
+    {
+        "schemaVersion",
+        "worktree",
+        "base",
+        "isolation",
+        "harness",
+        "firewall",
+        "template",
+        "setup",
+        "ports",
+    }
 )
 
 
@@ -70,7 +85,9 @@ class WorktreeRecord:
     ``isolation`` and ``harness`` are registry names; ``template`` is a
     template identifier (``models.is_valid_template_name``); ``firewall`` is
     always a real bool (``False`` for host worktrees). ``setup`` is not
-    policy: it is the result of the last setup attempt (``lifecycle.py``)."""
+    policy: it is the result of the last setup attempt (``lifecycle.py``). ``ports`` is
+    not policy either: the copy of this worktree's ledger entry (``ports.py``),
+    None until one is reserved."""
 
     worktree: Path
     base: str
@@ -79,10 +96,12 @@ class WorktreeRecord:
     firewall: bool
     template: str
     setup: SetupResult = dataclasses.field(default_factory=SetupResult)
+    ports: PortBlock | None = None
 
     def same_policy(self, other: WorktreeRecord) -> bool:
-        """Whether ``other`` states the same creation policy (setup aside)."""
-        return dataclasses.replace(self, setup=other.setup) == other
+        """Whether ``other`` states the same creation policy (setup and port
+        block aside)."""
+        return dataclasses.replace(self, setup=other.setup, ports=other.ports) == other
 
 
 class RecordError(RuntimeError):
@@ -172,6 +191,7 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         setup = SetupResult.from_json(data["setup"])
     except ValueError as exc:
         raise _invalid(worktree, path, str(exc)) from exc
+    ports = _parse_ports(worktree, path, data["ports"])
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
@@ -180,7 +200,25 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         firewall=data["firewall"],
         template=data["template"],
         setup=setup,
+        ports=ports,
     )
+
+
+def _parse_ports(worktree: Path, path: Path, value: Any) -> PortBlock | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"base", "count"}
+        or type(value["base"]) is not int
+        or type(value["count"]) is not int
+        or value["base"] < 1
+        or value["count"] < 1
+    ):
+        raise _invalid(
+            worktree, path, "ports must be null or an object with integer base and count"
+        )
+    return PortBlock(value["base"], value["count"])
 
 
 def save(rec: WorktreeRecord) -> None:
@@ -198,6 +236,7 @@ def save(rec: WorktreeRecord) -> None:
         "firewall": rec.firewall,
         "template": rec.template,
         "setup": rec.setup.to_json(),
+        "ports": None if rec.ports is None else {"base": rec.ports.base, "count": rec.ports.count},
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
