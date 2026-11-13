@@ -1,0 +1,18 @@
+# treebox create golden-sbx --repo __ROOT__/repo --root __ROOT__/wts --isolation sbx --print
+# exit: 0
+# --- stdout ---
+sbx run --name treebox-golden-sbx-__HASH__
+# --- stderr ---
+
+  ● create   golden-sbx
+
+    branch          golden-sbx
+    base            main
+    isolation       sbx  →  claude
+
+  runner: sbx (daemon reachable)
+  ✓ fetch           origin up to date
+  ✓ worktree        golden-sbx from origin/main
+  ✓ push guard      treebox/* refs are un-pushable
+  ✓ secrets         copied
+  ✓ sandbox         created (dependencies install inside)

@@ -1,0 +1,13 @@
+# treebox enter golden-sbx --repo __ROOT__/repo --root __ROOT__/wts --print
+# exit: 0
+# --- stdout ---
+sbx run --name treebox-golden-sbx-__HASH__
+# --- stderr ---
+
+  ● enter   golden-sbx
+
+    isolation       sbx  →  claude
+
+  runner: sbx (daemon reachable)
+  ✓ secrets         copied
+  · deps            unchanged · skipping setup

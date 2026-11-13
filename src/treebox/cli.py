@@ -266,15 +266,18 @@ def _record_hint(exc: record.RecordError) -> str:
 
 _CPUS_HELP = (
     "CPU limit for this worktree's sandbox, in CPUs (a decimal, at least 0.01, "
-    "at most the engine's CPU count), e.g. --cpus 2 or --cpus 1.5. Maps to "
-    "docker run --cpus. Overrides \\[resources] cpus in config and the template's "
+    "at most the engine's CPU count; sbx requires a whole number), e.g. "
+    "--cpus 2 or --cpus 1.5. Maps to "
+    "the runner's --cpus. Overrides \\[resources] cpus in config and the template's "
     "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
     "--isolation host has no sandbox and refuses this flag (exit 2)."
 )
 _MEMORY_HELP = (
     "Memory limit for this worktree's sandbox, in Docker's memory syntax: a "
     "number and a unit b, k, m, g, t or p (binary multiples; a bare number is "
-    "bytes; at least 6m), e.g. --memory 4g or --memory 512m. Maps to docker run "
+    "bytes; at least 6m for docker, or 512m in whole kilobytes for sbx), "
+    "e.g. --memory 4g or "
+    "--memory 512m. Maps to the runner's "
     "--memory. Overrides \\[resources] memory in config and the template's "
     "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
     "--isolation host has no sandbox and refuses this flag (exit 2)."
@@ -284,7 +287,7 @@ _PIDS_HELP = (
     "it can run at once (a positive whole number), e.g. --pids-limit 512. Maps "
     "to docker run --pids-limit. Overrides \\[resources] pids in config and the "
     "template's resources. Unset: no treebox cap. Fixed when the sandbox is "
-    "created. --isolation host has no sandbox and refuses this flag (exit 2)."
+    "created. Host and sbx isolation refuse this flag (exit 2)."
 )
 _ENTER_LIMIT_NOTE = (
     " On enter: only restates the recorded limit; a different value is a "
@@ -363,7 +366,7 @@ def _creation_limits(
             str(exc),
             code=EXIT_USAGE,
             error_code="INVALID_RESOURCE",
-            hint="Pick a smaller value, or check the Docker engine's resources (docker info).",
+            hint="Use limits supported by the selected runner; see `treebox create --help`.",
             json_out=json_out,
         ) from exc
     except _PROVISION_ERRORS as exc:
@@ -1204,7 +1207,14 @@ def adopt(
     limits = _resource_flags(
         reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
     )
-    _refuse_unsupported_limits(reporter, get_runner(cfg), limits, json_out=json_out)
+    run = get_runner(cfg)
+    _refuse_unsupported_limits(reporter, run, limits, json_out=json_out)
+    try:
+        run.check_resources(limits)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter, str(exc), code=EXIT_USAGE, error_code="INVALID_RESOURCE", json_out=json_out
+        ) from exc
     repo_path = _repo_root(reporter, repo, json_out=json_out)
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)

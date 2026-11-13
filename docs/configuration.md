@@ -17,7 +17,7 @@ Move old files to the treebox home (`$TREEBOX_HOME` when set, otherwise
 `~/.treebox`), or set `$TREEBOX_CONFIG` / `$TREEBOX_TEMPLATE_DIR` explicitly.
 
 ```toml
-isolation = "host"     # host | docker
+isolation = "host"     # host | docker | sbx
 harness  = "claude"    # claude | codex
 base     = "main"      # default base branch
 root     = ".treebox/worktrees"
@@ -76,7 +76,7 @@ Docker teardown ownership and missing-manifest behavior, see the
 
 | Key        | Default              | What it controls                                          |
 | ---------- | -------------------- | --------------------------------------------------------- |
-| `isolation`| `host`               | Where agents run: the worktree shell, or a docker sandbox. |
+| `isolation`| `host`               | Where agents run: the worktree shell, a docker sandbox, or an sbx microVM. |
 | `harness`  | `claude`             | Which agent `create` launches by default; `enter` reuses the harness the worktree was created with unless `--harness` overrides it. |
 | `base`     | `main`               | Base branch for new branches (resolved as `origin/<base>`). |
 | `root`     | `.treebox/worktrees` | Where worktree directories are created: repo-relative, absolute, or `~`-prefixed. |
@@ -89,8 +89,9 @@ Docker teardown ownership and missing-manifest behavior, see the
 
 ## Resource limits
 
-By default a docker sandbox has **no** CPU, memory, or process limit. Set them
-per worktree so one sandboxed build or test run cannot starve the other tasks
+By default treebox sets no CPU, memory, or process cap. The selected runner
+can have its own defaults. Set limits per worktree so one sandboxed build or
+test run cannot starve the other tasks
 on the same machine:
 
 ```bash
@@ -102,6 +103,11 @@ treebox create fix-auth --isolation docker --cpus 2 --memory 4g --pids-limit 512
 | `--cpus N` | `cpus` | `cpus` | CPUs, a decimal (`2`, `1.5`); at least `0.01`, at most the engine's CPU count | `docker run --cpus` |
 | `--memory SIZE` | `memory` | `memory` | Docker's memory syntax: a number and a unit `b`, `k`, `m`, `g`, `t` or `p` (binary multiples, an optional `b` / `ib`, any case; a bare number is bytes); at least `6m` | `docker run --memory` |
 | `--pids-limit N` | `pids` | `pids` | A positive whole number of processes and threads | `docker run --pids-limit` |
+
+`sbx` uses the same `--cpus`, `--memory`, and `[resources]` settings. It requires
+a positive whole CPU count and at least `512m` of memory, in whole kilobytes.
+It has no operator template tier. An explicit `--pids-limit` is `RESOURCE_UNSUPPORTED` (exit `2`);
+a `pids` config default is noted and ignored. See [sbx isolation](sbx.md).
 
 **Precedence**, field by field: explicit flag, then `[resources]` in the user
 config, then the operator template's `resources` object (in its

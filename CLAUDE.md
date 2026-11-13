@@ -47,7 +47,7 @@ run (pluggable)** — with three registries that define everything swappable.
 
 - **Harness** — *which agent CLI launches* (`claude`, `codex`).
   `harnesses.py`: the `Harness` dataclass + `HARNESSES` registry.
-- **Runner / isolation** — *where it executes* (`host`, `docker`).
+- **Runner / isolation** — *where it executes* (`host`, `docker`, `sbx`).
   `runners/`: the `Runner` protocol + `RUNNERS` registry.
 - **Ecosystem** — *what setup runs* (uv, npm, pnpm, go, cargo).
   `ecosystems.py`: the `Ecosystem` dataclass + `ECOSYSTEMS` registry.
@@ -86,7 +86,9 @@ Module map:
   git just works). `runners/__init__.py` holds the `RUNNERS` registry;
   `get_runner` and `VALID_ISOLATION` derive from it. Each runner declares the
   generic resource limits it can apply (`supported_resources`, from
-  `resources.py`'s `cpus` / `memory` / `pids`) and maps them itself; the CLI
+  `resources.py`'s `cpus` / `memory` / `pids`) and maps them itself. sbx supports
+  whole CPU counts and memory of at least 512m, in whole kilobytes. It has no
+  template tier or process limit. The CLI
   resolves them (flag > `[resources]` config > template tier) before
   provisioning and the record holds the effective values. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,

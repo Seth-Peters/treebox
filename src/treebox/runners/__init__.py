@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final
 from .base import PreflightError, Runner, RunnerFacts, RunnerTeardownResult
 from .docker import DockerRunner
 from .host import HostRunner
+from .sbx import SbxRunner
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -28,6 +29,7 @@ RUNNERS: Final[dict[str, Callable[[Config, bool], Runner]]] = {
     DockerRunner.name: lambda config, remove_volumes: DockerRunner(
         config, remove_volumes=remove_volumes
     ),
+    SbxRunner.name: lambda config, _remove_volumes: SbxRunner(config),
 }
 
 VALID_ISOLATION: tuple[str, ...] = tuple(RUNNERS)
@@ -57,5 +59,6 @@ __all__ = [
     "Runner",
     "RunnerFacts",
     "RunnerTeardownResult",
+    "SbxRunner",
     "get_runner",
 ]

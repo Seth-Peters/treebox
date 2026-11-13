@@ -288,7 +288,7 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
     # doctor
     doc = json.loads(_run(["doctor", "--repo", str(repo), "--json"]).stdout)
     assert set(doc) == DOCTOR_KEYS
-    assert doc["isolation"] in {"host", "docker"}
+    assert doc["isolation"] in {"host", "docker", "sbx"}
     for check in doc["checks"]:
         assert set(check) == DOCTOR_CHECK_KEYS
 

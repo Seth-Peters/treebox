@@ -47,6 +47,7 @@ where the agent runs:
 | ---------------- | --------- | ----------------------------------------------------- |
 | `host` (default) | none      | the worktree shell                                    |
 | `docker`         | sandboxed | a docker container, with your `.env` + caches mounted |
+| `sbx`            | sandboxed | a [Docker Sandboxes](https://seth-peters.github.io/treebox/sbx/) microVM (own kernel; `sbx login` required) |
 
 ## Install
 
@@ -91,6 +92,7 @@ treebox create                          # generated name (brave-otter), host-nat
 treebox create fix-auth                 # named up front: works on branch fix-auth
 treebox create feature/auth             # slash names: branch feature/auth, dir feature--auth
 treebox create fix-auth --isolation docker   # sandboxed
+treebox create fix-auth --isolation sbx      # sandboxed in a microVM
 treebox create --checkout feature/auth       # exact existing branch (resume, PR review)
 treebox create auth-fixes --base feature/auth   # stack on any base branch
 ```

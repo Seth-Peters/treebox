@@ -549,7 +549,11 @@ def test_runner_registry_declares_supported_limits():
     supported = {
         name: factory(Config(), False).supported_resources for name, factory in RUNNERS.items()
     }
-    assert supported == {"host": frozenset(), "docker": frozenset(resources.RESOURCE_NAMES)}
+    assert supported == {
+        "host": frozenset(),
+        "docker": frozenset(resources.RESOURCE_NAMES),
+        "sbx": frozenset({"cpus", "memory"}),
+    }
 
 
 def test_adopt_records_only_the_stated_limits(repo: Path, root: str, home: Path):

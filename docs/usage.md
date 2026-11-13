@@ -78,19 +78,22 @@ Sandbox any of these by picking docker isolation:
 treebox create fix-auth --isolation docker
 ```
 
+or into a Docker Sandboxes microVM with `--isolation sbx` (needs `sbx` and
+`sbx login`; see [sbx isolation](sbx.md)).
+
 | Option           | Effect                                                                    |
 | ---------------- | ------------------------------------------------------------------------- |
 | `--checkout BRANCH` | Check out this exact existing branch instead of creating a new one.    |
 | `--base BRANCH`  | Base for the new branch — any branch, not just `main`. Resolved as `origin/<base>`. |
-| `--isolation MODE` | `host` (default) or `docker`.                                           |
+| `--isolation MODE` | `host` (default), `docker`, or `sbx` (Docker Sandboxes microVM).        |
 | `--harness, -H NAME` | Agent harness to launch: `claude` or `codex`.                        |
 | `--cold`         | Bypass shared caches for a from-source build.                             |
 | `--no-fetch`     | Opt out of the required `origin` fetch and accept possibly stale refs.    |
-| `--firewall/--no-firewall` | Enable/disable the container firewall (docker isolation). Unset: the config default applies. |
+| `--firewall/--no-firewall` | Enable/disable the container firewall (docker isolation). Unset: the config default applies. Not supported with `sbx` (use `sbx policy`). |
 | `--template NAME`| Operator-owned sandbox template to render.                                |
-| `--cpus N`       | CPU limit for the sandbox (`2`, `1.5`). See [resource limits](configuration.md#resource-limits). |
+| `--cpus N`       | CPU limit for the sandbox (`2`, or `1.5` for docker). See [resource limits](configuration.md#resource-limits). |
 | `--memory SIZE`  | Memory limit in Docker's memory syntax (`512m`, `4g`).                    |
-| `--pids-limit N` | Process limit (`512`). All three: docker isolation only; `--isolation host` refuses them (exit `2`). |
+| `--pids-limit N` | Process limit (`512`). Docker supports all three limits. sbx supports CPU and memory. `host` refuses explicit limits (exit `2`). |
 | `--dry-run, -n`  | Print a stable command plan; change nothing.                              |
 | `--print`        | Provision, then print the launch command instead of launching.            |
 | `--json`         | Provision, then print a JSON result instead of launching.                 |
@@ -447,6 +450,7 @@ recorded as no treebox cap, never taken from config.
 ```bash
 treebox doctor                       # checks for host isolation
 treebox doctor --isolation docker    # also checks the Docker daemon
+treebox doctor --isolation sbx       # also checks that sbx is installed and responding
 ```
 
 Checks git, agent logins, `.env`, and — because `create` requires a fresh

@@ -36,7 +36,7 @@ from .resources import ResourceLimitError, ResourceLimits, from_mapping
 # plain ``str``; deeper seams resolve them once to Harness/Runner objects.
 # The Literal aliases are hard-coded for static typing, and a drift test
 # asserts each alias still matches its registry.
-Isolation = Literal["host", "docker"]
+Isolation = Literal["host", "docker", "sbx"]
 Harness = Literal["claude", "codex"]
 
 DEFAULT_ROOT_REL = ".treebox/worktrees"
@@ -252,6 +252,17 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"Invalid isolation mode '{cfg.isolation}'. Use one of {VALID_ISOLATION}.")
     if cfg.harness not in VALID_HARNESSES:
         raise ValueError(f"Invalid harness '{cfg.harness}'. Use one of {VALID_HARNESSES}.")
+    if cfg.isolation == "sbx":
+        if cfg.firewall:
+            raise ValueError(
+                "--firewall is not supported with sbx isolation: sbx has its own global "
+                "network policy. Manage it with `sbx policy`."
+            )
+        if cfg.template != DEFAULT_TEMPLATE:
+            raise ValueError(
+                "--template does not apply to sbx isolation: sandbox templates are a "
+                "docker-runner feature."
+            )
     if not is_valid_template_name(cfg.template):
         # A path or '..' here would let a name escape the operator-owned
         # template locations (assets.template_dir).
