@@ -180,8 +180,11 @@ verdicts reflect the refs already available locally; run `git fetch origin`
 first when exact parity with create's normal fetch is required. The setup plan
 detects package manifests from the exact locally available `--base` or
 `--checkout` revision that it will materialize; when it resumes an interrupted
-create, it detects them from the existing worktree. A dry run does not copy
-submodules or inspect their destination paths, so it cannot detect
+create, it detects them from the existing worktree. The submodule part of the
+plan comes from the same revision's `.gitmodules` (or the existing worktree's),
+with the same rule as the real run: it names each path it would copy and each
+path it would skip. A dry run does not copy submodules or inspect their
+destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
 Nothing on disk or in git changes.
 

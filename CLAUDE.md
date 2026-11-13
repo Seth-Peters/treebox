@@ -76,7 +76,9 @@ Module map:
   `copy_submodules` follows the worktree branch's own `.gitmodules` (never
   written): it copies only paths the main checkout also declares and has on
   disk, and skips the rest with a note. No `git submodule update` runs, so the
-  copied content mirrors the main checkout.
+  copied content mirrors the main checkout. `plan_submodules` is that one
+  selection rule; `--dry-run` applies it to the planned revision's
+  `.gitmodules` (`git.submodule_paths_at_revision`), so plan and run agree.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
   hides its autonomous launch argv, host login dir, staged login files, and
   login advice behind a small method interface; `VALID_HARNESSES` and the
