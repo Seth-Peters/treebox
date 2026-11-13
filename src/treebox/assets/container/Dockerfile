@@ -1,14 +1,7 @@
 # The bundled treebox sandbox image.
 #
-# Every build input is pinned, so two builds of this file a week apart install
-# the same tools: the base image by its multi-arch index digest, every download
-# by version and SHA-256 (one checksum for each architecture, amd64 and arm64),
-# and every npm package by exact version. Debian packages come from the signed
-# Debian archive of the base image's release and take its security updates.
-#
-# The hosts a build needs, where each pin comes from, and the update policy are
-# in docs/configuration.md ("Build inputs"). A build that cannot reach a
-# required host fails with a "treebox:" message that names that host.
+# For build inputs, required hosts, and the pin update policy, see
+# docs/configuration.md ("Build inputs").
 FROM python:3.14.6-slim-trixie@sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144
 
 ARG TZ=UTC
@@ -34,10 +27,10 @@ RUN chmod 0755 /usr/local/bin/treebox-fetch /usr/local/bin/treebox-online
 # unreachable archive fail here instead of as a later "Unable to locate package".
 RUN treebox-online deb.debian.org apt-get update --error-on=any \
   && treebox-online deb.debian.org apt-get install -y --no-install-recommends \
-    ca-certificates curl wget gnupg2 less git procps sudo fzf zsh man-db \
-    unzip zip tar gzip bzip2 xz-utils nano vim jq yq rsync ripgrep fd-find \
+    ca-certificates curl wget gnupg2 less git procps sudo zsh bsdextrautils \
+    unzip zip tar gzip bzip2 xz-utils nano jq yq rsync ripgrep fd-find \
     iptables ipset iproute2 dnsutils aggregate openssh-client socat \
-    gcc g++ make cmake pkg-config python3-dev python3-venv bubblewrap \
+    gcc g++ make pkg-config bubblewrap \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Node.js (with npm and corepack): the official release tarball.
@@ -71,55 +64,20 @@ RUN ARCH=$(dpkg --print-architecture) && \
       "$GH_SHA256" /tmp/gh.tar.gz && \
     tar -xzf /tmp/gh.tar.gz -C /tmp && \
     install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${ARCH}/bin/gh" /usr/local/bin/gh && \
-    mkdir -p /usr/local/share/man/man1 /usr/share/bash-completion/completions \
+    mkdir -p /usr/share/bash-completion/completions \
       /usr/share/zsh/vendor-completions /usr/share/fish/vendor_completions.d && \
-    cp "/tmp/gh_${GH_VERSION}_linux_${ARCH}"/share/man/man1/* /usr/local/share/man/man1/ && \
     gh completion -s bash > /usr/share/bash-completion/completions/gh && \
     gh completion -s zsh > /usr/share/zsh/vendor-completions/_gh && \
     gh completion -s fish > /usr/share/fish/vendor_completions.d/gh.fish && \
     rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${ARCH}" && \
     gh --version
 
-# delta (git diff pager). Upstream publishes no checksums; these are the SHA-256
-# of the release assets, computed when the version was pinned.
-ARG GIT_DELTA_VERSION=0.18.2
-ARG GIT_DELTA_SHA256_AMD64=1658c7b61825d411b50734f34016101309e4b6e7f5799944cf8e4ac542cebd7f
-ARG GIT_DELTA_SHA256_ARM64=937781aa7788e1510858743fff6c9a8b4a69fe0a22a7c8a69493e633227939a9
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-      amd64) GIT_DELTA_SHA256="$GIT_DELTA_SHA256_AMD64" ;; \
-      arm64) GIT_DELTA_SHA256="$GIT_DELTA_SHA256_ARM64" ;; \
-      *) echo "treebox: unsupported architecture $ARCH" >&2; exit 1 ;; \
-    esac && \
-    treebox-fetch "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" \
-      "$GIT_DELTA_SHA256" /tmp/git-delta.deb && \
-    dpkg -i /tmp/git-delta.deb && \
-    rm /tmp/git-delta.deb
-
-# AWS CLI v2: the versioned installer zip. AWS publishes a PGP signature
-# (.zip.sig) rather than checksums; these SHA-256 values are of zips whose
-# signature was checked against the AWS CLI key when the version was pinned.
-ARG AWS_CLI_VERSION=2.40.2
-ARG AWS_CLI_SHA256_AMD64=a9ac0d635e97fab65e234ae1519fa6bd2b02d72120bf965a8ff6eaf7611f1833
-ARG AWS_CLI_SHA256_ARM64=ef8b0ab093d7924caa6fd7bbc6581b92c56332eb20b4062305ce6cf63da1f440
-RUN case "$(dpkg --print-architecture)" in \
-      amd64) AWS_ARCH=x86_64 AWS_CLI_SHA256="$AWS_CLI_SHA256_AMD64" ;; \
-      arm64) AWS_ARCH=aarch64 AWS_CLI_SHA256="$AWS_CLI_SHA256_ARM64" ;; \
-      *) echo "treebox: unsupported architecture $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac && \
-    treebox-fetch "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}-${AWS_CLI_VERSION}.zip" \
-      "$AWS_CLI_SHA256" /tmp/awscliv2.zip && \
-    unzip -q /tmp/awscliv2.zip -d /tmp && \
-    /tmp/aws/install && \
-    rm -rf /tmp/awscliv2.zip /tmp/aws && \
-    aws --version
-
 RUN if ! getent group "${USER_GID}" >/dev/null; then groupadd --gid "${USER_GID}" "${USERNAME}"; fi && \
     useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/zsh "${USERNAME}" && \
     echo "${USERNAME} ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/${USERNAME}-firewall && \
     chmod 0440 /etc/sudoers.d/${USERNAME}-firewall
 
-RUN mkdir -p /workspace /home/${USERNAME}/.codex /home/${USERNAME}/.claude /home/${USERNAME}/.aws /commandhistory && \
+RUN mkdir -p /workspace /home/${USERNAME}/.codex /home/${USERNAME}/.claude /commandhistory && \
     chown -R ${USERNAME}:${USER_GID} /workspace /home/${USERNAME} /commandhistory
 
 RUN echo "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
@@ -149,11 +107,27 @@ RUN case "$(dpkg --print-architecture)" in \
     rm /tmp/uv.tar.gz && \
     uv --version
 
-# Codex CLI: an exact npm version. Its platform binary is an exact-version
-# optional dependency, so the whole install is pinned.
+# Keep agent installs last so version updates can reuse earlier build layers.
+
+# playwright-cli opens the "chrome" channel at /opt/google/chrome/chrome.
+# Point it at the headless shell to share the installed browser with library use.
 USER root
-ARG CODEX_CLI_VERSION=0.167.2
-RUN treebox-online registry.npmjs.org npm install -g "@openai/codex@${CODEX_CLI_VERSION}" && codex --version
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG PLAYWRIGHT_CLI_VERSION=0.1.24
+ARG PLAYWRIGHT_VERSION=1.65.0
+RUN treebox-online registry.npmjs.org \
+      npm install -g "@playwright/cli@${PLAYWRIGHT_CLI_VERSION}" "playwright@${PLAYWRIGHT_VERSION}" && \
+    npm cache clean --force && \
+    mkdir -p /ms-playwright && \
+    treebox-online deb.debian.org playwright install-deps chromium && \
+    treebox-online cdn.playwright.dev playwright-cli install-browser --only-shell chromium && \
+    chown -R ${USERNAME}:${USER_GID} /ms-playwright && \
+    chmod -R u+rwX,go+rX /ms-playwright && \
+    CHROMIUM_BIN="$(find /ms-playwright -type f -name chrome-headless-shell -path '*chromium_headless_shell-*' | head -1)" && \
+    if [ -z "$CHROMIUM_BIN" ]; then echo "treebox: no Chromium headless shell found under /ms-playwright" >&2; ls -R /ms-playwright >&2; exit 1; fi && \
+    mkdir -p /opt/google/chrome && \
+    ln -sfn "$CHROMIUM_BIN" /opt/google/chrome/chrome && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Claude Code: the native build for this version, checked against the SHA-256
 # in https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/manifest.json.
@@ -176,25 +150,13 @@ RUN case "$(dpkg --print-architecture)" in \
     treebox-online downloads.claude.ai "$CLAUDE_BIN" install "${CLAUDE_CODE_VERSION}" && \
     claude --version
 
+# Remove the npm cache so it does not retain a second, compressed copy of the
+# Codex binary in the image.
 USER root
-
-# Playwright: exact npm versions (each pins its own Chromium build), the
-# browser's system libraries from Debian, and the browser from Playwright's CDN.
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ARG PLAYWRIGHT_CLI_VERSION=0.1.24
-ARG PLAYWRIGHT_VERSION=1.65.0
-RUN treebox-online registry.npmjs.org \
-      npm install -g "@playwright/cli@${PLAYWRIGHT_CLI_VERSION}" "playwright@${PLAYWRIGHT_VERSION}" && \
-    mkdir -p /ms-playwright && \
-    treebox-online deb.debian.org playwright install-deps chromium && \
-    treebox-online cdn.playwright.dev playwright-cli install-browser && \
-    chown -R ${USERNAME}:${USER_GID} /ms-playwright && \
-    chmod -R u+rwX,go+rX /ms-playwright && \
-    CHROMIUM_BIN="$(find /ms-playwright -type f -name chrome -path '*chromium-*' | head -1)" && \
-    if [ -z "$CHROMIUM_BIN" ]; then echo "treebox: no Chromium binary found under /ms-playwright" >&2; ls -R /ms-playwright >&2; exit 1; fi && \
-    mkdir -p /opt/google/chrome && \
-    ln -sfn "$CHROMIUM_BIN" /opt/google/chrome/chrome && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+ARG CODEX_CLI_VERSION=0.167.2
+RUN treebox-online registry.npmjs.org npm install -g "@openai/codex@${CODEX_CLI_VERSION}" && \
+    npm cache clean --force && \
+    codex --version
 
 # Setup hooks are baked into the image, never run from the mounted worktree, so a
 # boxed agent cannot edit what runs at container setup.

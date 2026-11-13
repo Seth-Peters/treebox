@@ -11,7 +11,7 @@ A pluggable **isolation mode** decides where the agent runs:
 - `--isolation host` (default): provisions the worktree and launches the agent directly on the host, in the worktree dir. No container, no Docker — the right default on an SSH box or a trusted machine.
 - `--isolation docker`: same provisioning, but launches the agent inside a docker container with the shared caches and scoped copies of the `~/.claude`/`~/.codex` login files mounted in. Before using Docker isolation, read the [requirements and recovery steps](https://seth-peters.github.io/treebox/install/#what-each-isolation-mode-needs).
 
-Treebox itself requires Python 3.11 or newer. The bundled sandbox template is pinned to CPython 3.14.6; its base image, tools, and agent CLIs are pinned by digest, version, and checksum (see "Build inputs" in docs/configuration.md).
+Treebox itself requires Python 3.11 or newer. For the bundled sandbox's tool pins and update policy, read [Build inputs](https://seth-peters.github.io/treebox/configuration/#build-inputs).
 
 Provisioning (fetch → resolve branch → worktree add → copy submodules → copy `.env` → cache-backed setup → record lockfile hash) is identical for both isolation modes; only the launch seam differs.
 

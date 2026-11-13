@@ -68,11 +68,10 @@ DEFAULT_TEMPLATE_HIGHLIGHTS = (
     "Python 3.14 + uv",
     "Node.js 22 + npm",
     "Claude Code & Codex agent CLIs",
-    "Playwright CLI + Chromium browser",
+    "Playwright CLI + Chromium (headless shell)",
     "GitHub CLI (gh)",
-    "AWS CLI",
-    "git with delta diffs",
-    "ripgrep, fd, fzf, jq, yq",
+    "git, gcc, g++, make",
+    "ripgrep, fd, jq, yq",
     "Egress firewall (iptables/ipset)",
 )
 

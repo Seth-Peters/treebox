@@ -49,8 +49,9 @@ curl -fsSL https://raw.githubusercontent.com/Seth-Peters/treebox/main/install.sh
 
 That's the whole table: docker isolation speaks plain `docker build` /
 `docker run` / `docker exec`, so there is no Node.js and no dev-container CLI
-to install. The buildx plugin (BuildKit) is not required: the default template
-also builds with Docker's legacy builder. The default template installs the agent CLIs in the image; the host
+to install. See [sandbox build requirements](configuration.md#build-inputs)
+for network access and builder compatibility. The default template installs
+the agent CLIs in the image; the host
 supplies scoped subscription-login copies. The worktree and its git dir are
 mounted at their host paths, so in-container `git` just works — with no special
 git version requirement.

@@ -74,6 +74,12 @@ section. To see what has merged since the latest release, run
 - Docker isolation now checks the [non-root user requirement](docs/install.md#what-each-isolation-mode-needs)
   before provisioning (#60).
 
+### Changed
+
+- The bundled sandbox omits unused tools and browser downloads and pins direct
+  tool versions. See [build inputs](docs/configuration.md#build-inputs) for the
+  tool choices, reproducibility limits, and template customization.
+
 ## [1.0.1] - 2026-07-10
 
 ### Fixed

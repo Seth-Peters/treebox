@@ -192,28 +192,28 @@ config in the target repo itself is deliberately ignored. See
 
 ### Build inputs
 
-The image is not published: each machine builds it from the template. The
-bundled `Dockerfile` pins every input, so two builds of it a week apart
-install the same tools:
+The image is not published. Each machine builds it from the template. The
+bundled `Dockerfile` pins the base image and direct tool versions. These pins
+do not guarantee reproducible images because Debian package versions and npm
+dependency ranges can resolve differently between builds.
 
-- The base image is pinned by its multi-arch index digest
-  (`python:3.14.6-slim-trixie@sha256:…`), so it is the same on amd64 and arm64.
-- Each download has an exact version and a SHA-256 for each architecture
-  (`*_SHA256_AMD64`, `*_SHA256_ARM64`). The helper `treebox-fetch` downloads
-  and checks it; a wrong checksum stops the build. No installer script is
-  piped into a shell.
-- Each npm package has an exact version.
+- The base image uses a multi-architecture index digest. The index selects
+  the platform-specific image for amd64 or arm64.
+- Direct tool downloads have an exact version and a SHA-256 for each architecture
+  (`*_SHA256_AMD64`, `*_SHA256_ARM64`). The helper `treebox-fetch` verifies
+  each downloaded file. A wrong checksum stops the build. No installer script
+  is piped into a shell.
+- Direct npm packages have exact versions. Their transitive dependencies
+  are not locked by the template.
 - Debian packages come from the signed Debian archive of the base image's
   release (trixie). They are not pinned to a version: they take Debian's
   security updates, so these package versions can change between builds.
 
-| Tool | Pin (`ARG`) | Source of the checksum |
+| Tool | Pin (`ARG`) | Pin or checksum source |
 | ---- | ----------- | ---------------------- |
 | Base image | `FROM …@sha256:` | Docker Hub index digest (`docker buildx imagetools inspect`) |
-| Node.js 22 | `NODE_VERSION` | `SHASUMS256.txt` of the release on nodejs.org |
+| Node.js | `NODE_VERSION` | `SHASUMS256.txt` of the release on nodejs.org |
 | GitHub CLI | `GH_VERSION` | `gh_<version>_checksums.txt` of the GitHub release |
-| delta | `GIT_DELTA_VERSION` | SHA-256 of the release asset (upstream publishes none) |
-| AWS CLI v2 | `AWS_CLI_VERSION` | SHA-256 of the versioned zip, after its AWS PGP signature passed |
 | uv | `UV_VERSION` | `<asset>.sha256` of the GitHub release |
 | Claude Code | `CLAUDE_CODE_VERSION` | `manifest.json` of the release on downloads.claude.ai |
 | Codex CLI | `CODEX_CLI_VERSION` | exact npm version |
@@ -224,12 +224,39 @@ that the Claude Code `stable` channel
 (`https://downloads.claude.ai/claude-code-releases/stable`) gives when it is
 bumped. `CODEX_CLI_VERSION` is the npm `latest` dist-tag of `@openai/codex`
 when it is bumped. treebox bumps both on purpose, in a dedicated change, at
-least once a month and soon after an upstream security fix. A bump changes
-the version and both checksums together, from the upstream source in the table.
-The build never installs a version it did not pin. To run a different version in your own template, change the
-version and its checksums in your template's `Dockerfile`. Do not pass the
-version as a `build.args` entry in `container.json`: the checksums would no
-longer match, and the build stops.
+least once a month and soon after an upstream security fix. A Claude Code
+update changes its version and both architecture checksums together, from the
+upstream source in the table. A Codex update changes its npm version.
+
+To run a different tool version in your own template, edit its `Dockerfile`.
+For a checksummed download, change the version and both architecture checksums
+together. A version-only `build.args` override in `container.json` fails
+checksum verification.
+
+**What the image leaves out.** To keep the image small, it installs only
+what a supported setup path or a bundled agent uses:
+
+- Playwright installs Chromium's headless shell and FFmpeg. Firefox, WebKit,
+  and full Chromium are not installed. Browser workflows must run headless.
+  `playwright-cli` opens it through `/opt/google/chrome/chrome`.
+- AWS CLI, vim, fzf, delta, cmake, man-db, and GitHub CLI man pages are omitted.
+  Other Debian packages can still include man pages.
+- Debian's `python3-dev` and `python3-venv` are omitted. The image's CPython
+  includes its own headers, and `uv` creates virtual environments. If a build
+  backend needs CMake, declare `cmake` as a build dependency or add it to your
+  template.
+- gcc, g++, make, and pkg-config stay, so `uv sync` and `npm install` can
+  build native dependencies from source.
+
+To add a tool, put it in your own template's `Dockerfile` (see
+[Scaffold a template](#1-scaffold-a-template)), for example:
+
+```dockerfile
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends vim cmake \
+  && rm -rf /var/lib/apt/lists/*
+USER ${USERNAME}
+```
 
 **Hosts the build needs.** A build needs outbound HTTPS to these hosts (Debian
 uses HTTP):
@@ -239,11 +266,10 @@ uses HTTP):
 | `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | the base image (only if it is not already pulled) |
 | `deb.debian.org` | Debian packages, and the Chromium libraries Playwright installs |
 | `nodejs.org` | Node.js |
-| `github.com`, `release-assets.githubusercontent.com` | GitHub CLI, delta, uv (GitHub redirects release downloads) |
-| `awscli.amazonaws.com` | AWS CLI |
+| `github.com`, `release-assets.githubusercontent.com` | GitHub CLI, uv (GitHub redirects release downloads) |
 | `downloads.claude.ai` | Claude Code |
 | `registry.npmjs.org` | Codex CLI, Playwright |
-| `cdn.playwright.dev` | the Playwright browsers |
+| `cdn.playwright.dev` | the Chromium headless shell (and FFmpeg) for Playwright |
 
 If the build cannot reach one of them, the step fails with a message that
 names the host, for example:
@@ -256,11 +282,10 @@ treebox: this build needs network access to nodejs.org.
 The egress firewall (`--firewall`) does not apply to the build: it only
 limits the running container.
 
-**Builders.** The bundled `Dockerfile` uses no BuildKit-only syntax (no
-heredocs, no `COPY --chmod`, no `RUN --mount`, no `# syntax=` line). So it
-builds with BuildKit and also with Docker's legacy builder, which is what
-`docker build` uses on a host without the buildx plugin (for example Debian or
-Ubuntu `docker.io` without `docker-buildx`) or with `DOCKER_BUILDKIT=0`.
+**Builders.** The bundled `Dockerfile` supports BuildKit and Docker's legacy
+builder. On a Docker installation that provides the legacy builder, set
+`DOCKER_BUILDKIT=0` to select it. The buildx plugin is optional when the legacy
+builder is available.
 
 ## Environment variables
 
