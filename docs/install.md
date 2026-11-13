@@ -58,9 +58,14 @@ git version requirement.
 
 Host isolation launches against your live `~/.claude` / `~/.codex`
 **subscription login**. Docker isolation stages scoped copies of those login
-files and never mounts the live dirs. The sandbox template docker isolation
-provisions is pinned to CPython 3.14.6, independent of whatever runs treebox
-itself.
+files and never mounts the live dirs. On macOS, Claude Code keeps its login in
+the Keychain (your user's `Claude Code-credentials` item), not in
+`~/.claude/.credentials.json`: when that file is absent, treebox reads the
+Keychain item and stages it as the sandbox's `.credentials.json`. If macOS
+asks whether `security` may read the item, allow it; a request that is denied
+or not answered within 30 seconds counts as no login. The sandbox template
+docker isolation provisions is pinned to CPython 3.14.6, independent of
+whatever runs treebox itself.
 
 Docker isolation requires a non-root user (uid other than 0), even with
 `--no-firewall`. The default sandbox template gives the agent your uid.

@@ -45,7 +45,7 @@ HOME_FAKE="$ROOT/home"
 mkdir -p "$HOME_FAKE/.claude" "$HOME_FAKE/.codex"
 printf '{"token": "golden"}\n' > "$HOME_FAKE/.claude/.credentials.json"
 printf '{}\n' > "$HOME_FAKE/.claude/settings.json"
-printf '{}\n' > "$HOME_FAKE/.codex/auth.json"
+printf '{"token": "golden"}\n' > "$HOME_FAKE/.codex/auth.json"
 printf '\n' > "$HOME_FAKE/.codex/config.toml"
 
 # --- docker shim: simulates a healthy engine with persistent containers ------
@@ -89,6 +89,20 @@ esac
 exit 0
 EOF
 chmod +x "$SHIM/docker"
+
+# --- stub harness binaries: doctor checks the selected agent is on PATH -------
+# Never a real agent: they are never launched (every case ends with --json,
+# --print or --dry-run); they only make the host's PATH check deterministic.
+for agent in claude codex; do
+  printf '#!/bin/sh\nexit 0\n' > "$SHIM/$agent"
+  chmod +x "$SHIM/$agent"
+done
+
+# --- macOS Keychain shim: no login item, so snapshots never read the real
+# Keychain and come out the same on macOS and Linux. 44 is security's
+# "item not found" status.
+printf '#!/bin/sh\nexit 44\n' > "$SHIM/security"
+chmod +x "$SHIM/security"
 
 # --- hermetic config: setup is a marker-writing hook, never a real installer -
 CFG="$ROOT/config.toml"
@@ -157,6 +171,9 @@ normalize() {
     s/\bUSER_GID=\Q$ENV{GD_GID}\E\b/USER_GID=__GID__/g;
     s/\b\Q$ENV{GD_UID}\E:\Q$ENV{GD_GID}\E\b/__UID__:__GID__/g;
     s/\btreebox-([a-z0-9._-]+)-[0-9a-f]{10}\b/treebox-$1-__HASH__/g;
+    # The worktree id is the same path hash (TREEBOX_ID, "id" in --json).
+    s/\bTREEBOX_ID=[0-9a-f]{10}\b/TREEBOX_ID=__HASH__/g;
+    s/"id": "[0-9a-f]{10}"/"id": "__HASH__"/g;
     # Canonicalize the whole 3-wide AGE cell, not just its digits: a 2-digit
     # age ("10s") fills the column while a 1-digit one right-aligns to " 3s",
     # so replacing only the digits leaves a timing-dependent byte of padding.
@@ -226,6 +243,7 @@ run_case enter-host-json      "$HOME_FAKE" enter golden-host "${RW[@]}" --json
 # --- docker isolation (through the shim) ---------------------------------------
 run_case doctor-docker        "$HOME_FAKE" doctor "${R[@]}" --isolation docker
 run_case doctor-docker-json   "$HOME_FAKE" doctor "${R[@]}" --isolation docker --json
+run_case doctor-docker-no-login "$ROOT/home-empty" doctor "${R[@]}" --isolation docker --json
 run_case create-dryrun-docker      "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run
 run_case create-dryrun-docker-json "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run --json
 run_case create-dryrun-docker-limits "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --cpus 2 --memory 4g --pids-limit 512 --dry-run

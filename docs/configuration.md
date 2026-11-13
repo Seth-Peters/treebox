@@ -43,6 +43,13 @@ npm = "/mnt/fast/cache/npm"
 cpus   = 2        # CPUs (a decimal is fine: 1.5)
 memory = "4g"     # Docker's memory syntax
 pids   = 512      # most processes + threads at once
+
+# The machine-wide port blocks each worktree gets (TREEBOX_PORT_BASE,
+# TREEBOX_PORT_COUNT). start and end are inclusive.
+[ports]
+start      = 20000
+end        = 26999
+block_size = 10
 ```
 
 Every key is optional, but the vocabulary is closed: an unknown top-level key
@@ -50,7 +57,8 @@ Every key is optional, but the vocabulary is closed: an unknown top-level key
 suggestion), never silently ignored - a typo'd `isolation` or `firewall` would
 otherwise drop your security posture without warning. Only the subkeys inside
 `[caches]` are open-ended (ecosystem cache names); `[resources]` accepts only
-`cpus`, `memory` and `pids`.
+`cpus`, `memory` and `pids`; `[ports]` takes exactly `start`, `end` and
+`block_size`.
 
 Path-valued keys understand a leading `~`: `root`, `env_file`, and every
 `caches` entry expand `~/…` to your home directory before use, as do quoted
@@ -84,9 +92,10 @@ Docker teardown ownership and missing-manifest behavior, see the
 | `env_file` | `.env`               | The secrets file copied into every new worktree; repo-relative unless absolute or `~`-prefixed. |
 | `firewall` | `false`              | Restrict container egress (docker isolation).              |
 | `template` | `default`            | Which operator template defines the sandbox.              |
-| `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. |
+| `setup_hook` | *(auto-detect)*    | Your own setup commands instead of the detected package manager's. They run in order; one that exits non-zero fails `create` / `enter` (`SETUP_FAILED`). |
 | `caches`   | *(standard env vars)* | Per-ecosystem shared cache locations treebox installs from and mounts. |
 | `resources` | *(no limits)*       | Default `cpus` / `memory` / `pids` limits for a new sandbox; see [resource limits](#resource-limits). |
+| `ports`    | `20000`-`26999`, blocks of `10` | The range and block size of the [port blocks](#port-blocks). |
 
 ## Resource limits
 
@@ -129,9 +138,9 @@ container's limits cannot change in place, so:
 - The record also keeps which limits a `create` flag chose. A limit that came
   from `[resources]` or the template, and that they now give differently, is
   drift: a warning on every `enter`, with the same re-create commands. The
-  sandbox keeps its recorded limits. `enter --json` prints no warning; its
-  `resources_drift` object (`cpus`, `memory`, `pids`; `null` = no drift) holds
-  the new values instead.
+  sandbox keeps its recorded limits. `enter --json` prints nothing on stderr:
+  the same warning is one entry in `warnings`, and the `resources_drift`
+  object (`cpus`, `memory`, `pids`; `null` = no drift) holds the new values.
 - A limit a flag chose never drifts: `create --memory 4g` under
   `memory = "2g"` is a choice, so `enter` is silent, also after the config
   default changes. A limit that `enter` restates by flag does not drift either.
@@ -154,6 +163,29 @@ that the template has when the container is re-created passes through unchanged.
 `RESOURCE_UNSUPPORTED`), never ignored. A `[resources]` table in config is a
 default for sandboxes, so it does not make host worktrees fail: `create` notes
 that it is not applied and records no limits.
+
+
+## Port blocks
+
+Every worktree gets a block of `block_size` consecutive ports, cut from
+`start` through `end`, for its repo-owned services (see
+[services in parallel worktrees](usage.md#services-in-parallel-worktrees)).
+Like every key, `[ports]` is read only from the user-level config, never from a
+repo: a repo cannot claim a range for itself.
+
+The defaults are a stated choice. `20000`-`26999` lies above the well-known
+ports (`0`-`1023`) and below both ephemeral ranges that the kernel hands to
+outgoing connections (Linux `32768`-`60999`, macOS and IANA `49152`-`65535`),
+and it stays clear of common development ports (`3000`, `5432`, `6379`,
+`8080`, `9000`, `27017`). A block of `10` is enough for an app, a database
+and a few helpers, and the range then holds 700 worktrees.
+
+Values must satisfy `1024 <= start <= end <= 65535` and
+`1 <= block_size <= end - start + 1`; anything else is `INVALID_CONFIG`
+(exit `2`). A change applies to new reservations only: a worktree keeps the
+block it has, and a new block never overlaps one reserved under an older
+setting. When the range is full, `create` fails with `PORTS_EXHAUSTED` before
+it makes anything.
 
 ## Customizing the sandbox
 
@@ -391,13 +423,14 @@ builder is available.
 
 | Variable          | Effect                                                        |
 | ----------------- | ------------------------------------------------------------- |
-| `TREEBOX_HOME`    | Base dir for `config.toml` and `templates/` (default `~/.treebox`). |
+| `TREEBOX_HOME`    | Base dir for `config.toml`, `templates/` and the port-block ledger `ports.json` (default `~/.treebox`). |
 | `TREEBOX_CONFIG`  | Explicit path to the config file (overrides `TREEBOX_HOME`). Setting it asserts the file exists — a missing file here is a loud error (exit `2`), not a silent fall-back to defaults. |
 | `TREEBOX_TEMPLATE_DIR` | Explicit template dir; wins for any `--template` name. |
 | `XDG_CACHE_HOME`  | Standard XDG base for the shared package caches treebox mounts. |
+| `TREEBOX_NON_INTERACTIVE` | Set (`1`, `true`) to run every command in [unattended mode](usage.md#unattended-use), like the global `--non-interactive`. |
 
-All four expand a leading `~` to your home directory, like the path-valued
-config keys above.
+The four path variables expand a leading `~` to your home directory, like the
+path-valued config keys above.
 
 Secrets stay in files: treebox copies your repo's `.env` (or the configured
 `env_file`) into each worktree and mounts it into containers. Host isolation

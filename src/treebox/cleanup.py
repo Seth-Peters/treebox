@@ -1,0 +1,164 @@
+"""Remove one worktree in order and retain the records needed for a retry.
+
+Callers resolve the runner, validate the batch and hold the worktree lock.
+This module owns runner resources, worktree removal and ownership record
+removal and port release, and takes the repository lock (after the worktree
+lock) for the git steps; the port release stays outside it. Runner adapters
+retain ownership of their resource manifests.
+"""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from typing import Literal
+
+from . import git, locking, ports, provision, record
+from .models import PortBlock, Worktree, same_path
+from .output import Reporter
+from .runners import Runner
+from .runners.base import RunnerTeardownResult
+
+WorktreeRemoval = Literal["removed", "already_gone", "kept", "cleanup_incomplete"]
+
+
+class MainWorktreeError(RuntimeError):
+    """The repository's main working tree is never a cleanup target."""
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    """Completed effects and remaining resources, independent of CLI output."""
+
+    runner: RunnerTeardownResult
+    worktree: WorktreeRemoval
+    branch: str | None
+    remaining: tuple[str, ...] = ()
+    branch_deleted: bool = False
+    runner_error: str | None = None
+    branch_error: str | None = None
+    released_ports: PortBlock | None = None
+    port_error: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        return not self.remaining
+
+
+def cleanup_one(
+    wt: Worktree,
+    runner: Runner | None,
+    *,
+    force: bool,
+    delete_branch: bool,
+    reporter: Reporter,
+) -> CleanupResult:
+    """Remove resources, the worktree, then its record. Return what remains.
+
+    A missing runner means its cleanup was explicitly skipped
+    (``--skip-container``). A runner failure keeps the worktree and record.
+    Git refusal never falls back to filesystem deletion. Branch deletion is
+    best effort after cleanup, as it is not part of resource ownership.
+    """
+    if same_path(wt.path, wt.repo):
+        raise MainWorktreeError(f"Refusing to remove the main working tree '{wt.name}'.")
+    branch = (
+        wt.branch
+        if wt.branch and (wt.path.is_dir() or git.local_branch_exists(wt.repo, wt.branch))
+        else None
+    )
+    runner_error = None
+    if runner is None:
+        resources = RunnerTeardownResult.skipped()
+    else:
+        try:
+            resources = runner.teardown(wt, reporter=reporter)
+        except Exception as exc:
+            runner_error = str(exc)
+            resources = RunnerTeardownResult(
+                "failed", remaining=(f"{runner.name} resources ({exc})",)
+            )
+    if resources.remaining:
+        return CleanupResult(
+            resources, "cleanup_incomplete", branch, resources.remaining, runner_error=runner_error
+        )
+
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
+    branch_deleted = False
+    branch_error = None
+    with locking.repo_lock(wt.repo):
+        removal, remaining = _remove_worktree(wt, force=force)
+        if not remaining and delete_branch and branch:
+            try:
+                git.delete_branch(wt.repo, branch)
+                branch_deleted = True
+            except git.GitError as exc:
+                branch_error = str(exc)
+    if remaining:
+        return CleanupResult(
+            resources,
+            removal,
+            branch,
+            remaining,
+            runner_error=runner_error,
+        )
+
+    # The host-owned record goes last, after the worktree it describes: a
+    # failure above leaves it in place, so a retried teardown still knows the
+    # mode. It is not shared git state, so it stays outside the repo lock; the
+    # worktree lock the caller holds already covers it.
+    record.remove(wt.path)
+    # The record is gone, so a failed release leaves a stale ledger entry.
+    # The next allocation can reclaim it without a teardown retry. Outside the
+    # repo lock: the ports lock is never nested in it.
+    released_ports = None
+    port_error = None
+    try:
+        released_ports = ports.release(wt.path)
+    except (ports.PortsError, locking.LockError) as exc:
+        port_error = str(exc)
+    return CleanupResult(
+        resources,
+        removal,
+        branch,
+        branch_deleted=branch_deleted,
+        runner_error=runner_error,
+        branch_error=branch_error,
+        released_ports=released_ports,
+        port_error=port_error,
+    )
+
+
+def _remove_worktree(wt: Worktree, *, force: bool) -> tuple[WorktreeRemoval, tuple[str, ...]]:
+    health = provision.worktree_health(wt.repo, wt.path)
+    remaining: list[str] = []
+    removed = False
+    if health in ("healthy", "unreadable_state"):
+        try:
+            git.worktree_remove(wt.repo, wt.path, force=force)
+            removed = True
+        except git.GitError as exc:
+            remaining.append(f"worktree (git refused to remove it: {exc})")
+    elif health == "invalid_linkage":
+        try:
+            shutil.rmtree(wt.path)
+            removed = True
+        except OSError as exc:
+            remaining.append(f"worktree (cannot remove the directory: {exc})")
+    elif health == "unregistered":
+        remaining.append("worktree (git has no registration for this directory; remove it by hand)")
+    if not removed or health == "invalid_linkage":
+        git.worktree_prune(wt.repo)
+    if git.worktree_registered(wt.repo, str(wt.path)):
+        remaining.append("git registration (git still lists the worktree)")
+    outcome: WorktreeRemoval = (
+        "removed"
+        if removed
+        else "already_gone"
+        if health == "directory_missing" and not remaining
+        else "kept"
+    )
+    return outcome, tuple(remaining)

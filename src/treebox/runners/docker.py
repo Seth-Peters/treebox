@@ -72,14 +72,17 @@ one the container gets - never Docker's last-flag-wins.
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
@@ -99,6 +102,7 @@ from ..resources import (
     parse_memory,
     parse_pids,
 )
+from ..system import STOP_GRACE_SECONDS, SessionCancelled, run_agent, signal_name
 from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
@@ -179,6 +183,20 @@ _FIREWALL_GUARDED = (
     'if [ "$TREEBOX_FIREWALL" = "1" ]; then /usr/local/bin/init-firewall.sh; fi',
 )
 
+# In-container helpers for a cancellable agent session (``launch``). The
+# wrapper writes its pid to the file in $0, then execs the agent in that same
+# process. The other two read the pid back: signal the agent's process group
+# (falling back to the agent alone), and test whether the agent still runs.
+_AGENT_WRAPPER = 'echo "$$" > "$0" && exec "$@"'
+_AGENT_SIGNAL = (
+    'p=$(cat "$0" 2>/dev/null) && [ -n "$p" ] && '
+    '{ kill -s "$1" -- "-$p" 2>/dev/null || kill -s "$1" "$p"; }'
+)
+_AGENT_ALIVE = (
+    'p=$(cat "$0" 2>/dev/null) && [ -n "$p" ] && '
+    '{ kill -0 -- "-$p" 2>/dev/null || kill -0 "$p" 2>/dev/null; }'
+)
+
 
 def has_resource_manifest(worktree: Path) -> bool:
     """Whether the host-owned resource manifest of the docker worktree at
@@ -242,9 +260,9 @@ def _mount(
     return spec
 
 
-# Credentials are copied from the host login dirs at setup time, so a missing
-# login is advisory rather than a hard gate in `doctor`'s machine verdict.
-_FACTS = RunnerFacts(preflight_detail="docker daemon ok", login_required=False)
+# The agent runs in the sandbox: its binary comes from the image and its login
+# is a staged copy of the harness login file (what `doctor` checks).
+_FACTS = RunnerFacts(preflight_detail="docker daemon ok", sandboxed=True)
 
 
 class DockerRunner:
@@ -459,11 +477,11 @@ class DockerRunner:
         return f"treebox.workspace={wt.path}"
 
     def _slug(self, wt: Worktree) -> str:
-        """Deterministic container name and image tag. The path hash makes it
-        unique across repos whose branches share a name, and reproducible so
-        ``run``, ``exec``, and ``--print`` all address the same container."""
-        digest = hashlib.sha256(str(wt.path).encode()).hexdigest()[:10]
-        return f"treebox-{_sanitize(wt.name)[:40]}-{digest}"
+        """Deterministic container name and image tag. The worktree id (the
+        path hash, ``TREEBOX_ID``) makes it unique across repos whose branches
+        share a name, and reproducible so ``run``, ``exec``, and ``--print``
+        all address the same container."""
+        return f"treebox-{_sanitize(wt.name)[:40]}-{wt.id}"
 
     def initialize(self, wt: Worktree) -> None:
         """Create the host-owned resource manifest before Docker setup.
@@ -767,12 +785,20 @@ class DockerRunner:
         user: str | None = None,
         stdin: bool = False,
         tty: bool = False,
+        treebox_env: bool = False,
     ) -> list[str]:
+        """A ``docker exec`` argv. ``treebox_env`` passes the worktree's
+        ``TREEBOX_*`` variables (setup and agent entry): given on every exec,
+        not baked in at ``docker run``, so a restarted container gets them
+        too."""
         cmd = ["docker", "exec"]
         if stdin:
             cmd.append("-i")
         if tty:
             cmd.append("-t")
+        if treebox_env:
+            for key, value in wt.treebox_env().items():
+                cmd += ["-e", f"{key}={value}"]
         cmd += ["-u", user or self._user(wt), "-w", str(wt.path), self._slug(wt), *argv]
         return cmd
 
@@ -838,7 +864,7 @@ class DockerRunner:
             reporter.step(
                 "setup",
                 "post-create complete",
-                self._exec_command(wt, ["sh", "-c", str(post_create)]),
+                self._exec_command(wt, ["sh", "-c", str(post_create)], treebox_env=True),
             )
 
     def _firewall_command(self, wt: Worktree) -> list[str]:
@@ -949,7 +975,9 @@ class DockerRunner:
             cmds.append(shlex.join(self._firewall_command(wt)))
         post_create = config.get("postCreate")
         if post_create:
-            cmds.append(shlex.join(self._exec_command(wt, ["sh", "-c", str(post_create)])))
+            cmds.append(
+                shlex.join(self._exec_command(wt, ["sh", "-c", str(post_create)], treebox_env=True))
+            )
         return cmds
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
@@ -961,10 +989,87 @@ class DockerRunner:
             harness.launch_argv(args),
             stdin=True,
             tty=sys.stdin.isatty(),
+            treebox_env=True,
         )
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
-        return subprocess.run(self.entry_command(wt, harness=harness, args=args)).returncode
+        """Run the agent in the sandbox. A cancel signal to treebox is passed
+        on to the agent's process group inside the container (``docker exec``
+        alone would leave it running there); the agent is killed if it has
+        not exited after the grace time. The container keeps running.
+        ``_run_session`` has already run ``prepare_entry``."""
+        user = self._user(wt)
+        slug = self._slug(wt)
+        probe = self._engine(
+            ["exec", "-u", user, slug, "sh", "-c", 'command -v "$0" >/dev/null', harness.binary()]
+        )
+        if probe.returncode != 0:
+            raise PreflightError(
+                f"'{harness.binary()}' not found in the sandbox of '{wt.name}'.",
+                error_code="HARNESS_MISSING",
+                hint="Install it in the operator template's Dockerfile "
+                f"(treebox template path {self.config.template}), then re-create the "
+                f"sandbox: treebox teardown {wt.name} && treebox create {wt.name} "
+                f"--isolation {self.name}",
+            )
+        # The wrapper records the agent's pid (it execs into the agent), so a
+        # cancel can reach the agent itself, not only the local docker CLI.
+        pidfile = f"/tmp/treebox-agent-{secrets.token_hex(8)}.pid"
+        entry = self.entry_command(wt, harness=harness, args=args)
+        at = entry.index(slug) + 1
+        argv = [*entry[:at], "sh", "-c", _AGENT_WRAPPER, pidfile, *entry[at:]]
+
+        def stop(proc: subprocess.Popen[bytes], signum: int) -> None:
+            self._signal_agent(user, slug, pidfile, signum)
+            if signum == signal.SIGKILL:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+
+        code, cancelled = run_agent(argv, stop=stop)
+        if cancelled is None:
+            self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
+            return code
+        # The local docker CLI can end before the agent in the container does
+        # (it got the signal too): wait for the agent itself, then kill it.
+        deadline = time.monotonic() + STOP_GRACE_SECONDS
+        while self._agent_alive(user, slug, pidfile) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if self._agent_alive(user, slug, pidfile):
+            self._signal_agent(user, slug, pidfile, signal.SIGKILL)
+            time.sleep(0.5)
+        alive = self._agent_alive(user, slug, pidfile)
+        self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
+        name = signal_name(cancelled)
+        outcome = (
+            f"treebox could not confirm that the agent stopped (check: docker top {slug})"
+            if alive
+            else "the agent in the container was stopped; the container keeps running"
+        )
+        raise SessionCancelled(cancelled, f"Cancelled by {name}: {outcome}.")
+
+    def _signal_agent(self, user: str, slug: str, pidfile: str, signum: int) -> None:
+        """Send ``signum`` to the agent's process group in the container (or
+        to the agent alone when it leads no group). Runs as the agent's own
+        user, so it can reach nothing the agent could not."""
+        self._engine(
+            [
+                "exec",
+                "-u",
+                user,
+                slug,
+                "sh",
+                "-c",
+                _AGENT_SIGNAL,
+                pidfile,
+                signal_name(signum).removeprefix("SIG"),
+            ]
+        )
+
+    def _agent_alive(self, user: str, slug: str, pidfile: str) -> bool:
+        return (
+            self._engine(["exec", "-u", user, slug, "sh", "-c", _AGENT_ALIVE, pidfile]).returncode
+            == 0
+        )
 
     def prepare_entry(self, wt: Worktree) -> None:
         """Start the container if it stopped since setup (host reboot, manual
@@ -1008,12 +1113,16 @@ class DockerRunner:
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Remove the worktree's container/image (and, when this runner was
         constructed with ``remove_volumes``, its per-workspace volumes). Every
-        step runs even when an earlier one failed: the caller deletes the
-        worktree's recorded state right after this returns, so a skipped step
-        could never be retried and its resources would leak forever."""
+        step runs even when an earlier one failed, and each resource a step
+        could not remove is reported in ``remaining``; the host-owned resource
+        manifest (in the sandbox files dir) is then kept, so a retry still
+        knows what this worktree owns."""
         if not self._available():
-            reporter.note("container", "skipped; Docker unavailable")
-            return RunnerTeardownResult.skipped()
+            reporter.fail("container", "not checked · Docker unavailable")
+            return RunnerTeardownResult(
+                "skipped", remaining=("Docker resources (Docker is not reachable)",)
+            )
+        remaining: list[str] = []
         ids = self._container_ids(wt)
         manifest: ResourceManifest | None = None
         if ids or self._remove_volumes:
@@ -1033,46 +1142,62 @@ class DockerRunner:
             # Intersect with the live engine list to keep retries quiet.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
             volumes = sorted(set(manifest["volumes"]) & existing)
-        container_failed = False
+        container_failed = container_kept = False
         if ids:
             image = self._container_image(ids)
+            owned_image = bool(image) and manifest is not None and image == manifest["image"]
             if self._engine_attempt(["rm", "-f", *ids], reporter=reporter):
                 reporter.ok("container", f"removed {' '.join(ids)}")
                 # A failed container rm skips image removal because it remains
                 # in use. Otherwise only the exact host-recorded image is ours.
-                if image and manifest is not None and image == manifest["image"]:
-                    container_failed = not self._engine_attempt(
-                        ["image", "rm", image], reporter=reporter
-                    )
+                if owned_image:
+                    if self._engine_attempt(["image", "rm", str(image)], reporter=reporter):
+                        reporter.ok("image", f"removed {image}")
+                    else:
+                        container_failed = True
+                        remaining.append(f"image {image} (docker image rm failed)")
                 elif image:
                     reporter.warn(
                         f"image removal skipped: {image!r} is not authorized by "
                         "the host-owned resource manifest"
                     )
             else:
-                container_failed = True
+                container_failed = container_kept = True
+                remaining.append(f"container {' '.join(ids)} (docker rm failed)")
+                if owned_image:
+                    remaining.append(f"image {image} (in use by the container)")
         else:
             reporter.note("container", "none found")
         volumes_removed = False
         if self._remove_volumes:
-            if volumes and self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
-                reporter.ok("volumes", f"removed {' '.join(volumes)}")
-                volumes_removed = True
-            elif not volumes:
+            if volumes and not container_kept:
+                if self._engine_attempt(["volume", "rm", *volumes], reporter=reporter):
+                    reporter.ok("volumes", f"removed {' '.join(volumes)}")
+                    volumes_removed = True
+                else:
+                    remaining.append(f"volumes {' '.join(volumes)} (docker volume rm failed)")
+            elif volumes:
+                # A container that is still there still uses its volumes.
+                remaining.append(f"volumes {' '.join(volumes)} (in use by the container)")
+            else:
                 # Never silent: the operator asked for volume removal, so say
                 # when no removable volume could be found from any source.
                 reporter.note("volumes", "none found")
         elif container_volumes:
             reporter.note("volumes", f"kept {' '.join(container_volumes)}")
 
-        # Remove the host-side config/build-context dir too.
+        # Remove the host-side config/build-context dir too - but only when
+        # nothing remains: it holds the resource manifest a retry needs.
         cfg_dir = self._config_dir(wt)
-        if cfg_dir.exists():
+        if remaining:
+            reporter.note("sandbox files", "kept · the retry needs the resource manifest")
+        elif cfg_dir.exists():
             shutil.rmtree(cfg_dir, ignore_errors=True)
             reporter.ok("sandbox files", "removed")
         return RunnerTeardownResult(
             "failed" if container_failed else "cleaned",
             volumes_removed=volumes_removed,
+            remaining=tuple(remaining),
         )
 
 

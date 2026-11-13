@@ -71,7 +71,8 @@ mid-sweep if a scenario corrupts the fixture.
 
 Work through **`references/scenarios.md`** top to bottom: groups A (doctor/
 version), B (create), C (enter), D (list), E (teardown), F (template),
-G (config), H (docker), plus the cross-cutting invariants X1–X5. For each
+G (config), H (docker), U (unattended mode), plus the cross-cutting invariants
+X1–X5. For each
 scenario record: ID, the exact command run, exit code, and PASS / FAIL / SKIP
 with a one-line reason. On FAIL capture the actual stdout+stderr.
 

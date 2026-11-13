@@ -55,10 +55,11 @@ run (pluggable)** — with three registries that define everything swappable.
 Module map:
 
 - **`provision.py`** owns the host-side half, identical for every runner:
-  `fetch → resolve branch → git worktree add → install pre-push guard →
-  copy submodules → copy .env → runner.setup (cache-backed) →
-  record lockfile hash → hand to runner`. An explicit `create NAME` uses the
-  name as the branch, created fresh from `origin/<base>` (an existing branch is
+  `write record (setup pending) → fetch → resolve branch → git worktree add →
+  install pre-push guard → copy submodules → copy .env → runner.setup
+  (cache-backed) → record the setup result → hand to runner`. An explicit
+  `create NAME` uses the name as the branch, created fresh from
+  `origin/<base>` (an existing branch is
   a `BRANCH_EXISTS` conflict — `--checkout` is the resume path); a nameless
   `create` makes a `treebox/<petname>` placeholder. Every worktree gets the
   pre-push guard (`extensions.worktreeConfig` + `core.hooksPath` into the
@@ -80,9 +81,17 @@ Module map:
   selection rule; `--dry-run` applies it to the planned revision's
   `.gitmodules` (`git.submodule_paths_at_revision`), so plan and run agree.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
-  hides its autonomous launch argv, host login dir, staged login files, and
-  login advice behind a small method interface; `VALID_HARNESSES` and the
-  doctor login rows derive from `HARNESSES`. Boundary values (CLI/TOML/state)
+  hides its autonomous launch argv, host login dir, staged login files, the
+  one login file among them (`login_file`), and login advice behind a small
+  method interface. It also decides where the login lives on this machine:
+  `login()` (a non-empty JSON object, the one an agent on the host uses and
+  a sandbox gets a copy of) and `stage_credentials` share one private seam,
+  `_read`, with the one selection rule: the login file first; only when it is
+  absent, on `sys.platform == "darwin"`, and for a harness with a Keychain
+  service, this user's Keychain item (a time-limited read with no stdin; a
+  timeout or refusal is no login). No caller knows about the Keychain or the
+  platform. `VALID_HARNESSES` and the doctor login rows derive from
+  `HARNESSES`. Boundary values (CLI/TOML/state)
   stay `str` and are resolved to the object once, in `cli.py`.
 - **`runners/base.py`** defines the `Runner` protocol — the *only* thing that
   differs between modes — implemented by **`runners/host.py`** (setup + agent in
@@ -113,6 +122,16 @@ Module map:
   worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork. Every path first calls `runner.prepare_entry`.
   See its contract in `runners/base.py`.
+  The launch fork is the unattended contract: `_require_agent` fails a launch
+  before provisioning (`HARNESS_MISSING`; `LOGIN_MISSING` when unattended),
+  the agent's exit code passes through and a non-zero one is named in one
+  final stderr line (`AGENT_EXIT_PREFIX`), and a cancel signal is
+  `CANCELLED` (`128 + signal`). Runners launch through `system.run_agent`,
+  which passes SIGINT / SIGTERM / SIGHUP on to the agent (the docker runner
+  signals the agent's process group inside the container) and kills it after
+  a grace time. The global `--non-interactive` (`TREEBOX_NON_INTERACTIVE`)
+  and stdin being a TTY feed one gate, `_interactive()`, for every picker,
+  prompt and credential prompt.
   `_reconcile_with_record` folds the host-owned record (`record.py`) into
   existing-worktree sessions before the runner and harness objects are
   resolved: recorded isolation conflicts with a mismatched explicit
@@ -124,16 +143,19 @@ Module map:
   output carrying a `schemaVersion` that only gains fields within a version —
   a breaking reshape bumps it (git-porcelain discipline). Agents
   branch on these, so don't change their meanings casually.
-- **`locking.py`** holds the two cross-process locks, on two keys.
+- **`locking.py`** holds the three cross-process locks, on three keys.
   `worktree_lock(path)` is per worktree and non-blocking: a second operation
   on the *same* worktree fails fast (`LOCK_HELD`). `repo_lock(path)` is per
   repository (keyed by the git common dir, so every root and linked worktree
   shares it) and *waits*: `create` holds it from the fetch through
-  `git worktree add`, `teardown` around `worktree remove`/`prune`/branch
+  `git worktree add` (the port block and the record are written before it,
+  under the worktree lock only), `teardown` around `worktree remove`/`prune`/branch
   delete, and the small writers of shared files (`extensions.worktreeConfig`,
   `info/exclude`) take it too. Anything that writes git state shared by the
   whole repository belongs under it; setup, container work, and the agent
-  session never do. Lock order is always worktree, then repo.
+  session never do. `ports_lock` is machine-wide (see `ports.py`) and also
+  waits. Lock order is always worktree, then repo or ports; the repo and ports
+  locks are never nested in each other.
 - **`ecosystems.py`** detects package managers (uv, npm, pnpm, go, cargo),
   drives their cache-backed setup, and defines which manifest files feed the
   SHA-256 hash. "Warmth" lives in shared host caches, not the tree. Its
@@ -145,31 +167,57 @@ Module map:
   worktree's creation policy (isolation, firewall, template, harness, base,
   resource limits),
   at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
-  One schema version (`schemaVersion`; unknown keys, other versions, and
-  unknown isolation/harness names are refused - there is no upgrade path),
+  One schema version (`schemaVersion`; unknown or missing keys, other
+  versions, and unknown isolation/harness names are refused),
   bound to the registered worktree path, written atomically by `create`
   under the worktree lock before any runner resource depends on it.
   API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
   `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. The
-  record format has never been released, so a new field is a new required
-  key of the one schema version: add it to `WorktreeRecord` without a
-  `SCHEMA_VERSION` bump and without an upgrade path.
-  On `enter`, a missing or invalid record is a classified error
-  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to recreate
-  the worktree (`teardown`, then `create`), never a fallback to config
-  defaults or to `state.py`. `teardown` needs no record: without one it
-  picks the docker runner when the runner-owned resource manifest exists
-  (`runners.docker.has_resource_manifest`), else the host runner.
-- **`state.py`** stores per-worktree *observations* only (lockfile hash +
-  `provisioned`) inside the worktree's private git dir
-  (`.git/worktrees/<id>/`), so it never appears in `git status` and is pruned
-  with the worktree. The lockfile hash is what lets `enter` re-sync only when
-  deps changed (the `provisioned` flag makes `enter` finish an interrupted
-  setup even when the hash matches). This state is sandbox-writable, so it
-  never decides policy and never authorizes destructive host cleanup; it is
-  read and written without following links (a planted symlink reads as no
-  state and is replaced, not written through). `list` reads it through the
-  repo's own worktree registration (`load_registered`).
+  record format has never been released, so to extend it, add a field to
+  `WorktreeRecord` as a required key of the one schema version, without a
+  `SCHEMA_VERSION` bump and without an upgrade path. On `enter`, a missing or
+  invalid record is a classified error (`RECORD_MISSING` / `RECORD_INVALID`,
+  exit 5) whose recovery is to recreate the worktree (`teardown`, then
+  `create`), never a fallback to config defaults. `teardown` needs no record: without one it picks the
+  docker runner when the runner-owned resource manifest exists
+  (`runners.docker.has_resource_manifest`), else the host runner. Besides the
+  policy the record holds the host-observed `setup` result (a required key):
+  a sandbox that could mark its own setup done could make treebox skip setup
+  forever or report stale deps fresh, so nothing in the sandbox-writable git
+  dir is read for any decision. The record also keeps `ports` (a required
+  key, null or a base and count), the copy of the worktree's port block.
+- **`ports.py`** is the machine-wide port-block allocator behind
+  `TREEBOX_PORT_BASE` / `TREEBOX_PORT_COUNT`. Its ledger
+  (`$TREEBOX_HOME/ports.json`, lock `ports.lock`) is the one source of truth
+  for which blocks are taken, across every repo and root; the record holds
+  only a copy. `reserve` (create, enter: ledger first, then the record copy)
+  and `release` (teardown, after the record is gone) run under
+  `locking.ports_lock`, a waiting lock taken after the worktree lock and never
+  inside `repo_lock` (create reserves before it, teardown releases after it). A stale
+  entry (no directory, no git registration, no lock holder) is reclaimed by
+  the next allocation, so a crash between two writes neither leaks nor
+  double-allocates a block. The range and block size are user config only
+  (`[ports]`, `config.PortRange`); a full range is `PORTS_EXHAUSTED` (exit 5)
+  before anything is made.
+- **`lifecycle.py`** holds the **setup model** (`SetupResult`: `pending` / `failed` /
+  `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,
+  `resumable` whether a same-name `create` finishes it, `freshness` what
+  `list` reports). A failed setup step is a failed `create`/`enter`
+  (`SETUP_FAILED`, exit 1, output in `<parent>/.logs/<leaf>.setup.log`).
+- **`cleanup.py`** owns one worktree's cleanup through `cleanup_one`: runner
+  resources, then the worktree, git registration and branch (under
+  `locking.repo_lock`), then the ownership record, then the port release
+  (both outside the repo lock).
+  A failed step keeps the resources and records a retry needs (the record,
+  and the docker resource manifest that picks the runner when the record is
+  missing or invalid). Git refusal never falls back to filesystem deletion.
+  `CleanupResult` returns completed effects and remaining resources.
+  Incomplete cleanup fails with `TEARDOWN_INCOMPLETE` (exit 1); the same
+  command retries. The CLI owns batch validation, the worktree lock,
+  confirmation and result rendering; runner adapters own their resources.
+  Worktree health (`healthy`, `directory_missing`,
+  `invalid_linkage`, `unregistered`, `unreadable_state`) is classified once,
+  in `provision.worktree_health`, and exposed as `health` in `list --json`.
 - **`models.py`** holds the `Worktree` value object and the path-as-identity
   rule: the registered *path* identifies a worktree (the *name* is only its
   directory leaf, and can repeat under a nested root); the *branch* is a
@@ -183,7 +231,11 @@ Module map:
   `create --checkout feature/auth`) derive the name in one place,
   `derive_name`: drop a `treebox/` placeholder prefix, then flatten slashes to
   `--` (`feature--auth`, `treebox/a/b` -> `a--b`), so treebox never nests a
-  worktree; generated names come from `names.py`. Also home to
+  worktree; generated names come from `names.py`.
+  `worktree_id(path)` is the one path hash: `TREEBOX_ID` (10 lowercase hex,
+  documented contract) and the docker container/image name suffix.
+  `Worktree.treebox_env()` is what both runners export to setup and the agent
+  entry (and carry in the `--print`/`--json` entry command). Also home to
   `expand_user`, the tolerant `~`-expansion helper every path-consuming module
   shares (an unresolvable `~user` stays literal instead of raising).
 - **`config.py`** is **user-level TOML only** (`$TREEBOX_CONFIG`, else
@@ -264,9 +316,9 @@ What a backend may **assume** (host locality):
 - Provisioning already happened host-side (`provision.py` writes the
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
-  bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, the record lives beside the worktree, and the
-  lockfile hash stats host files.
+  bind-mounts the worktree and its git common dir 1:1, the record (policy
+  and setup result) lives beside the worktree, and the lockfile hash stats
+  host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud
@@ -288,7 +340,12 @@ needs path translation today, so building it would be indirection).
   dead-ends on `BRANCH_EXISTS`.
 - **Non-interactive friendly.** Data → stdout, diagnostics → stderr; color and
   spinners degrade when stderr is not a TTY; `--json` / `--print` / `--dry-run`
-  exist for scripting and must keep working.
+  exist for scripting and must keep working. Unattended mode (`--non-interactive`,
+  or no TTY on stdin) never opens a picker, asks a question, prompts for
+  git/ssh credentials, or lets a setup step read the terminal - also with a
+  terminal attached; what would need an answer is a classified error. Under
+  `--json` stderr holds exactly one error object, and success payloads carry
+  `warnings`.
 - **Never trust the target repo's config.** No reading its container config,
   its treebox config, or its setup hooks for the sandbox definition.
 

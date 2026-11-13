@@ -10,8 +10,8 @@ through this protocol.
 The contract has two parts. Every runner may assume provisioning already
 happened host-side and that the host filesystem is visible to the agent at
 identical absolute paths. Docker does this by bind-mounting the worktree and
-its git common dir 1:1; state lives in the host-side private git dir, and the
-lockfile hash stats host files. Backends that can't present host paths
+its git common dir 1:1; the host-owned record lives beside the worktree, and
+the lockfile hash stats host files. Backends that can't present host paths
 verbatim (SSH-remote, VMs, cloud sandboxes) do not fit this seam; they would
 need a filesystem-transport seam that deliberately does not exist yet.
 
@@ -74,15 +74,18 @@ class RunnerTeardownResult:
     """Observable result of a runner-specific teardown attempt.
 
     ``failed`` means a container/image removal was attempted and failed after
-    every remaining cleanup step was still tried - the caller deletes the
-    worktree's recorded state right after teardown, so a step skipped here
-    could never be retried and its resources would leak forever. This result
-    distinguishes that from an honest skip, and reports whether per-runner
-    volumes were actually removed.
+    every remaining cleanup step was still tried. ``remaining`` names each
+    runner resource that is still present because a step failed or could not
+    run (``"<resource> (<reason>)"``, the cleanup result in ``cleanup.py``):
+    while it is non-empty the caller keeps the worktree and its ownership
+    record, and the runner keeps the metadata a retry needs, so the same
+    teardown can finish the job. Also reports whether per-runner volumes were
+    actually removed.
     """
 
     container: RunnerTeardownStatus
     volumes_removed: bool = False
+    remaining: tuple[str, ...] = ()
 
     @classmethod
     def cleaned(cls, *, volumes_removed: bool = False) -> RunnerTeardownResult:
@@ -99,12 +102,15 @@ class RunnerFacts:
 
     Kept out of the operational methods so presentation vocabulary never
     leaks into the run seam: the checklist detail shown when ``preflight``
-    passes, and whether a missing subscription login is a hard gate in
-    ``doctor``'s machine verdict for this runner.
+    passes, and where the agent runs. ``sandboxed`` decides what ``doctor``
+    checks for the selected harness: on the host (False) the harness binary
+    on ``PATH`` and the host login; in a sandbox (True) the login file the
+    sandbox gets a copy of (the binary is part of the sandbox image and is
+    checked at launch).
     """
 
     preflight_detail: str
-    login_required: bool
+    sandboxed: bool
 
 
 @runtime_checkable
@@ -190,8 +196,9 @@ class Runner(Protocol):
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Tear down this runner's resources for ``wt``, honoring any
-        teardown options the runner was constructed with. Best-effort: warn
-        and keep going when a cleanup step fails, then report what actually
-        happened in the result instead of raising.
+        teardown options the runner was constructed with. Warn and keep going
+        when a cleanup step fails, then report what actually happened - and
+        what remains - in the result instead of raising. Runner metadata a
+        retry needs is kept while anything remains.
         """
         ...

@@ -46,6 +46,29 @@ DEFAULT_HARNESS = "claude"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_TEMPLATE = "default"
 
+# The port-block allocator's range and block size (see ports.py). Defaults:
+# 20000-26999 lies above the well-known ports (0-1023) and below both
+# ephemeral ranges (Linux 32768-60999, macOS and IANA 49152-65535), so the
+# kernel never hands one of these numbers to an outgoing connection, and it
+# stays clear of common dev-service ports (3000, 5432, 6379, 8080, 9000,
+# 27017). 10 ports per worktree; 700 blocks.
+DEFAULT_PORT_START = 20000
+DEFAULT_PORT_END = 26999
+DEFAULT_PORT_BLOCK_SIZE = 10
+# Below this, binding needs privileges on Linux; above it, no port exists.
+_PORT_MIN = 1024
+_PORT_MAX = 65535
+
+
+@dataclass(frozen=True)
+class PortRange:
+    """The `[ports]` table: blocks of ``block_size`` ports are cut from
+    ``start`` through ``end`` (both inclusive)."""
+
+    start: int = DEFAULT_PORT_START
+    end: int = DEFAULT_PORT_END
+    block_size: int = DEFAULT_PORT_BLOCK_SIZE
+
 
 @dataclass(frozen=True)
 class Config:
@@ -80,6 +103,8 @@ class Config:
     # Which of ``resources`` an explicit ``create`` flag chose (never read
     # from TOML): the record keeps it so only config or template values drift.
     explicit_resources: frozenset[str] = frozenset()
+    # The machine-wide port-block allocator's range (`[ports]`, user config only).
+    ports: PortRange = field(default_factory=PortRange)
 
     def with_overrides(
         self,
@@ -230,8 +255,47 @@ def load_config(path: Path | None = None) -> Config:
         caches=caches,
         resources=resources,
     )
+    if "ports" in data:
+        cfg = replace(cfg, ports=_port_range(data["ports"], path))
     validate_config(cfg)
     return cfg
+
+
+def _port_range(table: Any, path: Path) -> PortRange:
+    """Parse and check the `[ports]` table. Keys are closed, like the top
+    level: a typo'd `blocksize` must not silently keep the default."""
+    if not isinstance(table, dict):
+        raise ValueError(
+            f"Invalid config {path}: ports must be a table ([ports]), got {type(table).__name__}."
+        )
+    known = sorted(f.name for f in fields(PortRange))
+    for key in table:
+        if key not in known:
+            close = difflib.get_close_matches(key, known, n=1)
+            hint = f" (did you mean '{close[0]}'?)" if close else ""
+            raise ValueError(f"Invalid config {path}: unknown key 'ports.{key}'{hint}")
+    values = {}
+    for key in known:
+        value = table.get(key)
+        if value is not None and type(value) is not int:
+            raise ValueError(
+                f"Invalid config {path}: ports.{key} must be an integer, "
+                f"got {type(value).__name__}."
+            )
+        if value is not None:
+            values[key] = value
+    ports = PortRange(**values)
+    if not _PORT_MIN <= ports.start <= ports.end <= _PORT_MAX:
+        raise ValueError(
+            f"Invalid config {path}: ports.start..ports.end must satisfy "
+            f"{_PORT_MIN} <= start <= end <= {_PORT_MAX} (got {ports.start}..{ports.end})."
+        )
+    if not 1 <= ports.block_size <= ports.end - ports.start + 1:
+        raise ValueError(
+            f"Invalid config {path}: ports.block_size must be between 1 and the size of "
+            f"the range ({ports.end - ports.start + 1}), got {ports.block_size}."
+        )
+    return ports
 
 
 def _typed(data: dict[str, Any], key: str, want: type, path: Path) -> Any:

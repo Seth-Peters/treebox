@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from treebox import record, resources
+from treebox import lifecycle, record, resources
 from treebox.cli import EXIT_CONFLICT, EXIT_ERROR, EXIT_USAGE, app
 from treebox.config import Config, load_config
 from treebox.models import Worktree
@@ -519,7 +519,9 @@ def test_explicit_flag_under_another_config_default_never_drifts(
         assert _DRIFT not in res.stderr
         res = _enter(repo, root, "--json")
         assert res.exit_code == 0, res.output
-        assert json.loads(res.stdout)["resources_drift"] == _NO_DRIFT
+        payload = json.loads(res.stdout)
+        assert payload["resources_drift"] == _NO_DRIFT
+        assert not [w for w in payload["warnings"] if w.startswith(_DRIFT)]
 
 
 def test_enter_warns_once_when_config_changed_after_create(
@@ -544,6 +546,10 @@ def test_enter_warns_once_when_config_changed_after_create(
     payload = json.loads(res.stdout)
     assert payload["resources_drift"] == {"cpus": None, "memory": "3g", "pids": None}
     assert payload["resources"] == {"cpus": 1.5, "memory": "2g", "pids": None}
+    # The same warning the human sees on stderr is one entry in `warnings`.
+    drift_warnings = [w for w in payload["warnings"] if w.startswith(_DRIFT)]
+    assert len(drift_warnings) == 1
+    assert "config and template now give memory 3g" in drift_warnings[0]
 
 
 def test_enter_warns_once_when_the_template_changed_after_create(
@@ -588,12 +594,13 @@ def test_list_json_shows_recorded_limits(repo: Path, root: str, boxed: Path):
 
 
 def test_resumed_create_must_restate_the_recorded_limits(repo: Path, root: str, home: Path):
-    from treebox import state
-
     _run(["create", "lim", "--repo", str(repo), "--root", root, "--print"])
     wt = Path(root) / "lim"
-    record.save(dataclasses.replace(record.load(wt), resources=ResourceLimits(pids=64)))
-    state.save(wt, state.WorktreeState(lockfile_hash="", provisioned=False))
+    record.save(
+        dataclasses.replace(
+            record.load(wt), resources=ResourceLimits(pids=64), setup=lifecycle.SetupResult()
+        )
+    )
     res = _run(["create", "lim", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == EXIT_CONFLICT, res.output
     error = json.loads(res.stderr)["error"]
@@ -607,12 +614,10 @@ def test_resume_restating_a_default_limit_by_flag_keeps_its_source(
     """The hint restates every recorded limit as a flag. That resume matches
     the record (the values are the policy), and the record keeps how each
     limit was first chosen, so a later config change still drifts."""
-    from treebox import state
-
     _config(home, '[resources]\nmemory = "2g"\n')
     _create(repo, root, "--print")
     wt = Path(root) / "lim"
-    state.save(wt, state.WorktreeState(lockfile_hash="", provisioned=False))
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
     _config(home, "")
     _create(repo, root, "--memory", "2g", "--print")
     assert record.load(wt).explicit_resources == frozenset()
