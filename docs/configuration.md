@@ -67,10 +67,11 @@ command-line flag  >  config.toml  >  built-in default
 For an existing worktree, `enter` and `teardown` also read the worktree's
 [host-owned record](how-it-works.md#the-host-owned-record) of its creation
 policy. Recorded isolation wins over the config default, and a conflicting
-explicit `--isolation` exits `5`; `enter` always reuses the recorded firewall,
-while recorded harness and template beat config defaults unless `--harness` or
-`--template` is passed. A worktree without a usable record is an error with a
-recovery path (`treebox adopt`), never a fallback to the config default. For
+explicit `enter --isolation` exits `5`; `enter` always reuses the recorded
+firewall, while recorded harness and template beat config defaults unless
+`--harness` or `--template` is passed. `enter` refuses a worktree without a
+usable record (tear it down and create it again), never falling back to the
+config default. For
 Docker teardown ownership and missing-manifest behavior, see the
 [runner-owned resource manifest](how-it-works.md#the-host-owned-record).
 
@@ -144,9 +145,9 @@ records it, and passes it to `docker run` once. When a flag or the config sets
 the same limit, treebox drops the raw `runArgs` flag and passes only its own
 value, so the result never depends on Docker's last-flag-wins. A template that
 sets one limit twice with different values (for example `resources.memory` and
-`runArgs` `--memory`) is `TEMPLATE_INVALID`. A worktree recorded without a
-limit (for example one created before limits existed) keeps the template's raw
-`runArgs` unchanged.
+`runArgs` `--memory`) is `TEMPLATE_INVALID`.
+For a limit the record leaves unset (no treebox cap), a raw `runArgs` flag
+that the template has when the container is re-created passes through unchanged.
 
 **Host isolation** has no sandbox to cap. An explicit `--cpus` / `--memory` /
 `--pids-limit` with `--isolation host` is refused (exit `2`,

@@ -96,7 +96,7 @@ Module map:
   `.containers/<worktree>/treebox-resources.json` manifest outside the
   sandbox mount, never in sandbox-writable worktree state.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
-  adopt <ref> / list / teardown <ref>... / template <init|list|path> / doctor / version`
+  list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
   `template list`). The `template` sub-app
   scaffolds and inspects operator-owned sandbox templates via `assets.py`'s
@@ -129,16 +129,19 @@ Module map:
   worktree's creation policy (isolation, firewall, template, harness, base,
   resource limits),
   at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
-  Versioned (`schemaVersion`; unknown keys and versions are refused), bound to
-  the registered worktree path, written atomically and only under the
-  worktree lock - by `create` before any runner resource depends on it, and
-  by `adopt` (the operator's explicit migration step for legacy worktrees).
+  One schema version (`schemaVersion`; unknown keys, other versions, and
+  unknown isolation/harness names are refused - there is no upgrade path),
+  bound to the registered worktree path, written atomically by `create`
+  under the worktree lock before any runner resource depends on it.
   API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
-  `save(record)`, `remove(path)`, `record_path(path)`. To extend it, add a
-  field to `WorktreeRecord`, bump `SCHEMA_VERSION`, and teach `_parse` to
-  upgrade older versions. A missing or invalid record is a classified error
-  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) with an `adopt` recovery
-  path, never a fallback to config defaults or to `state.py`.
+  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. To
+  extend it, add a field to `WorktreeRecord` and bump `SCHEMA_VERSION`.
+  On `enter`, a missing or invalid record is a classified error
+  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to recreate
+  the worktree (`teardown`, then `create`), never a fallback to config
+  defaults or to `state.py`. `teardown` needs no record: without one it
+  picks the docker runner when the runner-owned resource manifest exists
+  (`runners.docker.has_resource_manifest`), else the host runner.
 - **`state.py`** stores per-worktree *observations* only (lockfile hash +
   `provisioned`) inside the worktree's private git dir
   (`.git/worktrees/<id>/`), so it never appears in `git status` and is pruned

@@ -2,8 +2,8 @@
 
 Covers the generic value grammar, precedence (flag, then user config, then the
 operator template), the raw ``runArgs`` interplay, validation before
-provisioning, the host runner's refusal, the host-owned record (including a
-version-1 record), entry on an existing sandbox, and restart/recreate.
+provisioning, the host runner's refusal, the host-owned record, entry on an
+existing sandbox, and restart/recreate.
 """
 
 from __future__ import annotations
@@ -370,31 +370,40 @@ def test_host_does_not_apply_config_limits(repo: Path, root: str, home: Path):
 # --- the record and entry -------------------------------------------------------
 
 
-def test_version_1_record_loads_as_no_treebox_cap(tmp_path: Path):
+@pytest.mark.parametrize("key", ["resources", "explicitResources"])
+def test_record_without_a_limit_key_is_invalid(tmp_path: Path, key: str):
+    """``resources`` and ``explicitResources`` are required keys of the one
+    record schema version: a record without one is refused, never read as
+    "no treebox cap"."""
     wt = tmp_path / "wts" / "w"
     wt.mkdir(parents=True)
+    record.save(record.WorktreeRecord(wt, "main", "docker", "claude", False, "default"))
     path = record.record_path(wt)
-    path.parent.mkdir()
-    path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "worktree": str(wt),
-                "base": "main",
-                "isolation": "docker",
-                "harness": "claude",
-                "firewall": False,
-                "template": "default",
-            }
-        )
-    )
-    assert record.load(wt).resources == ResourceLimits()
-    # A version-1 record may not carry the new key.
     data = json.loads(path.read_text())
-    data["resources"] = {"memory": "4g"}
+    del data[key]
     path.write_text(json.dumps(data))
-    with pytest.raises(record.RecordInvalidError, match="unknown key"):
+    with pytest.raises(record.RecordInvalidError, match=f"missing key\\(s\\) {key}"):
         record.load(wt)
+
+
+def test_enter_refuses_a_record_without_resources_and_teardown_removes_it(
+    repo: Path, root: str, home: Path
+):
+    _run(["create", "lim", "--repo", str(repo), "--root", root, "--print"])
+    wt = Path(root) / "lim"
+    path = record.record_path(wt)
+    data = json.loads(path.read_text())
+    del data["resources"]
+    path.write_text(json.dumps(data))
+    res = _enter(repo, root, "--json")
+    assert res.exit_code == EXIT_CONFLICT, res.output
+    error = json.loads(res.stderr)["error"]
+    assert error["code"] == "RECORD_INVALID"
+    assert "missing key(s) resources" in error["message"]
+    assert "treebox teardown lim" in error["hint"]
+    res = _run(["teardown", "lim", "--repo", str(repo), "--root", root, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert not wt.exists() and not path.exists()
 
 
 def test_record_round_trips_limits(tmp_path: Path):
@@ -406,7 +415,7 @@ def test_record_round_trips_limits(tmp_path: Path):
     )
     record.save(rec)
     data = json.loads(record.record_path(wt).read_text())
-    assert data["schemaVersion"] == record.SCHEMA_VERSION == 2
+    assert data["schemaVersion"] == record.SCHEMA_VERSION == 1
     assert data["resources"] == {"cpus": 1.5, "memory": "4g", "pids": 512}
     assert data["explicitResources"] == ["cpus", "pids"]  # display order
     assert record.load(wt) == rec
@@ -633,8 +642,8 @@ def test_run_command_applies_recorded_limits(tmp_path: Path):
 
 
 def test_no_treebox_cap_keeps_raw_runargs(tmp_path: Path):
-    """A version-1 record (no treebox cap) re-creates its container exactly as
-    before: the template's raw runArgs limits pass through."""
+    """A worktree recorded with no treebox cap re-creates its container with
+    the template's raw runArgs limits: they pass through unchanged."""
     argv = _runner_command(tmp_path, ResourceLimits(), ["--memory=4g", "--cpus=2"])
     assert "--memory=4g" in argv and "--cpus=2" in argv
 
@@ -681,22 +690,3 @@ def test_runner_registry_declares_supported_limits():
         name: factory(Config(), False).supported_resources for name, factory in RUNNERS.items()
     }
     assert supported == {"host": frozenset(), "docker": frozenset(resources.RESOURCE_NAMES)}
-
-
-def test_adopt_records_only_the_stated_limits(repo: Path, root: str, home: Path):
-    _run(["create", "lim", "--repo", str(repo), "--root", root, "--print"])
-    wt = Path(root) / "lim"
-    record.remove(wt)
-    _config(home, "[resources]\ncpus = 2\n")
-    r = ["--repo", str(repo), "--root", root]
-    res = _run(["adopt", "lim", *r, "--isolation", "host", "--memory", "4g", "--json"])
-    assert res.exit_code == EXIT_USAGE
-    assert json.loads(res.stderr)["error"]["code"] == "RESOURCE_UNSUPPORTED"
-    res = _run(["adopt", "lim", *r, "--isolation", "docker", "--memory", "4g", "--json"])
-    assert res.exit_code == 0, res.output
-    assert json.loads(res.stdout)["record"]["resources"] == {
-        "cpus": None,
-        "memory": "4g",
-        "pids": None,
-    }
-    assert record.load(wt).resources == ResourceLimits(memory="4g")
