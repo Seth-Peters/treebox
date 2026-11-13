@@ -251,7 +251,9 @@ agent. `--cold` forces a cache-bypassing re-sync.
 Under docker isolation, `enter` **preflights the Docker daemon first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
 `DOCKER_UNAVAILABLE` error and a start-docker hint rather than a misleading
-error deeper in launch. It also **re-stages the scoped credential copies**
+error deeper in launch. The same preflight refuses to run as root (uid 0)
+with `RUNNING_AS_ROOT`, before any worktree, branch or image exists; see
+[Install](install.md#what-each-isolation-mode-needs). It also **re-stages the scoped credential copies**
 from the host on every entry - independent of the lockfile-hash skip - so a
 host logout/revocation drops the stale copies and a fresh login reaches the
 sandbox on the very next entry. The same refresh runs during `create`.
@@ -654,6 +656,7 @@ you want it live.
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `HARNESS_MISSING` | `1` | A launch found no harness binary: not on `PATH` (host, checked before anything is provisioned) or not in the sandbox image (docker, checked at launch). `doctor` reports it as `agent: <harness>`. |
 | `LOGIN_MISSING` | `1` | An [unattended](#unattended-use) launch found no usable login for the harness (the agent would wait in its own login flow). Checked before anything is provisioned; `doctor` reports it as `login: <harness>`. |
+| `RUNNING_AS_ROOT` | `1` | Docker isolation was asked for as root (uid 0). Run treebox as a non-root user, for example one made with `useradd --create-home --groups docker treebox`. Nothing is provisioned. |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `SETUP_FAILED` | `1` | A setup step exited non-zero. The message names the step and its exit status; `error.path` is its output. The worktree is kept, marked unfinished; `enter` or the same `create` retries the setup. |
 | `TEARDOWN_INCOMPLETE` | `1` | A teardown step did not finish (a container, image or volume removal failed, Docker is not reachable, or git refused to remove the worktree). The message names what remains; the worktree and its ownership record are kept, so the same `teardown` retries. |

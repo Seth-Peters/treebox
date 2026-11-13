@@ -45,6 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/Seth-Peters/treebox/main/install.sh
 | Subscription login (`~/.claude` / `~/.codex`)    | ✓             | ✓               |
 | Host agent CLI on PATH (`claude` / `codex`)      | ✓             | — (template-provided) |
 | `docker`                                         | —             | ✓               |
+| Non-root user (not uid 0)                        | -             | ✓               |
 
 That's the whole table: docker isolation speaks plain `docker build` /
 `docker run` / `docker exec`, so there is no Node.js and no dev-container CLI
@@ -58,6 +59,19 @@ Host isolation launches against your live `~/.claude` / `~/.codex`
 files and never mounts the live dirs. The sandbox template docker isolation
 provisions is pinned to CPython 3.14.6, independent of whatever runs treebox
 itself.
+
+Docker isolation refuses to run as root (uid 0). The sandbox user takes your
+uid, so as root the agent would be root inside the box and could remove its
+own firewall. `create`, `enter` and `doctor --isolation docker` stop with a
+`RUNNING_AS_ROOT` error before anything is provisioned. On a root-only machine,
+create a non-root user that can reach the Docker daemon and run treebox as
+that user:
+
+```bash
+useradd --create-home --groups docker treebox
+```
+
+Host isolation still works as root.
 
 ## Verify
 
