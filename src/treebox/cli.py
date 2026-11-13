@@ -1800,8 +1800,7 @@ def template_init(
     """Copy a template into $TREEBOX_HOME/templates/<name> so you can edit it.
 
     This is the sanctioned replacement for hand-copying the shipped directory:
-    it works from any install and always yields a directory with the full
-    required file set. Then edit the Dockerfile and container.json and run
+    it works from any install. Then edit the Dockerfile and container.json and run
     `treebox create <name> --isolation docker --template <name>`.
     """
     reporter = Reporter(silent=json_out)
@@ -1868,12 +1867,9 @@ def template_init(
         elif target.is_symlink() or target.exists():
             target.unlink()
 
-    # Build the new template in a fresh, uniquely named staging dir under the
-    # reserved STAGING_DIR, then swap it in with renames: move any existing
-    # template aside into that staging dir, rename the new one into place, and
-    # delete the old one only after that. Each rename is atomic, so after any
-    # failure the old template is complete and unchanged. A staging dir left by
-    # an interrupted run has its own name, so it never blocks the next run.
+    # Keep the old template byte-for-byte until the new copy is installed, so
+    # rollback needs only a rename. Use a unique staging dir under STAGING_DIR:
+    # another process may still own a directory left by an earlier run.
     staging_root = dest.parent / assets.STAGING_DIR
     staging: Path | None = None
     try:

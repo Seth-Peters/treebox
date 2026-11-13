@@ -213,10 +213,12 @@ def invalid_template_json_files(path: Path) -> list[str]:
 
 
 def available_templates() -> list[str]:
-    """Sorted names of selectable templates: the built-in ``default`` plus
-    every directory under ``user_templates_root()``. ``$TREEBOX_TEMPLATE_DIR``
-    is a single explicit dir that overrides *any* name rather than a named
-    collection, so it does not enumerate here — callers surface it separately."""
+    """Sorted template names for ``template list`` and ``template init --from``.
+
+    ``$TREEBOX_TEMPLATE_DIR`` is a single explicit dir that overrides *any*
+    name rather than a named collection, so it does not enumerate here.
+    Callers show it separately.
+    """
     names = {DEFAULT_TEMPLATE}
     root = user_templates_root()
     if root.is_dir():

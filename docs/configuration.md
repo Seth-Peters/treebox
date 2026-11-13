@@ -110,8 +110,9 @@ treebox template init node          # copies from the built-in default
 treebox template init node --from python   # or fork one of your own
 ```
 
-It always writes the full required file set, so a later `create` never fails
-with "*file* not found in template dir". Inspect what you have any time:
+For copy and recovery behavior, see the
+[`template` command reference](usage.md#template-scaffold-and-inspect-sandbox-templates).
+Inspect what you have any time:
 
 ```bash
 treebox template list               # names, source, firewall, status, default + what the default bundles (`ls` works too)

@@ -435,15 +435,29 @@ treebox template list                      # names, source, firewall support, co
 treebox template path node                 # print the resolved dir: cd "$(treebox template path node)"
 ```
 
-`template init <name>` always yields a directory with the **full required file
-set**, so `create --template <name>` can't fail on a half-copied template; it
-refuses to clobber an existing template without `--force`. A `--force`
-overwrite is all-or-nothing: treebox builds the new template beside the old
-one and swaps it in, so if the overwrite fails, the old template stays
-complete and unchanged. Then edit the
-`Dockerfile` and `container.json` and launch with
-`treebox create <name> --isolation docker --template <name>`. `template list`
-flags any template dir missing a required file or carrying malformed JSON
+`template init <name>` copies the source template before it installs the new
+directory. It refuses to replace an existing template without `--force`.
+With `--force`, treebox moves the old template aside and installs the new copy
+with renames. A copy failure or a failure to move the old template leaves the
+old template unchanged. If installation fails, treebox renames the old template
+back. If rollback also fails, the old template remains unchanged at the path
+in the error message.
+
+If cleanup fails after installation, the command succeeds and keeps the complete
+new template. Human output includes a warning on stderr with the leftover path.
+`--json` keeps the existing success payload and has no cleanup warning field.
+
+Each run uses a unique directory under `$TREEBOX_HOME/templates/.treebox-tmp`.
+`template init` rejects `.treebox-tmp` as a name, and `template list` hides that directory.
+Treebox leaves directories from other runs untouched because another process
+can still use them. Leftovers from an interrupted run can coexist with later
+runs. Before you remove a leftover directory, make sure that no process still
+uses it.
+
+Then edit the `Dockerfile` and `container.json` and launch with
+`treebox create <name> --isolation docker --template <name>`. If the source lacks
+required files, `template init` copies it and reports the missing files.
+`template list` flags any template dir missing a required file or carrying malformed JSON
 before `create` does, shows whether each template can serve `--firewall`
 (a `firewall.json` is optional), and marks which one is your config default. `template path [<name>]` (default: `default`)
 prints the resolved location — the install-agnostic answer to "where does this
@@ -534,7 +548,7 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `error.code` | Exit | Common trigger |
 | ------------ | :--: | -------------- |
 | `INVALID_CONFIG` | `2` | Bad config file or invalid `--isolation` / `--harness`. |
-| `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, or uses the reserved `treebox/` prefix. |
+| `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, uses the reserved `treebox/` prefix, or `template init` has an invalid or reserved name. |
 | `INVALID_BRANCH` | `2` | `create NAME` or `--checkout` names an invalid git ref. |
 | `NOT_A_REPO` | `2` | `--repo` is not a git repo. |
 | `AMBIGUOUS_REF` | `2` | A ref matches more than one worktree. |
@@ -559,3 +573,5 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
+| `OVERWRITE_FAILED` | `1` | `template init --force` cannot move the existing template aside. |
+| `COPY_FAILED` | `1` | `template init` cannot copy or install the template. See [template recovery](#template-scaffold-and-inspect-sandbox-templates). |
