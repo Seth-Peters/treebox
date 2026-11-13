@@ -12,8 +12,10 @@ porcelain discipline, removing/renaming a ``--json`` field means bumping
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -297,7 +299,12 @@ def test_json_error_shape_is_pinned(repo: Path, root: str, hermetic_config):
 
 
 def test_exit_and_error_code_matrix(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    non_root_identity,
 ):
     """One table for the whole scripting contract: scenario → (exit, error.code).
     Every case runs in --json mode so the code agents branch on is asserted too."""
@@ -395,3 +402,120 @@ def test_exit_and_error_code_matrix(
     assert res.exit_code == EXIT_ERROR
     err = json.loads(res.stderr)["error"]
     assert err["code"] == "MISSING_DEPENDENCY" and "hint" in err
+
+
+# --- the error.code table in docs/usage.md --------------------------------------
+
+_REPO = Path(__file__).resolve().parents[1]
+_SRC = _REPO / "src" / "treebox"
+_USAGE_DOC = _REPO / "docs" / "usage.md"
+_TABLE_HEADER = "| `error.code` | Exit | Common trigger |"
+_TABLE_ROW = re.compile(r"^\| `([A-Z][A-Z0-9_]*)` \|")
+
+
+def _codes_in(source: str) -> tuple[set[str], list[str]]:
+    """The error codes one module can put into ``error.code``, from its syntax tree.
+
+    A code reaches an error through three forms only: an ``error_code=``
+    keyword (``_die``, ``PreflightError``), the second argument of
+    ``_ErrorInfo`` (what ``_classify`` returns), and the default of an
+    ``error_code`` parameter. In those places a value that is not a string
+    literal must pass on a code that is already collected (``error_code`` or
+    ``exc.error_code``). Any other value is returned as unresolved, so a new
+    way to build a code cannot hide from the drift test."""
+    codes: set[str] = set()
+    unresolved: list[str] = []
+
+    def take(node: ast.expr | None) -> None:
+        if node is None:
+            return
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            codes.add(node.value)
+        elif not (
+            (isinstance(node, ast.Name) and node.id == "error_code")
+            or (isinstance(node, ast.Attribute) and node.attr == "error_code")
+        ):
+            unresolved.append(f"line {node.lineno}: {ast.unparse(node)}")
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "error_code":
+                    take(kw.value)
+            is_info = isinstance(node.func, ast.Name) and node.func.id == "_ErrorInfo"
+            if is_info and len(node.args) >= 2:
+                take(node.args[1])
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            a = node.args
+            positional = [*a.posonlyargs, *a.args]
+            defaults: list[ast.expr | None] = [None] * (len(positional) - len(a.defaults))
+            for arg, default in [
+                *zip(positional, [*defaults, *a.defaults], strict=True),
+                *zip(a.kwonlyargs, a.kw_defaults, strict=True),
+            ]:
+                if arg.arg == "error_code":
+                    take(default)
+    return codes, unresolved
+
+
+def _emitted_error_codes() -> set[str]:
+    codes: set[str] = set()
+    unresolved: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        found, loose = _codes_in(path.read_text(encoding="utf-8"))
+        codes |= found
+        unresolved += [f"{path.relative_to(_REPO)} {where}" for where in loose]
+    assert not unresolved, (
+        "error codes this test cannot read; pass a string literal "
+        f"as error_code (or pass one on unchanged): {unresolved}"
+    )
+    return codes
+
+
+def _documented_error_codes() -> list[str]:
+    lines = _USAGE_DOC.read_text(encoding="utf-8").splitlines()
+    assert lines.count(_TABLE_HEADER) == 1, f"one error.code table expected in {_USAGE_DOC}"
+    rows = lines[lines.index(_TABLE_HEADER) + 2 :]
+    codes: list[str] = []
+    for line in rows:
+        if not line.startswith("|"):
+            break
+        match = _TABLE_ROW.match(line)
+        assert match, f"unreadable error.code table row: {line}"
+        codes.append(match.group(1))
+    return codes
+
+
+def test_codes_in_reads_every_emit_form():
+    """The collector sees each way a code is written today, and flags any other."""
+    source = """
+def _die(reporter, message, *, code=1, error_code="ERROR"): ...
+class PreflightError(RuntimeError):
+    def __init__(self, message, *, error_code="MISSING_DEPENDENCY"): ...
+def f(exc, error_code):
+    _die(r, "m", error_code="NOT_FOUND")
+    PreflightError("m", error_code="DOCKER_UNAVAILABLE")
+    _ErrorInfo(EXIT_ERROR, "LOCK_HELD", None)
+    _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    _die(r, "m", error_code=error_code)
+    _die(r, "m", error_code=PICKED)
+"""
+    codes, unresolved = _codes_in(source)
+    assert codes == {"ERROR", "MISSING_DEPENDENCY", "NOT_FOUND", "DOCKER_UNAVAILABLE", "LOCK_HELD"}
+    assert unresolved == ["line 11: PICKED"]
+
+
+def test_error_code_table_matches_emitted_codes():
+    """docs/usage.md lists every error.code the CLI can emit, and no other.
+
+    A new code needs one new table row; a removed code needs its row removed."""
+    documented = _documented_error_codes()
+    duplicates = sorted({c for c in documented if documented.count(c) > 1})
+    assert not duplicates, f"error.code table rows that repeat: {duplicates}"
+    emitted = _emitted_error_codes()
+    undocumented = sorted(emitted - set(documented))
+    assert not undocumented, (
+        f"emitted but missing from the error.code table in docs/usage.md: {undocumented}"
+    )
+    stale = sorted(set(documented) - emitted)
+    assert not stale, f"in the error.code table in docs/usage.md but never emitted: {stale}"

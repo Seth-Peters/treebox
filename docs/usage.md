@@ -67,7 +67,8 @@ remains the deliberate human escape hatch.
 
 `--checkout` checks out an **existing** branch (local or `origin/`) exactly —
 for resuming work or reviewing a PR. The worktree's name derives from the
-branch (`feature/auth` → `feature--auth`) unless you pass `NAME` too. It is
+branch (`feature/auth` → `feature--auth`; a placeholder drops its `treebox/`
+prefix first, so `treebox/a/b` → `a--b`) unless you pass `NAME` too. It is
 also the deliberate way to resume a branch you own: `create NAME` for a branch
 that already exists (locally or on origin) is a loud `BRANCH_EXISTS` conflict,
 never a silent adoption of old work.
@@ -107,6 +108,16 @@ contents and permissions, including executable bits. Source symlinks, including
 dangling links, are copied as links. Entries named `.git` are excluded at every
 depth, and `.git` cannot be a submodule path component. Destination entries
 that have no matching source entry are kept.
+
+The worktree's own branch decides which submodules it gets. Treebox reads the
+branch's `.gitmodules` and never writes that file, so a fresh worktree is clean
+even when its branch renamed, added, or removed a submodule. A path is copied
+only when the main checkout declares the same path and has it on disk. Treebox
+skips every other path with a note (`skipped <path> · not checked out in
+<repo>`, not printed under `--json`) and leaves that directory as the branch
+has it. A branch without a `.gitmodules` gets no submodule trees. Treebox does
+not run `git submodule update`: the copied content mirrors the main checkout,
+not the commit that the branch pins.
 
 Existing destination symlinks and hardlinks at file locations are replaced
 without writing to their targets. Paths to destination directories must contain
@@ -170,9 +181,14 @@ verdicts reflect the refs already available locally; run `git fetch origin`
 first when exact parity with create's normal fetch is required. The setup plan
 detects package manifests from the exact locally available `--base` or
 `--checkout` revision that it will materialize; when it resumes an interrupted
-create, it detects them from the existing worktree. A dry run does not copy
-submodules or inspect their destination paths, so it cannot detect
+create, it detects them from the existing worktree. The submodule part of the
+plan comes from the same revision's `.gitmodules` (or the existing worktree's),
+with the same rule as the real run: it names each path it would copy and each
+path it would skip. A dry run does not copy submodules or inspect their
+destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
+It also skips the runner preflight, including the
+[Docker user requirement](install.md#what-each-isolation-mode-needs).
 Nothing on disk or in git changes.
 
 With `--cold --dry-run`, the cache part of the plan also matches the real cold
@@ -229,10 +245,12 @@ setup completed, `enter` finishes the setup even though the recorded hash
 matches, instead of launching into a half-built tree. Anything after `--` is
 passed through to the agent. `--cold` forces a cache-bypassing re-sync.
 
-Under docker isolation, `enter` **preflights the Docker daemon first** (like
+Under docker isolation, `enter` **runs the runner preflight first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
 `DOCKER_UNAVAILABLE` error and a start-docker hint rather than a misleading
-error deeper in launch. It also **re-stages the scoped credential copies**
+error deeper in launch. For user requirements and recovery steps, see
+[Install](install.md#what-each-isolation-mode-needs).
+It also **re-stages the scoped credential copies**
 from the host on every entry - independent of the lockfile-hash skip - so a
 host logout/revocation drops the stale copies and a fresh login reaches the
 sandbox on the very next entry. The same refresh runs during `create`.
@@ -243,10 +261,27 @@ Both conditions stop `create` or `enter` with an
 [`ERROR` failure](#scripting-against-treebox); inspect their contents before
 removing the conflict.
 
-A container that stopped since setup (host reboot, manual `docker stop`)
-is restarted with the firewall re-established
-before the agent launches - and before a `--print`/`--json` command is
-emitted - so a treebox-owned restart never leaves egress silently open.
+### Docker entry and firewall recovery
+
+treebox restarts a stopped container before entry. If the container was
+created with the firewall enabled, treebox runs `init-firewall.sh` on every
+entry, including entries to running containers. This step occurs before the
+agent starts or treebox emits a `--print` or `--json` command. It restores
+rules lost after a container restart outside treebox.
+
+If initialization fails during setup or entry, treebox exits with
+`FIREWALL_FAILED` (exit `1`). It does not start the agent or emit an entry
+command. The bundled script drops traffic on failure. Its allowlist fetch
+then cannot succeed on another entry.
+
+Inspect the operator template named in `error.hint`. If the hint includes a
+teardown and create command, commit or back up uncommitted work before you
+use it. The command checks out the current branch and preserves the worktree
+path, template, firewall choice, and harness.
+
+If the CLI cannot restore the same path and branch, the hint gives no
+teardown command. Keep the worktree and repair the sandbox manually. If no
+branch is available, save the current work on a branch first.
 
 ## `list` — what exists, what's stale
 
@@ -441,12 +476,29 @@ treebox template list                      # names, source, firewall support, co
 treebox template path node                 # print the resolved dir: cd "$(treebox template path node)"
 ```
 
-`template init <name>` always yields a directory with the **full required file
-set**, so `create --template <name>` can't fail on a half-copied template; it
-refuses to clobber an existing template without `--force`. Then edit the
-`Dockerfile` and `container.json` and launch with
-`treebox create <name> --isolation docker --template <name>`. `template list`
-flags any template dir missing a required file or carrying malformed JSON
+`template init <name>` copies the source template before it installs the new
+directory. It refuses to replace an existing template without `--force`.
+With `--force`, treebox moves the old template aside and installs the new copy
+with renames. A copy failure or a failure to move the old template leaves the
+old template unchanged. If installation fails, treebox renames the old template
+back. If rollback also fails, the old template remains unchanged at the path
+in the error message.
+
+If cleanup fails after installation, the command succeeds and keeps the complete
+new template. Human output includes a warning on stderr with the leftover path.
+`--json` keeps the existing success payload and has no cleanup warning field.
+
+Each run uses a unique directory under `$TREEBOX_HOME/templates/.treebox-tmp`.
+`template init` rejects `.treebox-tmp` as a name, and `template list` hides that directory.
+Treebox leaves directories from other runs untouched because another process
+can still use them. Leftovers from an interrupted run can coexist with later
+runs. Before you remove a leftover directory, make sure that no process still
+uses it.
+
+Then edit the `Dockerfile` and `container.json` and launch with
+`treebox create <name> --isolation docker --template <name>`. If the source lacks
+required files, `template init` copies it and reports the missing files.
+`template list` flags any template dir missing a required file or carrying malformed JSON
 before `create` does, shows whether each template can serve `--firewall`
 (a `firewall.json` is optional), and marks which one is your config default. `template path [<name>]` (default: `default`)
 prints the resolved location — the install-agnostic answer to "where does this
@@ -484,9 +536,8 @@ agent — it hands you the launch command instead, so your script decides when
 to run it. The command is self-contained for both isolation modes: it carries
 the worktree directory (`cd … && exec …` on host, `docker exec -w …` in
 docker), so replaying it from any directory launches the agent in the box.
-It is also entry-ready: for a docker worktree, a stopped container is
-restarted (with the firewall re-applied) before the command is printed, so
-the emitted command is never dead on replay.
+Before it prints the command, treebox completes the
+[Docker entry checks](#docker-entry-and-firewall-recovery).
 Without `--json`, `--print`, or `--dry-run`, `create` and `enter` launch the
 agent and exit with the agent process's exit code. Human `--dry-run` writes the
 would-run plan to stderr; `--dry-run --json` writes its payload to stdout.
@@ -537,15 +588,17 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `error.code` | Exit | Common trigger |
 | ------------ | :--: | -------------- |
 | `INVALID_CONFIG` | `2` | Bad config file or invalid `--isolation` / `--harness` / `--template` (a template name is an identifier, never a path). |
-| `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, or uses the reserved `treebox/` prefix; or a `template init` / `template path` name is not a template identifier. |
+| `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, or uses the reserved `treebox/` prefix; or a `template init` / `template path` name is not a template identifier, or `template init` names the reserved staging name. |
 | `INVALID_BRANCH` | `2` | `create NAME` or `--checkout` names an invalid git ref. |
 | `NOT_A_REPO` | `2` | `--repo` is not a git repo. |
+| `INVALID_ROOT` | `2` | The worktree root (`--root` or `root` in config), or its nearest existing parent, is not a directory. Every command that takes `--root` checks it. |
 | `AMBIGUOUS_REF` | `2` | A ref matches more than one worktree. |
 | `NOT_FOUND` | `3` | The requested worktree, checkout branch, or base branch does not exist. |
 | `FETCH_FAILED` | `4` | Required fetch/auth failed. |
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
+| `RUNNING_AS_ROOT` | `1` | `create` or `enter` requested Docker isolation as root (uid 0). See the [user requirement and recovery steps](install.md#what-each-isolation-mode-needs). |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
@@ -555,12 +608,15 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
-| `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. |
+| `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. Also raised, rarely, when the repository lock that parallel `create` / `teardown` calls queue on has been held for over five minutes: another operation is stuck, not merely busy. |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
 | `RECORD_MISSING` | `5` | `enter`: the worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (made by an older treebox, or the record was deleted) - `treebox teardown <name>`, then `treebox create` again. |
 | `RECORD_INVALID` | `5` | `enter` / resumed `create`: the host-owned record does not parse (another `schemaVersion`, an unknown isolation mode or harness, or bound to another path) - `treebox teardown <name>`, then `treebox create` again. |
 | `RECORD_CONFLICT` | `5` | A resumed `create` of a half-built worktree asks for different settings than its record holds - re-run with the recorded settings from the hint, or tear it down. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
+| `FIREWALL_FAILED` | `1` | The sandbox firewall failed to initialize. See [firewall recovery](#docker-entry-and-firewall-recovery). |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
+| `OVERWRITE_FAILED` | `1` | `template init --force` cannot move the existing template aside. |
+| `COPY_FAILED` | `1` | `template init` cannot copy or install the template. See [template recovery](#template-scaffold-and-inspect-sandbox-templates). |

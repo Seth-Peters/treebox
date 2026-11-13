@@ -52,22 +52,16 @@ def is_placeholder(branch: str | None) -> bool:
 
 
 def derive_name(branch: str) -> str:
-    """The worktree name a branch implies: a placeholder's own slug
-    (``treebox/fix-auth`` -> ``fix-auth``), else the flattened branch
-    (``create --checkout feature/auth`` -> ``feature--auth``)."""
-    if is_placeholder(branch):
-        return branch.removeprefix(PLACEHOLDER_PREFIX)
-    return flatten_branch(branch)
+    """The worktree name a branch-shaped input implies. This is the one place
+    a name comes from a branch (``create NAME``, ``create --checkout``, the
+    teardown fallback for a branch without a worktree).
 
-
-def flatten_branch(branch: str) -> str:
-    """Derive a directory-safe name from a branch: slashes flattened to ``--``.
-
-    ``feature/auth`` -> ``feature--auth``. Only used to *derive* a worktree
-    name from a branch-shaped input (``create feature/auth``,
-    ``create --checkout <branch>``).
+    A placeholder drops its ``treebox/`` prefix, then every remaining slash
+    flattens to ``--``: ``treebox/fix-auth`` -> ``fix-auth``,
+    ``treebox/a/b`` -> ``a--b``, ``feature/auth`` -> ``feature--auth``. The
+    name is always one directory leaf, so treebox never nests a worktree.
     """
-    return branch.replace("/", "--")
+    return branch.removeprefix(PLACEHOLDER_PREFIX).replace("/", "--")
 
 
 def expand_user(path: str | Path) -> Path:

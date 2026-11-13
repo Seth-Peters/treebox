@@ -202,10 +202,19 @@ treebox assumes the caller is often another program:
   without parsing prose.
 - **`--json` with a `schemaVersion`** that only gains fields within a version
   (git-porcelain discipline), plus `--print` and `--dry-run` for scripts that
-  want the commands, not the side effects. An emitted entry command is
-  entry-ready: a stopped docker sandbox is restarted (firewall re-applied)
-  before the command is printed, never dead on replay.
+  want the commands, not the side effects. Before it emits an entry command,
+  treebox completes the [Docker entry checks](usage.md#docker-entry-and-firewall-recovery).
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
   so concurrent operations on the same worktree conflict (exit `5`). Separate
   worktrees with the same name have separate locks. Explicit batch teardown
   acquires all target locks before removal; a lock conflict removes nothing.
+- **Parallel creates are safe.** Worktrees with different names still share
+  one git repository, and `git fetch`, `git worktree add` / `remove`, and the
+  shared `.git/config` cannot be written by two processes at once (git takes
+  its config lock without waiting, so the loser simply fails). treebox
+  therefore serializes just those git steps with a **repository lock** that
+  *waits* rather than conflicts: any number of `create` and `teardown` calls
+  can be started together, they queue for a moment each, and their dependency
+  setup - the slow part - still runs concurrently. A `create` that fails
+  part-way never leaves a branch behind, so re-running the same command
+  works.
