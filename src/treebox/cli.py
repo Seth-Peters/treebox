@@ -410,9 +410,7 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Runner dependency problems keep exit 1 (codes are stable; agents
-        # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE,
-        # RUNNING_AS_ROOT).
+        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 

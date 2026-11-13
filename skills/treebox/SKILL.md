@@ -9,7 +9,7 @@ Use the `treebox` CLI for all mechanics. Do not run `git worktree add`, `git wor
 
 A pluggable **isolation mode** decides where the agent runs:
 - `--isolation host` (default): provisions the worktree and launches the agent directly on the host, in the worktree dir. No container, no Docker — the right default on an SSH box or a trusted machine.
-- `--isolation docker`: same provisioning, but launches the agent inside a docker container with the shared caches and scoped copies of the `~/.claude`/`~/.codex` login files mounted in. Needs only `docker` and a non-root user: as root (uid 0) `create`/`enter`/`doctor` stop with `RUNNING_AS_ROOT` (exit `1`) before anything is provisioned. Fix: run treebox as a non-root user (`useradd --create-home --groups docker treebox`). Host isolation works as root.
+- `--isolation docker`: same provisioning, but launches the agent inside a docker container with the shared caches and scoped copies of the `~/.claude`/`~/.codex` login files mounted in. Before using Docker isolation, read the [requirements and recovery steps](https://seth-peters.github.io/treebox/install/#what-each-isolation-mode-needs).
 
 Treebox itself requires Python 3.11 or newer. The bundled sandbox template is pinned to CPython 3.14.6.
 

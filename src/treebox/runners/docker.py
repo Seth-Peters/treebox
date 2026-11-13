@@ -3,11 +3,10 @@ Docker container with shared caches + scoped copies of the login credentials
 mounted in.
 
 Buys isolation + a pinned toolchain + an optional firewall, so it is opt-in.
-Docker is the only dependency: the container is built, started, and entered
-with plain ``docker build`` / ``docker run`` / ``docker exec``. The image's
-baked-in ``post-create.sh`` is the setup hook for this runner; shared caches
-are wired in as bind mounts so containerized setup resolves from the same
-store as the host.
+Container operations use plain ``docker build``, ``docker run``, and
+``docker exec``. The image's baked-in ``post-create.sh`` is the setup hook
+for this runner; shared caches are wired in as bind mounts so containerized
+setup resolves from the same store as the host.
 
 Lockdown invariant: the files that *define* the sandbox (container.json and
 its build context) are materialized in a host-side directory **outside** the

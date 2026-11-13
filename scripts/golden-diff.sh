@@ -3,9 +3,9 @@
 #
 # Runs a fixed matrix of commands: doctor, create --print/--dry-run,
 # enter --print, list, and their --json forms, for both isolations, against a
-# hermetic throwaway repo, normalizes the machine-specific bits (paths,
-# uid/gid, git version, container-name digests), and diffs the result against
-# the committed snapshots in tests/golden/. Behavior-preserving changes must
+# hermetic throwaway repo, normalizes paths, fixture uid/gid, git version,
+# and container-name digests, then diffs against the committed snapshots in
+# tests/golden/. Behavior-preserving changes must
 # leave every snapshot byte-identical: the "output identical" gate is
 # mechanical, not eyeballed.
 #
@@ -122,6 +122,7 @@ WTS="$ROOT/wts"
 GITVER="$(git --version | awk '{print $3}')"
 GITVER_PARSED="$(git --version | perl -lane 'my $s = $F[-1]; my @parts = split /\./, $s; my @nums; for my $p (@parts[0..2]) { $p //= ""; $p =~ s/\D//g; push @nums, length($p) ? $p : 0; } push @nums, 0 while @nums < 3; print join ".", @nums[0..2]')"
 export GD_ROOT="$ROOT" GD_PRIVROOT="/private$ROOT" GD_GITVER="$GITVER" GD_GITVER_PARSED="$GITVER_PARSED"
+# Use a fixed non-root identity so Docker cases also run when the process is root.
 # Literal (not pattern) uid/gid substitutions, so a regression that changed
 # one number into another is a snapshot diff, not silently normalized away.
 GD_UID=1000

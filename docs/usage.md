@@ -173,6 +173,8 @@ detects package manifests from the exact locally available `--base` or
 create, it detects them from the existing worktree. A dry run does not copy
 submodules or inspect their destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
+It also skips the runner preflight, including the
+[Docker user requirement](install.md#what-each-isolation-mode-needs).
 Nothing on disk or in git changes.
 
 With `--cold --dry-run`, the cache part of the plan also matches the real cold
@@ -228,12 +230,12 @@ setup completed, `enter` finishes the setup even though the recorded hash
 matches, instead of launching into a half-built tree. Anything after `--` is
 passed through to the agent. `--cold` forces a cache-bypassing re-sync.
 
-Under docker isolation, `enter` **preflights the Docker daemon first** (like
+Under docker isolation, `enter` **runs the runner preflight first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
 `DOCKER_UNAVAILABLE` error and a start-docker hint rather than a misleading
-error deeper in launch. The same preflight refuses to run as root (uid 0)
-with `RUNNING_AS_ROOT`, before any worktree, branch or image exists; see
-[Install](install.md#what-each-isolation-mode-needs). It also **re-stages the scoped credential copies**
+error deeper in launch. For user requirements and recovery steps, see
+[Install](install.md#what-each-isolation-mode-needs).
+It also **re-stages the scoped credential copies**
 from the host on every entry - independent of the lockfile-hash skip - so a
 host logout/revocation drops the stale copies and a fresh login reaches the
 sandbox on the very next entry. The same refresh runs during `create`.
@@ -542,7 +544,7 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
-| `RUNNING_AS_ROOT` | `1` | Docker isolation was asked for as root (uid 0). Run treebox as a non-root user, for example one made with `useradd --create-home --groups docker treebox`. Nothing is provisioned. |
+| `RUNNING_AS_ROOT` | `1` | `create` or `enter` requested Docker isolation as root (uid 0). See the [user requirement and recovery steps](install.md#what-each-isolation-mode-needs). |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
