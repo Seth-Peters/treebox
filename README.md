@@ -217,14 +217,16 @@ agent can't touch its own cage. Three steps:
 
 **1. Scaffold a template** — you edit a copy, never the shipped one.
 `treebox template init` copies the default into `~/.treebox/templates/<name>`
-with the full required file set; a `node` box and a `python` box can coexist,
-one per stack:
+for you. A `node` box and a `python` box can coexist, one per stack:
 
 ```bash
 treebox template init node          # copies from the built-in default
 treebox template list               # names, source, firewall, status, default + what the default bundles (`ls` works too)
 treebox template path node          # where it lives: cd "$(treebox template path node)"
 ```
+
+For copy and recovery rules, see the
+[`template` command reference](https://seth-peters.github.io/treebox/usage/#template-scaffold-and-inspect-sandbox-templates).
 
 **2. Edit two files.** The shipped image already bundles Node 22, uv, `gh`,
 ripgrep, and the agent CLIs, so most projects touch only these:

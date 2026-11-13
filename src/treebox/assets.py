@@ -106,6 +106,13 @@ def _bundled_template_dir() -> Path:
     return Path(p)
 
 
+# A reserved directory under ``user_templates_root()`` where ``template init``
+# builds a new template and parks the old one during a ``--force`` swap. It is
+# not a template: ``available_templates`` skips it and ``template init`` refuses
+# the name, so a leftover from an interrupted run never shows up as one.
+STAGING_DIR = ".treebox-tmp"
+
+
 def user_templates_root() -> Path:
     """Where named, user-authored templates live: ``$TREEBOX_HOME/templates``
     (default ``~/.treebox/templates``). ``treebox template init`` scaffolds
@@ -206,12 +213,14 @@ def invalid_template_json_files(path: Path) -> list[str]:
 
 
 def available_templates() -> list[str]:
-    """Sorted names of selectable templates: the built-in ``default`` plus
-    every directory under ``user_templates_root()``. ``$TREEBOX_TEMPLATE_DIR``
-    is a single explicit dir that overrides *any* name rather than a named
-    collection, so it does not enumerate here — callers surface it separately."""
+    """Sorted template names for ``template list`` and ``template init --from``.
+
+    ``$TREEBOX_TEMPLATE_DIR`` is a single explicit dir that overrides *any*
+    name rather than a named collection, so it does not enumerate here.
+    Callers show it separately.
+    """
     names = {DEFAULT_TEMPLATE}
     root = user_templates_root()
     if root.is_dir():
-        names.update(p.name for p in root.iterdir() if p.is_dir())
+        names.update(p.name for p in root.iterdir() if p.is_dir() and p.name != STAGING_DIR)
     return sorted(names)
