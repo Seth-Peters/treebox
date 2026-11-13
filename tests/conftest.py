@@ -45,13 +45,28 @@ def scratch_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.M
     """Point HOME at an empty scratch dir for every test.
 
     treebox reads the agent logins from ``~/.claude`` / ``~/.codex`` (and, on
-    macOS, probes the Keychain, which follows HOME). No test may read or
-    write the developer's real logins, and no test may pass or fail because
-    of them. Tests that need a logged-in agent use ``agent_ready``.
+    macOS, from the Keychain; see ``keychain``). No test may read or write
+    the developer's real logins, and no test may pass or fail because of
+    them. Tests that need a logged-in agent use ``agent_ready``.
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     return home
+
+
+@pytest.fixture(autouse=True)
+def keychain(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fake macOS ``security`` first on PATH that finds no Keychain item.
+
+    No test may read the developer's real Keychain login. Returns the fake's
+    path: a test that needs a Keychain item writes its own script there.
+    """
+    bin_dir = tmp_path_factory.mktemp("keychain-bin")
+    tool = bin_dir / "security"
+    tool.write_text("#!/bin/sh\nexit 44\n")  # security's "item not found"
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return tool
 
 
 @pytest.fixture

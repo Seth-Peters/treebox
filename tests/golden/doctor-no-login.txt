@@ -14,7 +14,8 @@
     ✓ git auth          authenticated · fresh fetch will succeed
     ✓ isolation: host   no container dependencies
 
-  ! Install the claude CLI and log in (writes ~/.claude) before launching.
+  ! Install the claude CLI and log in (writes ~/.claude; on macOS the Keychain 
+item 'Claude Code-credentials': allow access if asked) before launching.
 
   ✗ blocked: login: claude
 

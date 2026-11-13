@@ -98,6 +98,12 @@ for agent in claude codex; do
   chmod +x "$SHIM/$agent"
 done
 
+# --- macOS Keychain shim: no login item, so snapshots never read the real
+# Keychain and come out the same on macOS and Linux. 44 is security's
+# "item not found" status.
+printf '#!/bin/sh\nexit 44\n' > "$SHIM/security"
+chmod +x "$SHIM/security"
+
 # --- hermetic config: setup is a marker-writing hook, never a real installer -
 CFG="$ROOT/config.toml"
 printf 'setup_hook = ["echo ran >> setup.log"]\n' > "$CFG"

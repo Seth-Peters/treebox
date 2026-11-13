@@ -23,16 +23,19 @@ Invariants (part of this module's interface, relied on by every caller):
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+# Seconds a Keychain read may wait for a person to answer a macOS dialog.
+KEYCHAIN_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -89,53 +92,56 @@ class Harness:
         sandbox needs a copy of to authenticate."""
         return self.credential_path() / self._login_file
 
-    def sandbox_login(self) -> str | None:
-        """Where a sandbox's login comes from, or None when there is none.
-
-        A sandbox only ever gets a copy of ``login_file``, so only a real
-        login file counts: a regular file that holds a non-empty JSON object.
-        A login dir that is merely non-empty (settings, history) is no login.
+    def login(self) -> str | None:
+        """Where the login an agent uses (and a sandbox gets a copy of) lives
+        on this machine, or None: a non-empty JSON object from ``_read``.
         """
-        path = self.login_file()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
+            where, content = self._read(self._login_file) or ("", b"")
+            data = json.loads(content)
+        except (OSError, ValueError):
             return None
-        return str(path) if isinstance(data, dict) and data else None
+        return where if isinstance(data, dict) and data else None
 
-    def host_login(self) -> str | None:
-        """Where an agent launched on the host finds its login, or None.
-
-        The login file first; on macOS, also the Keychain item the CLI keeps
-        its login in there. The Keychain probe reads only the item's
-        attributes (never the secret), so it never asks for anything.
+    def _read(self, name: str) -> tuple[str, bytes] | None:
+        """``(where, contents)`` of one staged file, or None. The one rule:
+        the host file first; for the login file only, when it is absent on
+        macOS, this user's item in the harness's Keychain service. The read
+        has a time limit and no stdin: an unanswered or denied macOS dialog
+        is None, never a wait. A stale item of another account can exist.
         """
-        found = self.sandbox_login()
-        if found or self._keychain_service is None or sys.platform != "darwin":
-            return found
+        path = self.credential_path() / name
+        if path.is_file():
+            return str(path), path.read_bytes()
+        if name != self._login_file or not self._keychain_service or sys.platform != "darwin":
+            return None
+        item = ["-a", getpass.getuser(), "-s", self._keychain_service, "-w"]
         try:
-            probe = subprocess.run(
-                ["security", "find-generic-password", "-s", self._keychain_service],
+            read = subprocess.run(
+                ["security", "find-generic-password", *item],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
+                capture_output=True,
+                timeout=KEYCHAIN_TIMEOUT,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
-        return f"macOS Keychain ({self._keychain_service})" if probe.returncode == 0 else None
+        if read.returncode != 0:
+            return None
+        return f"macOS Keychain ({self._keychain_service})", read.stdout.removesuffix(b"\n")
 
     def login_hint(self) -> str:
         """How to obtain a login, for launch errors and doctor advice."""
-        return (
-            f"Install the {self.name} CLI and log in "
-            f"(writes {self._credential_dir}) before launching."
-        )
+        where = self._credential_dir
+        if self._keychain_service:
+            where += (
+                f"; on macOS the Keychain item '{self._keychain_service}': allow access if asked"
+            )
+        return f"Install the {self.name} CLI and log in (writes {where}) before launching."
 
     def stage_credentials(self, dest: Path) -> None:
         """Stage scoped copies of the login files into ``dest`` (created 0700).
 
-        Copy-or-drop semantics: a present source file is copied (0600) so
+        Copy-or-drop semantics: a present source (see ``_read``) is copied (0600) so
         in-container token refresh and agent state work against the copy; a
         staged copy whose source is gone (host logout) is deleted. Both a
         re-login and a revocation therefore reach the sandbox on the next
@@ -160,11 +166,9 @@ class Harness:
                     dest.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
                 )
                 stack.callback(os.close, dest_fd)
-                src_dir = self.credential_path()
                 for name in self._credential_files:
-                    src = src_dir / name
-                    if src.is_file():
-                        _replace_credential(src, name, parent_fd, dest_fd)
+                    if found := self._read(name):
+                        _replace_credential(found[1], name, parent_fd, dest_fd)
                     else:
                         with suppress(FileNotFoundError):
                             os.unlink(name, dir_fd=dest_fd)
@@ -184,7 +188,7 @@ class Harness:
         return staged, f"/home/{user}/.{self.name}"
 
 
-def _replace_credential(src: Path, name: str, parent_fd: int, dest_fd: int) -> None:
+def _replace_credential(content: bytes, name: str, parent_fd: int, dest_fd: int) -> None:
     """Publish a private host-side copy without following destination links."""
     temporary = f".treebox-credential-{secrets.token_hex(16)}"
     fd = os.open(
@@ -194,9 +198,9 @@ def _replace_credential(src: Path, name: str, parent_fd: int, dest_fd: int) -> N
         dir_fd=parent_fd,
     )
     try:
-        with os.fdopen(fd, "wb") as out, src.open("rb") as source:
+        with os.fdopen(fd, "wb") as out:
             os.fchmod(out.fileno(), 0o600)
-            shutil.copyfileobj(source, out)
+            out.write(content)
         os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=dest_fd)
     finally:
         with suppress(FileNotFoundError):

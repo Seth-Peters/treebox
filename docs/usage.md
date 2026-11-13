@@ -504,7 +504,7 @@ For the **selected harness** (`--harness`, else the config default: the one
 | Row | Host isolation | Docker isolation |
 | --- | -------------- | ---------------- |
 | `agent: <harness>` | The harness binary (`claude`, `codex`) is on `PATH`. | Part of the sandbox image: always `ok` here, checked in the container at launch (`HARNESS_MISSING`). |
-| `login: <harness>` | A real login: the login file (`~/.claude/.credentials.json`, `~/.codex/auth.json`) holds a JSON object, or, on macOS, Claude Code's Keychain item exists. | The login file holds a JSON object: it is the file the sandbox gets a copy of (a Keychain login cannot reach a sandbox). |
+| `login: <harness>` | A real login: the login file (`~/.claude/.credentials.json`, `~/.codex/auth.json`) holds a JSON object or, when that file is absent on macOS, Claude Code's Keychain item does. | The same login: the sandbox gets a copy of it as the login file. |
 
 A login dir that merely exists (settings, history) is no login. The other
 harnesses' login rows are shown as optional. Hard failures (`git`, `repo`,
