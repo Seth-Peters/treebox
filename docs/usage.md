@@ -109,6 +109,16 @@ dangling links, are copied as links. Entries named `.git` are excluded at every
 depth, and `.git` cannot be a submodule path component. Destination entries
 that have no matching source entry are kept.
 
+The worktree's own branch decides which submodules it gets. Treebox reads the
+branch's `.gitmodules` and never writes that file, so a fresh worktree is clean
+even when its branch renamed, added, or removed a submodule. A path is copied
+only when the main checkout declares the same path and has it on disk. Treebox
+skips every other path with a note (`skipped <path> · not checked out in
+<repo>`, not printed under `--json`) and leaves that directory as the branch
+has it. A branch without a `.gitmodules` gets no submodule trees. Treebox does
+not run `git submodule update`: the copied content mirrors the main checkout,
+not the commit that the branch pins.
+
 Existing destination symlinks and hardlinks at file locations are replaced
 without writing to their targets. Paths to destination directories must contain
 real directories. A symlink or file in a directory path, a directory blocking a
@@ -171,8 +181,11 @@ verdicts reflect the refs already available locally; run `git fetch origin`
 first when exact parity with create's normal fetch is required. The setup plan
 detects package manifests from the exact locally available `--base` or
 `--checkout` revision that it will materialize; when it resumes an interrupted
-create, it detects them from the existing worktree. A dry run does not copy
-submodules or inspect their destination paths, so it cannot detect
+create, it detects them from the existing worktree. The submodule part of the
+plan comes from the same revision's `.gitmodules` (or the existing worktree's),
+with the same rule as the real run: it names each path it would copy and each
+path it would skip. A dry run does not copy submodules or inspect their
+destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
 It also skips the runner preflight, including the
 [Docker user requirement](install.md#what-each-isolation-mode-needs).

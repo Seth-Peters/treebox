@@ -18,6 +18,7 @@ import stat
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Literal
 
 from . import ecosystems, git, locking, state
 from .config import Config
@@ -42,7 +43,7 @@ class DestinationConflictError(ProvisionError):
     sits at its destination. Nothing is ever removed to make room: the worktree
     tree is untrusted, and the entry may be the user's (or the branch's) own
     content. A submodule copy surfaces this as exit 5, DESTINATION_CONFLICT;
-    the managed-file copies (``.env``, ``.gitmodules``) catch it and skip."""
+    the managed ``.env`` copy catches it and skips."""
 
     def __init__(self, path: Path, message: str) -> None:
         super().__init__(message)
@@ -207,8 +208,7 @@ def dry_run_plan(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
     )
-    if git.has_gitmodules(repo):
-        cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
+    cmds.extend(_dry_run_submodules(repo, wt, source_ref))
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
     cmds.extend(runner.dry_run_setup(wt, cold=cold, source_ref=source_ref))
     return wt, cmds
@@ -257,10 +257,10 @@ def _is_directory_no_follow(path: Path) -> bool:
 
 
 def _copy_managed_file(src: Path, dest: Path, reporter: Reporter) -> bool:
-    """Copy a file treebox manages (``.env``, ``.gitmodules``) into the
+    """Copy a file treebox manages (``.env``) into the
     worktree; False when the worktree keeps a directory at that name.
 
-    A branch can commit ``.env/`` or ``.gitmodules/`` as a directory, and a
+    A branch can commit ``.env/`` as a directory, and a
     boxed agent can create one. That must neither crash provisioning nor cost
     the branch its content, so the copy is skipped with a warning and the
     worktree stays usable: the directory is left exactly as it is.
@@ -350,9 +350,9 @@ def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bo
     return True
 
 
-def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | None:
-    """Validate an untrusted ``.gitmodules`` path; the repo-relative path to
-    copy, or None to skip.
+def _unsafe_submodule_path(repo: Path, rel: str) -> str | None:
+    """Why an untrusted ``.gitmodules`` path must not be copied (the warning
+    to show), or None when it is safe.
 
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
@@ -362,36 +362,99 @@ def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | Non
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
-        reporter.warn(f"skipping submodule with unsafe path: {rel!r}")
-        return None
+        return f"skipping submodule with unsafe path: {rel!r}"
     src = repo / p
     if src.is_symlink():
-        reporter.warn(f"skipping submodule behind a symlink: {rel!r}")
-        return None
-    if not src.is_dir():
-        return None  # not checked out in the source repo; nothing to copy
+        return f"skipping submodule behind a symlink: {rel!r}"
     if not src.resolve().is_relative_to(repo.resolve()):
-        reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
-        return None
-    return p
+        return f"skipping submodule escaping the repo: {rel!r}"
+    return None
+
+
+@dataclass(frozen=True)
+class SubmoduleStep:
+    """What provisioning does with one path the branch's ``.gitmodules``
+    declares: ``copy`` it from the main checkout, ``skip`` it (the main
+    checkout does not have it: a note), or ``refuse`` it (unsafe: a warning).
+    ``message`` is the note or the warning; empty for ``copy``."""
+
+    path: str
+    action: Literal["copy", "skip", "refuse"]
+    message: str = ""
+
+
+def plan_submodules(repo: str, declared: list[str]) -> list[SubmoduleStep]:
+    """Decide, without writing anything, what happens to each submodule path
+    the worktree's branch declares (``declared``, in its order).
+
+    The single selection rule for both ``copy_submodules`` and the dry-run
+    plan, so the plan cannot drift from the real run: a path is copied only
+    when it is safe, the main checkout ``repo`` declares the same path, and
+    has it on disk.
+    """
+    if not declared:
+        return []
+    source = Path(repo)
+    available = {Path(rel) for rel in git.submodule_paths(source)}
+    steps: list[SubmoduleStep] = []
+    for rel in declared:
+        refusal = _unsafe_submodule_path(source, rel)
+        if refusal is not None:
+            steps.append(SubmoduleStep(rel, "refuse", refusal))
+        elif Path(rel) not in available or not (source / rel).is_dir():
+            steps.append(SubmoduleStep(rel, "skip", f"skipped {rel} · not checked out in {repo}"))
+        else:
+            steps.append(SubmoduleStep(rel, "copy"))
+    return steps
+
+
+def _dry_run_submodules(repo: str, wt: Worktree, source_ref: str | None) -> list[str]:
+    """The submodule lines of the dry-run plan: ``plan_submodules`` over the
+    ``.gitmodules`` the real run will read - the planned revision's for a new
+    worktree (nothing is checked out), the tree on disk for a resumed one."""
+    if source_ref is not None:
+        declared = git.submodule_paths_at_revision(repo, source_ref)
+    else:
+        declared = git.submodule_paths(wt.path)
+    lines: list[str] = []
+    for step in plan_submodules(repo, declared):
+        if step.action == "copy":
+            lines.append(f"# copy submodule {step.path} from {repo} into {wt.path}")
+        else:
+            lines.append(f"# submodules: {step.message}")
+    return lines
 
 
 def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
-    """Copy submodule working trees from the source repo (copy only, no linkage)."""
-    if not git.has_gitmodules(repo):
+    """Copy submodule working trees from the main checkout (copy only, no
+    linkage), for the submodules the worktree's own branch declares.
+
+    The branch's ``.gitmodules`` is the authority and is never written: the
+    main checkout's file can describe another branch (a renamed or removed
+    submodule), and copying it would leave the fresh worktree dirty.
+    ``plan_submodules`` selects the paths; every skipped path gets a note.
+    The copied content mirrors the main checkout, not the commit the branch
+    pins.
+    """
+    steps = plan_submodules(repo, git.submodule_paths(worktree))
+    if not steps:
         return 0
-    _copy_managed_file(Path(repo) / ".gitmodules", worktree / ".gitmodules", reporter)
+    source = Path(repo)
     copied = 0
-    for rel in git.submodule_paths(repo):
-        relative = _safe_submodule_path(Path(repo), rel, reporter)
-        if relative is None:
+    for step in steps:
+        if step.action == "refuse":
+            reporter.warn(step.message)
             continue
-        # The source side is validated above; ``copy_submodule`` owns the
+        if step.action == "skip":
+            reporter.note("submodules", step.message)
+            continue
+        relative = Path(step.path)
+        # ``plan_submodules`` validated the source side; ``copy_submodule`` owns the
         # destination side (the worktree tree is untrusted) and skips ``.git``
         # pointers, whose relative gitdir would break git in the linked
         # worktree (issue #16).
         try:
-            copy_submodule(Path(repo), worktree, relative)
+            copy_submodule(source, worktree, relative)
         except UnsafeDestinationError as exc:
             raise DestinationConflictError(exc.path, str(exc)) from exc
         except SubmoduleCopyError as exc:

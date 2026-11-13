@@ -2004,6 +2004,8 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
 
     worktree = tmp_path / "wt"
     worktree.mkdir()
+    # The branch declares the same (untrusted) submodule paths.
+    (worktree / ".gitmodules").write_text((repo / ".gitmodules").read_text())
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
@@ -2025,6 +2027,71 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.
     assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+
+def test_plan_submodules_refuses_unsafe_paths_before_any_copy(tmp_path: Path):
+    """The shared selection rule (real run and dry-run plan) refuses unsafe
+    ``.gitmodules`` paths and skips one the main checkout does not have."""
+    from treebox.provision import SubmoduleStep, plan_submodules
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".gitmodules").write_text(
+        '[submodule "up"]\n\tpath = ../outside\n\turl = x\n'
+        '[submodule "link"]\n\tpath = vendor\n\turl = x\n'
+        '[submodule "ok"]\n\tpath = sub\n\turl = x\n'
+    )
+    (repo / "vendor").symlink_to(outside)
+    (repo / "sub").mkdir()
+
+    steps = plan_submodules(str(repo), ["../outside", "vendor", "sub", "libB"])
+
+    assert steps == [
+        SubmoduleStep("../outside", "refuse", "skipping submodule with unsafe path: '../outside'"),
+        SubmoduleStep("vendor", "refuse", "skipping submodule behind a symlink: 'vendor'"),
+        SubmoduleStep("sub", "copy"),
+        SubmoduleStep("libB", "skip", f"skipped libB · not checked out in {repo}"),
+    ]
+    assert plan_submodules(str(repo), []) == []
+
+
+def test_submodule_paths_at_revision_reads_only_a_regular_gitmodules(tmp_path: Path):
+    """Like ``has_gitmodules`` on a checked-out tree: a tracked symlink or
+    directory named ``.gitmodules`` declares nothing, and no file is checked out."""
+    import subprocess
+
+    from treebox import git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def commit(message: str) -> str:
+        run = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@e"]
+        subprocess.run([*run, "add", "-A"], check=True)
+        subprocess.run([*run, "commit", "-qm", message, "--allow-empty"], check=True)
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    empty = commit("empty")
+    (repo / "real.ini").write_text('[submodule "a"]\n\tpath = libA\n\turl = x\n')
+    (repo / ".gitmodules").write_text('[submodule "b"]\n\tpath = libB\n\turl = x\n')
+    regular = commit("regular")
+    (repo / ".gitmodules").unlink()
+    (repo / ".gitmodules").symlink_to("real.ini")
+    symlink = commit("symlink")
+    (repo / ".gitmodules").unlink()
+    (repo / ".gitmodules").mkdir()
+    (repo / ".gitmodules" / "x").write_text('[submodule "c"]\n\tpath = libC\n')
+    directory = commit("directory")
+
+    assert git.submodule_paths_at_revision(repo, empty) == []
+    assert git.submodule_paths_at_revision(repo, regular) == ["libB"]
+    assert git.submodule_paths_at_revision(repo, symlink) == []
+    assert git.submodule_paths_at_revision(repo, directory) == []
 
 
 def test_copy_env_is_force_ignored_in_the_worktree(tmp_path: Path):
