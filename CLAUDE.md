@@ -109,11 +109,12 @@ Module map:
   worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork. Every path first calls `runner.prepare_entry`.
   See its contract in `runners/base.py`.
-  `_reconcile_with_state` folds recorded
-  creation-time choices into existing-worktree sessions before the runner and
-  harness objects are resolved: recorded isolation conflicts with a mismatched
-  explicit `--isolation`, while recorded firewall/harness/template protect an
-  existing worktree from config-default drift.
+  `_reconcile_with_record` folds the host-owned record (`record.py`) into
+  existing-worktree sessions before the runner and harness objects are
+  resolved: recorded isolation conflicts with a mismatched explicit
+  `--isolation`, recorded firewall always wins, and recorded harness/template
+  win over config defaults while `--harness` / `--template` stay per-session
+  operator overrides.
   It enforces **stable exit codes** (`0` ok · `1` runtime/doctor hard-check ·
   `2` usage · `3` not-found · `4` auth/fetch · `5` conflict) and **`--json`**
   output carrying a `schemaVersion` that only gains fields within a version —
@@ -136,18 +137,34 @@ Module map:
   same plan a real run executes; `ensure_cache_dirs` is the one filesystem
   effect and only real setup calls it. `detect` reads a checked-out tree,
   `detect_revision` reads a git revision (what a dry run plans against).
-- **`state.py`** stores per-worktree state (lockfile hash + provisioning
-  choices) inside the worktree's private git dir (`.git/worktrees/<id>/`), so it
-  never appears in `git status` and is pruned with the worktree. The lockfile
-  hash is what lets `enter` re-sync only when deps changed (the recorded
-  `provisioned` flag makes `enter` finish an interrupted setup even when the
-  hash matches); the recorded choices are what let `enter`/`teardown` recover
-  the worktree's created-time isolation, firewall, harness, and template
-  defaults. This state is sandbox-writable and therefore never authorizes
-  destructive host cleanup. `teardown` reads the non-destructive choices
-  through the repo's own worktree
-  registration (`load_registered`) rather than the worktree's `.git` pointer,
-  so a corrupt tree's recorded choices still drive container cleanup.
+- **`record.py`** is the host-owned worktree record: the authority for a
+  worktree's creation policy (isolation, firewall, template, harness, base),
+  at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
+  One schema version (`schemaVersion`; unknown keys, other versions, and
+  unknown isolation/harness names are refused - there is no upgrade path),
+  bound to the registered worktree path, written atomically by `create`
+  under the worktree lock before any runner resource depends on it.
+  API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
+  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. The
+  record format has never been released, so a new field is a new required
+  key of the one schema version: add it to `WorktreeRecord` without a
+  `SCHEMA_VERSION` bump and without an upgrade path.
+  On `enter`, a missing or invalid record is a classified error
+  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to recreate
+  the worktree (`teardown`, then `create`), never a fallback to config
+  defaults or to `state.py`. `teardown` needs no record: without one it
+  picks the docker runner when the runner-owned resource manifest exists
+  (`runners.docker.has_resource_manifest`), else the host runner.
+- **`state.py`** stores per-worktree *observations* only (lockfile hash +
+  `provisioned`) inside the worktree's private git dir
+  (`.git/worktrees/<id>/`), so it never appears in `git status` and is pruned
+  with the worktree. The lockfile hash is what lets `enter` re-sync only when
+  deps changed (the `provisioned` flag makes `enter` finish an interrupted
+  setup even when the hash matches). This state is sandbox-writable, so it
+  never decides policy and never authorizes destructive host cleanup; it is
+  read and written without following links (a planted symlink reads as no
+  state and is replaced, not written through). `list` reads it through the
+  repo's own worktree registration (`load_registered`).
 - **`models.py`** holds the `Worktree` value object and the path-as-identity
   rule: the registered *path* identifies a worktree (the *name* is only its
   directory leaf, and can repeat under a nested root); the *branch* is a
@@ -220,6 +237,10 @@ What a sandboxed backend must **guarantee** (the security invariants):
   never exposed to the sandbox (they hold host-executed config).
 - The sandbox-defining config is rendered outside the mount, so a boxed
   agent cannot edit the definition of its own box.
+- The creation policy (isolation, firewall, template, harness) is read only
+  from the host-owned record outside the mount, never from sandbox-writable
+  state; a template name is an identifier resolved only through the
+  operator-owned locations, never a path.
 - Destructive cleanup trusts only runner-owned metadata outside the mount;
   sandbox-writable worktree state never records Docker volume ownership.
 - The shared `.git/hooks` is presented read-only (host git executes it).
@@ -238,7 +259,8 @@ What a backend may **assume** (host locality):
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
   bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, and the lockfile hash stats host files.
+  host-side private git dir, the record lives beside the worktree, and the
+  lockfile hash stats host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud

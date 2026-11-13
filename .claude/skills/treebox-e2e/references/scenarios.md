@@ -157,6 +157,18 @@ Prereq: `fix-auth` worktree from B1 exists.
       (worktree was created with host isolation)
       Expect: exit 5 conflict — an explicit mismatched `--isolation` never
       silently re-provisions; the recorded choice wins over config drift too.
+- [ ] **C8 policy lives in the host-owned record** — overwrite the state file
+      (`$(git -C "$ROOT/fix-auth" rev-parse --absolute-git-dir)/treebox-state.json`)
+      with `{"isolation": "docker", "template": "/etc", "provisioned": true}`,
+      then `tb enter fix-auth … --print`
+      Expect: exit 0, still the host launch command; `tb list --json` still
+      reports `host` (the policy comes from `$ROOT/.records/fix-auth.json`).
+- [ ] **C9 no record: recreate** - `tb create e2e-norec … --print`, then
+      `rm "$ROOT/.records/e2e-norec.json"` and `tb enter e2e-norec … --json`
+      Expect: exit 5, `"code": "RECORD_MISSING"`, hint names
+      `treebox teardown e2e-norec` and `treebox create`; nothing launches;
+      `list` shows isolation unknown. `tb teardown e2e-norec … --force --json`
+      (no extra flag): exit 0, the worktree and its record are gone.
 
 ## D. list
 
@@ -218,6 +230,8 @@ Uses the scratch `$TREEBOX_HOME` — must never write to the real `~/.treebox`.
 - [ ] **F2 path resolution** — `tb template path` / `tb template path default`
       Expect: exit 0; prints an existing directory on stdout (scriptable:
       `cd "$(tb template path)"` works). `tb template path ghost`: exit 3.
+      `tb template path /etc` and `tb template path ../x`: exit 2 (a template
+      name is an identifier, never a path).
 - [ ] **F3 init scaffolds full set** — `tb template init mytpl --json`
       Expect: exit 0; `$TREEBOX_HOME/templates/mytpl/` contains the full
       required file set (`Dockerfile`, `container.json`, `post-create.sh`,

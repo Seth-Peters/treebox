@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 from .ecosystems import ECOSYSTEMS
 from .harnesses import VALID_HARNESSES
-from .models import expand_user
+from .models import expand_user, is_valid_template_name
 
 # The closed vocabularies treebox understands, validated against the
 # registry-derived VALID_* tuples (harnesses.HARNESSES, runners.RUNNERS —
@@ -233,3 +233,10 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"Invalid isolation mode '{cfg.isolation}'. Use one of {VALID_ISOLATION}.")
     if cfg.harness not in VALID_HARNESSES:
         raise ValueError(f"Invalid harness '{cfg.harness}'. Use one of {VALID_HARNESSES}.")
+    if not is_valid_template_name(cfg.template):
+        # A path or '..' here would let a name escape the operator-owned
+        # template locations (assets.template_dir).
+        raise ValueError(
+            f"Invalid template name '{cfg.template}'. A template name is one "
+            "identifier (letters, digits, '.', '_', '-'), never a path."
+        )

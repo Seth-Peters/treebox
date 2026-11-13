@@ -31,6 +31,18 @@ def is_valid_name(name: str) -> bool:
     return all(is_slug(part) for part in name.split("/"))
 
 
+# A sandbox template name is an identifier, never a path: one segment of a
+# conservative, filesystem-safe charset, so it can only select a directory
+# under the operator-owned templates root (see ``assets.template_dir``).
+TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_valid_template_name(name: str) -> bool:
+    """Whether ``name`` is a template identifier: no separators, no
+    traversal (``.`` / ``..``), and therefore no absolute path."""
+    return name not in (".", "..") and bool(TEMPLATE_NAME_RE.match(name))
+
+
 def placeholder_branch(name: str) -> str:
     return PLACEHOLDER_PREFIX + name
 

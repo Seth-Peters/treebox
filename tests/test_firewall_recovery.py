@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from treebox import assets, git, state
+from treebox import assets, git, record
 from treebox.config import Config
 from treebox.models import Worktree
 from treebox.runners.docker import DockerRunner
@@ -155,7 +155,7 @@ def test_firewall_recovery_restores_existing_work_and_choices(
     )
     failure = docker_cli.with_suffix(".fail")
     failure.touch()
-    recorded_before = state.load(wt)
+    recorded_before = record.load(wt)
     container_before = docker_cli.read_text()
 
     entered = _run(["enter", *location, "--json", "--", wt.name], tmp_path)
@@ -178,7 +178,7 @@ def test_firewall_recovery_restores_existing_work_and_choices(
         assert _git(wt, "rev-parse", "HEAD") == commit
         assert (wt / "work.txt").read_text() == "existing work must survive\n"
         assert (wt / "uncommitted.txt").read_text() == "uncommitted work must survive\n"
-        assert state.load(wt) == recorded_before
+        assert record.load(wt) == recorded_before
         assert docker_cli.read_text() == container_before
         return
     recovery = error["hint"].split("re-create: ", 1)[1]
@@ -198,8 +198,7 @@ def test_firewall_recovery_restores_existing_work_and_choices(
     assert _git(wt, "branch", "--show-current") == expected_branch
     assert _git(wt, "rev-parse", "HEAD") == commit
     assert (wt / "work.txt").read_text() == "existing work must survive\n"
-    recorded = state.load(wt)
-    assert recorded is not None
+    recorded = record.load(wt)
     assert recorded.template == "locked"
     assert recorded.firewall is firewall
     assert recorded.harness == "codex"

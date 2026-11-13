@@ -57,12 +57,15 @@ command-line flag  >  config.toml  >  built-in default
 ```
 
 For an existing worktree, `enter` and `teardown` also read the worktree's
-recorded creation-time state. Recorded isolation wins over the config default,
-and a conflicting explicit `--isolation` exits `5`; `enter` always reuses the
-recorded firewall, while recorded harness and template beat config defaults
-unless `--harness` or `--template` is passed. For Docker teardown ownership and
-missing-manifest behavior, see the
-[runner-owned resource manifest](how-it-works.md#freshness-is-enforced-not-hoped-for).
+[host-owned record](how-it-works.md#the-host-owned-record) of its creation
+policy. Recorded isolation wins over the config default, and a conflicting
+explicit `enter --isolation` exits `5`; `enter` always reuses the recorded
+firewall, while recorded harness and template beat config defaults unless
+`--harness` or `--template` is passed. `enter` refuses a worktree without a
+usable record (tear it down and create it again), never falling back to the
+config default. For
+Docker teardown ownership and missing-manifest behavior, see the
+[runner-owned resource manifest](how-it-works.md#the-host-owned-record).
 
 | Key        | Default              | What it controls                                          |
 | ---------- | -------------------- | --------------------------------------------------------- |
@@ -149,7 +152,10 @@ Select it per run, or make it your default:
 
 Templates in `~/.treebox/templates/<name>` are picked by the `template` config
 key or per-invocation with `--template <name>`. Unknown template names are
-errors rather than silent fallbacks to `default`.
+errors rather than silent fallbacks to `default`. A template name is an
+identifier (letters, digits, `.`, `_`, `-`), never a path: `--template /abs/dir`
+or `--template ../x` exits `2` (`INVALID_CONFIG`). To use a directory anywhere
+else, point `$TREEBOX_TEMPLATE_DIR` at it.
 
 ```bash
 treebox create my-feature --isolation docker --template node   # this run only

@@ -441,13 +441,7 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     monkeypatch.setattr(
         state,
         "load_registered",
-        lambda repo, path: state.WorktreeState(
-            base="main",
-            isolation="host",
-            harness="claude",
-            lockfile_hash="lock",
-            provisioned=True,
-        ),
+        lambda repo, path: state.WorktreeState(lockfile_hash="lock", provisioned=True),
     )
 
     alias_wt = alias_root / "feature-smoke"
@@ -1418,7 +1412,7 @@ def test_host_prepare_entry_is_a_noop(tmp_path: Path):
 
 def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir):
     """A labeled container this runner didn't create is an explicit error
-    pointing at teardown — not silently adopted with the wrong
+    pointing at teardown - never silently used with the wrong
     name/mounts/user."""
     fake = _FakeDocker(ids="abc123\n", name="funny_wozniak")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
@@ -1442,24 +1436,37 @@ def test_docker_setup_refuses_firewall_on_unfirewalled_container(tmp_path: Path,
         runner.setup(wt, cold=True, reporter=_RecordingReporter())
 
 
-def _reconcile(cfg, st, **kw):
-    """_reconcile_with_state with the reporter/flag boilerplate defaulted, so
+def _reconcile(cfg, rec, **kw):
+    """_reconcile_with_record with the reporter/flag boilerplate defaulted, so
     each policy assertion below reads as one line of the precedence table."""
-    from treebox.cli import _reconcile_with_state
+    from treebox.cli import _reconcile_with_record
     from treebox.output import Reporter
 
     kw.setdefault("isolation", None)
-    return _reconcile_with_state(Reporter(quiet=True), cfg, st, **kw)
+    return _reconcile_with_record(Reporter(quiet=True), cfg, rec, **kw)
+
+
+def _rec(**kw):
+    """A host-owned record with defaults for the fields a test does not pin."""
+    from treebox.record import WorktreeRecord
+
+    fields = {
+        "worktree": Path("/wts/x"),
+        "base": "main",
+        "isolation": "docker",
+        "harness": "claude",
+        "firewall": False,
+        "template": "default",
+    }
+    fields.update(kw)
+    return WorktreeRecord(**fields)
 
 
 def test_reconcile_honors_recorded_no_firewall_over_config_default(tmp_path: Path, fake_common_dir):
     """A worktree created with --no-firewall under a firewall=true config must
     reconnect cleanly: enter resolves the firewall from the recorded created-time
     choice, so setup against its unfirewalled container never hard-errors."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="claude", firewall=False)
-    cfg = _reconcile(Config(isolation="docker", firewall=True), st, honor_firewall=True)
+    cfg = _reconcile(Config(isolation="docker", firewall=True), _rec(firewall=False))
     assert cfg.firewall is False  # recorded created-time choice wins over the default
 
     wt = _boxed_worktree(tmp_path)
@@ -1471,17 +1478,10 @@ def test_reconcile_honors_recorded_no_firewall_over_config_default(tmp_path: Pat
     DockerRunner(cfg, docker=fake).setup(wt, cold=True, reporter=_RecordingReporter())
 
 
-def test_reconcile_firewall_uses_config_default_without_state():
-    """With no state to read (a worktree whose dir is gone), `enter` keeps the
-    config default instead of inventing a firewall choice — and teardown
-    (honor_firewall=False) always keeps the config default."""
-    from treebox.state import WorktreeState
-
-    assert _reconcile(Config(firewall=True), None, honor_firewall=True).firewall is True
-    assert _reconcile(Config(firewall=False), None, honor_firewall=True).firewall is False
-    # The teardown flow never reconciles the firewall, recorded or not.
-    recorded = WorktreeState(base="main", isolation="host", harness="claude", firewall=True)
-    assert _reconcile(Config(firewall=False), recorded).firewall is False
+def test_reconcile_recorded_firewall_beats_the_config_default_both_ways():
+    """The record is the authority for the firewall in either direction."""
+    assert _reconcile(Config(firewall=False), _rec(firewall=True)).firewall is True
+    assert _reconcile(Config(firewall=True), _rec(firewall=False)).firewall is False
 
 
 def test_reconcile_honors_recorded_template_over_config_default():
@@ -1489,36 +1489,21 @@ def test_reconcile_honors_recorded_template_over_config_default():
     same template even when the config default is `default` and no `--template`
     is passed: otherwise a deps-changing enter regenerates container.json from
     the wrong template (wrong user → unauthenticated agent)."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="claude", template="hardened")
+    rec = _rec(template="hardened")
     # No --template: the recorded created-time template wins over the default.
-    assert _reconcile(Config(template="default"), st).template == "hardened"
-    # An explicit --template stays a legitimate per-session override.
-    assert _reconcile(Config(template="default"), st, template="other").template == "default"
-
-
-def test_reconcile_template_uses_config_default_when_unrecorded():
-    """An unrecorded template (None) must not force a choice: enter falls back
-    to the config default."""
-    from treebox.state import WorktreeState
-
-    unrecorded = WorktreeState(base="main", isolation="docker", harness="claude")
-    assert unrecorded.template is None
-    assert _reconcile(Config(template="default"), unrecorded).template == "default"
-    assert _reconcile(Config(template="custom"), None).template == "custom"
+    assert _reconcile(Config(template="default"), rec).template == "hardened"
+    # An explicit --template stays a legitimate per-session operator override.
+    assert _reconcile(Config(template="other"), rec, template="other").template == "other"
 
 
 def test_reconcile_isolation_and_harness_policy():
     """The remaining rows of the precedence table, at the unit level (the CLI
     paths — conflict exit codes, recorded-harness launches — are pinned by the
     contract and integration suites): recorded isolation wins over the config
-    default; a matching explicit --isolation is fine; a known recorded harness
-    wins unless -H overrides; an unknown recorded harness falls back."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="codex")
-    out = _reconcile(Config(isolation="host", harness="claude"), st)
+    default; a matching explicit --isolation is fine; the recorded harness
+    wins unless -H overrides (an unknown one never parses: RECORD_INVALID)."""
+    rec = _rec(isolation="docker", harness="codex")
+    out = _reconcile(Config(isolation="host", harness="claude"), rec)
     assert out.isolation == "docker"  # recorded wins over the config default
     assert out.harness == "codex"  # recorded, known -> wins
 
@@ -1526,15 +1511,9 @@ def test_reconcile_isolation_and_harness_policy():
     # override. (In the real flow the explicit values are already folded into
     # cfg by _resolve_config; reconcile just declines to second-guess them.)
     out = _reconcile(
-        Config(isolation="docker", harness="claude"), st, isolation="docker", harness="claude"
+        Config(isolation="docker", harness="claude"), rec, isolation="docker", harness="claude"
     )
     assert out.isolation == "docker" and out.harness == "claude"
-
-    # Unknown recorded harness falls back to the config default; no state at
-    # all leaves the config untouched.
-    weird = WorktreeState(base="main", isolation="host", harness="aider")
-    assert _reconcile(Config(harness="claude"), weird).harness == "claude"
-    assert _reconcile(Config(isolation="host"), None).isolation == "host"
 
 
 def test_docker_setup_cold_reuse_warns_about_frozen_mounts(tmp_path: Path, fake_common_dir):
@@ -1747,11 +1726,13 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     assert not cfg_dir.exists()
 
 
-@pytest.mark.parametrize("config_dir_exists", [True, False], ids=["legacy", "manually-deleted"])
+@pytest.mark.parametrize(
+    "config_dir_exists", [True, False], ids=["config-dir-left", "config-dir-deleted"]
+)
 def test_docker_teardown_without_manifest_never_guesses_volumes(
     tmp_path: Path, config_dir_exists: bool
 ):
-    """A legacy worktree or manually deleted metadata dir is cleaned safely:
+    """A missing manifest (with or without its config dir) is cleaned safely:
     no volume lookup/removal guess, a warning, and any config dir is removed."""
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
@@ -1899,11 +1880,12 @@ def test_docker_create_records_workspace_volumes_in_host_manifest(
     from treebox import git, provision, state
     from treebox.runners.docker import _sanitize
 
+    (tmp_path / "gitdir").mkdir()
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path / "gitdir"))
     runner = DockerRunner(Config(isolation="docker"))
     wt = _boxed_worktree(tmp_path)
 
-    provision._record_runner(wt, runner, "claude", False, "default")
+    provision._record_setup_started(wt, runner)
 
     manifest = json.loads(runner._resource_manifest_file(wt).read_text())
     assert manifest == {
@@ -1929,34 +1911,42 @@ def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, 
     assert runner._resource_manifest_file(wt).read_text() == before
 
 
-def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
-    """teardown has no --template flag, so its runner must recover the created-time
-    template from state for the non-destructive runner configuration."""
-    from treebox import git, state
+@pytest.mark.parametrize(
+    ("record_state", "manifest", "want"),
+    [
+        ("docker", False, "docker"),  # the record decides when it is valid
+        ("host", True, "host"),
+        ("missing", True, "docker"),  # no record: the resource manifest decides
+        ("missing", False, "host"),
+        ("invalid", True, "docker"),
+        ("invalid", False, "host"),
+    ],
+)
+def test_teardown_runner_reads_only_host_owned_files(tmp_path, record_state, manifest, want):
+    """teardown is the recovery for a missing or invalid record, so it picks
+    the runner without one: from the record when valid, else from the docker
+    runner's host-owned resource manifest. Never the config default."""
+    from treebox import record
     from treebox.cli import _teardown_runner
     from treebox.config import Config
-    from treebox.output import Reporter
     from treebox.resolve import Candidate
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-    monkeypatch.setattr(git, "registered_gitdir", lambda repo, p: tmp_path)
-    state.save(
-        tmp_path,
-        state.WorktreeState(base="main", isolation="docker", harness="claude", template="hardened"),
-    )
-    cand = Candidate(name="work", branch="treebox/work", path=str(tmp_path))
+    work = tmp_path / "work"
+    work.mkdir()
+    if record_state in ("docker", "host"):
+        record.save(_record_for(work, isolation=record_state))
+    elif record_state == "invalid":
+        record.record_path(work).parent.mkdir(parents=True)
+        record.record_path(work).write_text('{"schemaVersion": 2}')
+    if manifest:
+        path = tmp_path / ".containers" / "work" / "treebox-resources.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    cand = Candidate(name="work", branch="work", path=str(work))
 
-    run = _teardown_runner(
-        Reporter(quiet=True),
-        Config(isolation="docker", template="default"),
-        cand,
-        str(tmp_path),
-        explicit=None,
-        remove_volumes=True,
-        json_out=False,
-    )
-    assert run is not None
-    assert run.config.template == "hardened"  # recovered from state, not the config default
+    config_default = "host" if want == "docker" else "docker"
+    run = _teardown_runner(Config(isolation=config_default), cand, remove_volumes=True)
+    assert run.name == want
 
 
 def test_docker_doctor_gates_on_binary_and_daemon(
@@ -2254,69 +2244,182 @@ def test_state_provisioned_roundtrips(tmp_path, monkeypatch):
 
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
 
-    state.save(tmp_path, state.WorktreeState(base="main", isolation="docker", harness="claude"))
+    state.save(tmp_path, state.WorktreeState())
     assert state.load(tmp_path).provisioned is False  # our default for fresh objects
 
-    state.save(
-        tmp_path,
-        state.WorktreeState(base="main", isolation="docker", harness="claude", provisioned=True),
-    )
-    assert state.load(tmp_path).provisioned is True
+    state.save(tmp_path, state.WorktreeState(lockfile_hash="h", provisioned=True))
+    assert state.load(tmp_path) == state.WorktreeState(lockfile_hash="h", provisioned=True)
 
     # A file missing the "provisioned" key reads as not-provisioned.
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
+    (tmp_path / "treebox-state.json").write_text(json.dumps({"lockfile_hash": "h"}))
     assert state.load(tmp_path).provisioned is False
 
 
-def test_state_firewall_roundtrips(tmp_path, monkeypatch):
-    """The recorded firewall choice round-trips so `enter` honors the created-time
-    decision; fresh objects and a file missing the key both read as False."""
+def test_state_holds_observations_only_and_ignores_policy_keys(tmp_path, monkeypatch):
+    """Sandbox-writable state never carries policy: a forged file
+    with isolation/template/firewall keys reads as observations only, and the
+    next save drops those keys."""
     import json
 
     from treebox import git, state
 
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    forged = {
+        "base": "main",
+        "isolation": "host",
+        "harness": "claude",
+        "lockfile_hash": "h",
+        "provisioned": True,
+        "firewall": False,
+        "template": "/abs/evil",
+    }
+    (tmp_path / "treebox-state.json").write_text(json.dumps(forged))
+    assert state.load(tmp_path) == state.WorktreeState(lockfile_hash="h", provisioned=True)
+    state.save(tmp_path, state.load(tmp_path))
+    written = json.loads((tmp_path / "treebox-state.json").read_text())
+    assert set(written) == {"lockfile_hash", "provisioned"}
 
-    for choice in (True, False):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", firewall=choice),
-        )
-        assert state.load(tmp_path).firewall is choice
 
-    # Fresh objects and files missing the "firewall" key both read as False.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").firewall is False
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).firewall is False
-
-
-def test_state_template_roundtrips(tmp_path, monkeypatch):
-    """The recorded template round-trips so `enter`/`teardown` render the same
-    container; an unrecorded template (no key) reads as None so the caller falls
-    back to the config default rather than drifting to a wrong template."""
-    import json
-
+def test_state_never_follows_a_planted_symlink(tmp_path, monkeypatch):
+    """A boxed agent can replace the state file with a symlink to a host file.
+    Reading it is 'no state'; saving replaces the link and leaves its target
+    untouched (issue #57)."""
     from treebox import git, state
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    monkeypatch.setattr(git, "git_dir", lambda p: str(gitdir))
+    victim = tmp_path / "victim.txt"
+    victim.write_text('{"lockfile_hash": "secret", "provisioned": true}')
+    (gitdir / "treebox-state.json").symlink_to(victim)
 
-    for tpl in ("hardened", "default"):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", template=tpl),
-        )
-        assert state.load(tmp_path).template == tpl
+    assert state.load(gitdir) is None
+    state.save(gitdir, state.WorktreeState(lockfile_hash="h", provisioned=True))
 
-    # Fresh objects and files missing the "template" key both read as None.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").template is None
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).template is None
+    assert victim.read_text() == '{"lockfile_hash": "secret", "provisioned": true}'
+    assert not (gitdir / "treebox-state.json").is_symlink()
+    assert state.load(gitdir) == state.WorktreeState(lockfile_hash="h", provisioned=True)
+    assert [p.name for p in gitdir.iterdir()] == ["treebox-state.json"]  # no temp left
+
+
+def _record_for(path: Path, **kw):
+    from treebox import record
+
+    fields = {
+        "worktree": path,
+        "base": "main",
+        "isolation": "docker",
+        "harness": "claude",
+        "firewall": True,
+        "template": "hardened",
+    }
+    fields.update(kw)
+    return record.WorktreeRecord(**fields)
+
+
+def test_record_lives_outside_the_worktree_and_roundtrips(tmp_path):
+    """The record sits beside the worktree (outside every sandbox mount), is
+    versioned, and round-trips exactly."""
+    import json
+
+    from treebox import record
+
+    wt = tmp_path / "wts" / "feature--x"
+    wt.mkdir(parents=True)
+    rec = _record_for(wt)
+    record.save(rec)
+
+    path = record.record_path(wt)
+    assert path == tmp_path / "wts" / ".records" / "feature--x.json"
+    assert not path.is_relative_to(wt)
+    assert json.loads(path.read_text())["schemaVersion"] == record.SCHEMA_VERSION
+    assert record.load(wt) == rec
+    assert [p.name for p in path.parent.iterdir()] == ["feature--x.json"]  # no temp left
+
+    record.remove(wt)
+    record.remove(wt)  # idempotent
+    with pytest.raises(record.RecordMissingError):
+        record.load(wt)
+
+
+def test_record_save_is_atomic(tmp_path, monkeypatch):
+    """A failed write leaves the previous record intact and no temp file."""
+    from treebox import record
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(_record_for(wt))
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(record.os, "replace", boom)
+    with pytest.raises(OSError):
+        record.save(_record_for(wt, isolation="host"))
+    monkeypatch.undo()
+    assert record.load(wt).isolation == "docker"
+    assert [p.name for p in record.record_path(wt).parent.iterdir()] == ["w.json"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda d: d.update(schemaVersion=2), "schemaVersion"),
+        (lambda d: d.update(schemaVersion=True), "schemaVersion"),
+        (lambda d: d.update(worktree="/elsewhere/w"), "bound to worktree"),
+        (lambda d: d.update(template="/etc"), "not a template name"),
+        (lambda d: d.update(template="../x"), "not a template name"),
+        (lambda d: d.update(firewall="yes"), "firewall"),
+        (lambda d: d.update(isolation="bogus"), "unknown isolation mode"),
+        (lambda d: d.update(harness="aider"), "unknown harness"),
+        (lambda d: d.update(limits={}), "unknown key"),
+        (lambda d: d.pop("isolation"), "missing key"),
+    ],
+)
+def test_record_invalid_contents_are_classified(tmp_path, mutate, reason):
+    """Anything the reader cannot trust is RecordInvalidError - never a silent
+    default. Unknown keys and any other schemaVersion are refused: there is
+    one version and no upgrade path."""
+    import json
+
+    from treebox import record
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(_record_for(wt))
+    path = record.record_path(wt)
+    data = json.loads(path.read_text())
+    mutate(data)
+    path.write_text(json.dumps(data))
+    with pytest.raises(record.RecordInvalidError, match=reason) as exc:
+        record.load(wt)
+    assert exc.value.path == path
+    path.write_text("{not json")
+    with pytest.raises(record.RecordInvalidError, match="invalid JSON"):
+        record.load(wt)
+
+
+@pytest.mark.parametrize("name", ["/etc", "../etc", "a/b", ".", "..", "", "x y"])
+def test_template_names_are_identifiers_never_paths(name, tmp_path, monkeypatch):
+    """A template name selects a directory under the operator-owned locations
+    only: paths and traversal are refused by the resolver and by config
+    validation alike (issue #57)."""
+    from treebox import assets
+    from treebox.config import validate_config
+
+    monkeypatch.setenv("TREEBOX_HOME", str(tmp_path))
+    with pytest.raises(assets.TemplateNameError):
+        assets.template_dir(name)
+    with pytest.raises(ValueError, match="Invalid template name"):
+        validate_config(Config(template=name))
+
+
+def test_template_dir_override_still_wins_for_any_valid_name(tmp_path, monkeypatch):
+    """$TREEBOX_TEMPLATE_DIR stays the operator's explicit override."""
+    from treebox import assets
+
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tmp_path))
+    assert assets.template_dir("anything") == tmp_path
 
 
 def test_host_git_pins_exec_shaped_config(monkeypatch: pytest.MonkeyPatch):

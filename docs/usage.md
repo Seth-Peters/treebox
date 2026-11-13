@@ -71,7 +71,7 @@ branch (`feature/auth` → `feature--auth`; a placeholder drops its `treebox/`
 prefix first, so `treebox/a/b` → `a--b`) unless you pass `NAME` too. It is
 also the deliberate way to resume a branch you own: `create NAME` for a branch
 that already exists (locally or on origin) is a loud `BRANCH_EXISTS` conflict,
-never a silent adoption of old work.
+never a silent reuse of old work.
 
 Sandbox any of these by picking docker isolation:
 
@@ -228,7 +228,9 @@ Re-enters the worktree and launches the agent. By default it reuses the
 harness the worktree was **provisioned with** (`create -H codex` then plain
 `enter` launches codex, not the config default); an explicit `--harness` is a
 per-session override that launches that agent this time without changing what's
-recorded on disk. The sandbox **template** is reused the same way: a worktree
+recorded on disk. All recorded choices come from the worktree's
+[host-owned record](how-it-works.md#the-host-owned-record), never from files a
+sandboxed agent can write. The sandbox **template** is reused the same way: a worktree
 created with `--template node` re-renders that template on `enter`, not the
 config default, and an explicit `--template` is a per-session override. The
 recorded **isolation** mode also wins over the config default; a conflicting
@@ -238,8 +240,7 @@ worktree. For docker worktrees, the recorded firewall choice is reused too, so
 config.
 Dependencies re-sync **only if the lockfile changed** since the last setup
 (treebox stores the hash in the worktree's private git dir, so it never shows
-up in `git status`); a re-sync preserves the recorded harness and template
-rather than stamping in the session's choice. If a previous run died before
+up in `git status`); a re-sync never changes the record. If a previous run died before
 setup completed, `enter` finishes the setup even though the recorded hash
 matches, instead of launching into a half-built tree. Anything after `--` is
 passed through to the agent. `--cold` forces a cache-bypassing re-sync.
@@ -301,8 +302,9 @@ $ treebox list
 
 Sorted by recency — the worktree you want is almost always the one that just
 committed. The **name** is the stable handle; the **branch** is read live.
-A worktree's **isolation** is read from its recorded creation-time state;
-legacy worktrees or registrations whose state is unavailable show `unknown`
+A worktree's **isolation** is read from its host-owned record;
+worktrees without a record (for example made by an older treebox)
+or worktrees with an invalid record show `unknown`
 instead of being mislabeled with the current config default. The muted
 **Root** footer shows the discovery root. It does not show the intermediate
 directories of nested worktrees; use `list --json` for each full `path`.
@@ -427,16 +429,20 @@ main checkout has uncommitted changes. It takes the normal confirmation path
 instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
 touching the main checkout's files. Container cleanup survives the corruption
-too: teardown reads the worktree's recorded isolation and template through
-git's own registration rather than the missing pointer, so a corrupt docker
-worktree is still torn down with the runner it was created with. Volume
-ownership comes separately from the host-owned resource manifest and is never
-read from that sandbox-writable state.
+too: teardown reads the worktree's isolation mode from its host-owned
+record, which lives beside the worktree and does not depend on the `.git`
+pointer, so a corrupt docker worktree is still torn down with the runner it was
+created with. Volume ownership comes separately from the host-owned resource
+manifest and is never read from sandbox-writable state. Teardown removes the
+record with the worktree.
 
-If a worktree's recorded isolation mode is unknown (corrupt or hand-edited
-state), teardown refuses it as a conflict rather than guessing how to drive its
-container — the same stance `enter` takes. Pass `--skip-container` to remove the
-tree and its branch anyway and clear any leftover container yourself.
+`teardown` is also the recovery for a worktree without a usable record
+(`RECORD_MISSING` / `RECORD_INVALID` on `enter`, for example one made by an
+older treebox): it needs no extra flag. Without a record, a worktree that has
+the runner-owned resource manifest is torn down as a docker worktree (its
+container, image and manifest go too), and any other as a host worktree. Then
+`treebox create` it again. The dirty-worktree and confirmation rules above
+apply as usual.
 
 ## `doctor` — is this host ready?
 
@@ -581,8 +587,8 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 
 | `error.code` | Exit | Common trigger |
 | ------------ | :--: | -------------- |
-| `INVALID_CONFIG` | `2` | Bad config file or invalid `--isolation` / `--harness`. |
-| `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, uses the reserved `treebox/` prefix, or `template init` has an invalid or reserved name. |
+| `INVALID_CONFIG` | `2` | Bad config file or invalid `--isolation` / `--harness` / `--template` (a template name is an identifier, never a path). |
+| `INVALID_NAME` | `2` | `create NAME` is not slash-separated lowercase slugs, or uses the reserved `treebox/` prefix; or a `template init` / `template path` name is not a template identifier, or `template init` names the reserved staging name. |
 | `INVALID_BRANCH` | `2` | `create NAME` or `--checkout` names an invalid git ref. |
 | `NOT_A_REPO` | `2` | `--repo` is not a git repo. |
 | `INVALID_ROOT` | `2` | The worktree root (`--root` or `root` in config), or its nearest existing parent, is not a directory. Every command that takes `--root` checks it. |
@@ -603,8 +609,10 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. Also raised, rarely, when the repository lock that parallel `create` / `teardown` calls queue on has been held for over five minutes: another operation is stuck, not merely busy. |
-| `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (corrupt or hand-edited state). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
+| `RECORD_MISSING` | `5` | `enter`: the worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (made by an older treebox, or the record was deleted) - `treebox teardown <name>`, then `treebox create` again. |
+| `RECORD_INVALID` | `5` | `enter` / resumed `create`: the host-owned record does not parse (another `schemaVersion`, an unknown isolation mode or harness, or bound to another path) - `treebox teardown <name>`, then `treebox create` again. |
+| `RECORD_CONFLICT` | `5` | A resumed `create` of a half-built worktree asks for different settings than its record holds - re-run with the recorded settings from the hint, or tear it down. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `FIREWALL_FAILED` | `1` | The sandbox firewall failed to initialize. See [firewall recovery](#docker-entry-and-firewall-recovery). |

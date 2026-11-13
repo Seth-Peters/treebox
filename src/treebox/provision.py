@@ -20,7 +20,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
-from . import ecosystems, git, locking, state
+from . import ecosystems, git, locking, record, state
 from .config import Config
 from .harnesses import Harness
 from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
@@ -95,12 +95,32 @@ class BranchInUseError(ProvisionError):
 class BranchConflictError(ProvisionError):
     """The branch an explicit ``create NAME`` would create already exists
     (exit 5, BRANCH_EXISTS). ``create`` promises a fresh branch off
-    origin/<base>; silently adopting an existing one would be a stale-code
+    origin/<base>; silently reusing an existing one would be a stale-code
     hazard — resuming existing work is ``--checkout``'s job."""
 
     def __init__(self, branch: str, where: str) -> None:
         super().__init__(f"Branch '{branch}' already exists {where}.")
         self.hint = f"Resume it with `treebox create --checkout {branch}`, or pick another name."
+
+
+class RecordConflictError(ProvisionError):
+    """A resumed ``create`` asked for a different policy than the host-owned
+    record of the half-built worktree holds (exit 5, RECORD_CONFLICT)."""
+
+    def __init__(self, name: str, prior: record.WorktreeRecord) -> None:
+        super().__init__(
+            f"Worktree '{name}' was created with different settings: isolation "
+            f"{prior.isolation}, firewall {'on' if prior.firewall else 'off'}, template "
+            f"{prior.template}, harness {prior.harness}, base {prior.base}."
+        )
+        self.path = record.record_path(prior.worktree)
+        firewall = "--firewall" if prior.firewall else "--no-firewall"
+        self.hint = (
+            f"Finish it with the recorded settings: treebox create {name} "
+            f"--isolation {prior.isolation} {firewall} --template {prior.template} "
+            f"-H {prior.harness} --base {prior.base} - or tear it down "
+            f"(treebox teardown {name}) and create it again."
+        )
 
 
 @dataclass
@@ -186,6 +206,7 @@ def dry_run_plan(
         resuming = _is_resumable_unprovisioned_worktree(repo, wt, branch)
         if not resuming:
             raise _slug_conflict_for_existing_path(repo, wt)
+        _check_resume_policy(wt, _creation_record(config, runner, wt, config.harness))
     else:
         _check_requested_branch(repo, branch=branch, existing_branch=existing_branch)
         _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
@@ -464,46 +485,60 @@ def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
     return copied
 
 
-def _record_runner(
-    worktree: Worktree, runner: Runner, harness: str, firewall: bool, template: str
-) -> None:
-    """Persist the runner *before* setup runs. Setup is what builds a docker
-    image and starts its container, so if it fails we'd otherwise be left with a
-    container and no record of which runner owns it — an un-tearable orphan.
-    Runner-owned metadata is initialized first so destructive host cleanup
-    never needs to trust the sandbox-writable worktree state."""
-    runner.initialize(worktree)
-    state.save(
-        worktree.path,
-        state.WorktreeState(
-            base=worktree.base,
-            isolation=runner.name,
-            harness=harness,
-            lockfile_hash="",
-            provisioned=False,
-            firewall=firewall,
-            template=template,
-        ),
+def _creation_record(
+    config: Config, runner: Runner, wt: Worktree, harness: str
+) -> record.WorktreeRecord:
+    """The policy a ``create`` with this config records for ``wt``."""
+    return record.WorktreeRecord(
+        worktree=wt.path,
+        base=wt.base,
+        isolation=runner.name,
+        harness=harness,
+        firewall=config.firewall,
+        template=config.template,
     )
 
 
-def _record_hash(
-    worktree: Worktree,
-    runner: Runner,
-    harness: str,
-    firewall: bool,
-    template: str,
-) -> None:
+def _check_resume_policy(wt: Worktree, policy: record.WorktreeRecord) -> bool:
+    """Whether ``wt`` already has a record; raise unless it equals ``policy``.
+
+    A resumed create (an earlier run died before setup finished) must restate
+    the recorded policy: the sandbox-writable ``provisioned`` flag decides
+    whether create resumes, so a resume must never be a way to change the
+    policy of an existing worktree. An invalid record is not overwritten either
+    (it is RECORD_INVALID: tear the worktree down and create it again). Read-only,
+    so ``--dry-run`` fails exactly like a real run."""
+    try:
+        prior = record.load(wt.path)
+    except record.RecordMissingError:
+        return False
+    if prior != policy:
+        raise RecordConflictError(wt.name, prior)
+    return True
+
+
+def _record_policy(wt: Worktree, policy: record.WorktreeRecord) -> None:
+    """Persist the host-owned record *before* any runner resource depends on
+    it. Setup is what builds a docker image and starts its container, so if it
+    fails we'd otherwise be left with a container and no record of which runner
+    owns it - an un-tearable orphan."""
+    if not _check_resume_policy(wt, policy):
+        record.save(policy)
+
+
+def _record_setup_started(wt: Worktree, runner: Runner) -> None:
+    """Initialize runner-owned metadata (so destructive host cleanup never
+    needs to trust sandbox-writable state), then observe that setup has not
+    completed yet."""
+    runner.initialize(wt)
+    state.save(wt.path, state.WorktreeState(lockfile_hash="", provisioned=False))
+
+
+def _record_hash(worktree: Worktree) -> None:
     state.save(
         worktree.path,
         state.WorktreeState(
-            base=worktree.base,
-            isolation=runner.name,
-            harness=harness,
-            lockfile_hash=ecosystems.lockfile_hash(worktree.path),
-            provisioned=True,
-            firewall=firewall,
-            template=template,
+            lockfile_hash=ecosystems.lockfile_hash(worktree.path), provisioned=True
         ),
     )
 
@@ -517,17 +552,19 @@ def _finish_setup(
     cold: bool,
     reporter: Reporter,
 ) -> Outcome:
-    """The shared tail of every create path: guard, submodules, .env, setup."""
+    """The shared tail of every create path: record, guard, submodules, .env,
+    setup."""
+    # The creation policy is on disk, outside every sandbox mount, before
+    # anything depends on it: `enter`/`teardown` read it back instead of the
+    # config default or the sandbox-writable state.
+    _record_policy(wt, _creation_record(config, runner, wt, harness.name))
     ensure_root_ignored(wt.repo, config.root)
     install_push_guard(wt, reporter)
     copy_submodules(wt.repo, wt.path, reporter)
     copy_env(wt.repo, wt.path, config.env_file, reporter)
-    # runner on disk before setup can leave a container; firewall + template
-    # persisted so `enter`/`teardown` honor the created-time choices instead of
-    # the config default.
-    _record_runner(wt, runner, harness.name, config.firewall, config.template)
+    _record_setup_started(wt, runner)
     runner.setup(wt, cold=cold, reporter=reporter)
-    _record_hash(wt, runner, harness.name, config.firewall, config.template)
+    _record_hash(wt)
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=[]), created=True)
 
 
@@ -798,6 +835,7 @@ def enter(
     *,
     repo: str,
     path: Path,
+    base: str,
     harness: Harness,
     cold: bool,
     args: list[str],
@@ -805,8 +843,10 @@ def enter(
 ) -> Outcome:
     """Re-prepare an existing worktree: refresh .env, re-run setup if the
     lockfile changed since last setup or a prior setup never completed
-    (recorded provisioned=False). The branch is read live — the agent may
-    have renamed it since create."""
+    (observed provisioned=False). The branch is read live - the agent may
+    have renamed it since create. ``config`` is already reconciled with the
+    host-owned record (``cli._reconcile_with_record``) and ``base`` is the
+    recorded base; nothing here reads policy from sandbox-writable state."""
     # ``path`` is the exact registered path the ref resolved to (possibly a
     # descendant of the configured root), never a root/name reconstruction.
     wt = Worktree.at(repo, path)
@@ -822,7 +862,7 @@ def enter(
 
     prior = state.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
-    wt = Worktree.at(repo, path, branch=branch, base=prior.base if prior else "")
+    wt = Worktree.at(repo, path, branch=branch, base=base)
 
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential
@@ -839,17 +879,7 @@ def enter(
         else:
             reporter.info("dependencies changed since last setup — re-syncing")
         runner.setup(wt, cold=cold, reporter=reporter)
-        # Preserve the recorded harness: ``harness`` is this session's launch
-        # choice (possibly an explicit one-off -H override), and a dep re-sync
-        # must not let it overwrite what the worktree was provisioned with.
-        # ``config.firewall`` is safe to re-record as-is: the CLI already
-        # reconciled it to the created-time choice (cli._reconcile_with_state).
-        # The template is preserved the same way as the harness: a recorded
-        # value wins over a config-default ``--template``, so a dep re-sync can
-        # never overwrite the created-time template with the config default.
-        recorded = prior.harness if prior and prior.harness else harness.name
-        recorded_template = prior.template if prior and prior.template else config.template
-        _record_hash(wt, runner, recorded, config.firewall, recorded_template)
+        _record_hash(wt)
     else:
         reporter.note("deps", "unchanged · skipping setup")
 

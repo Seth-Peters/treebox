@@ -80,32 +80,73 @@ dependencies only when they actually changed — and `list` show `fresh` /
 `stale` at a glance. It also records whether setup ever completed: `enter`
 finishes an interrupted setup instead of skipping it as unchanged.
 
-The same private state records the worktree's creation-time choices. For an
-existing worktree, `enter` and `teardown` recover the recorded isolation and
-template instead of drifting to today's config defaults; `enter` also reuses the
-recorded firewall, and it reuses the recorded harness unless a per-session
-harness override is passed. That state is sandbox-writable because the Docker
-runner mounts the git common directory, so it never authorizes destructive
-host cleanup. Before first Docker setup, the runner writes exact per-workspace
-image and volume ownership to
+That private state holds only *observations* (the lockfile hash and whether
+setup completed). It is sandbox-writable, because the Docker runner mounts the
+git common directory, so it never decides policy and never authorizes
+destructive host cleanup. treebox reads and writes it without following links:
+a symlink planted at the state file reads as "no state", and a write replaces
+the link instead of writing through it. A forged observation can at most make
+`enter` re-run setup under the recorded policy.
+
+### The host-owned record
+
+The worktree's **creation policy** - isolation, firewall, sandbox template,
+harness, and base - lives in a host-owned record outside every sandbox mount:
+
+```text
+<worktree-parent>/.records/<name>.json
+```
+
+Here, `<worktree-parent>` is the selected worktree's immediate parent, which
+can be below the configured discovery root (the same parent that holds
+`.locks/` and `.containers/`). `create` writes the record atomically, under the
+worktree lock, before any runner resource depends on it. The record is
+versioned (`schemaVersion`) and bound to the registered worktree path it
+describes. `enter` reads the policy only from this record: it reuses the
+recorded isolation, firewall, and template, and the recorded harness unless a
+per-session `--harness` is passed; a per-session `--template` is the
+operator's override for one session. An explicit `--isolation` that disagrees
+with the recorded mode is a conflict, not an override. `teardown` takes the
+isolation mode from the record and removes the record with the worktree.
+
+A sandboxed agent therefore cannot choose host execution, drop its firewall, or
+point its next sandbox at a template it wrote: none of that is in files it can
+reach. A resumed `create` (an earlier run died before setup finished) must
+restate the recorded policy, so a forged "setup not finished" flag cannot turn a
+plain `create NAME` into a policy change (`RECORD_CONFLICT`).
+
+**A worktree without a usable record is recreated.** A worktree made by an
+older treebox has no record, and a record that does not parse (another
+`schemaVersion`, an unknown isolation mode or harness, or bound to another
+path, for example after the worktree root was moved) is invalid. `enter`
+refuses both with `RECORD_MISSING` / `RECORD_INVALID` (exit `5`) and launches
+nothing; it never falls back to the config default or to the sandbox-writable
+state, and there is no upgrade path. `list` still shows the worktree, with an
+unknown isolation. Fix it with `treebox teardown <name>`, then
+`treebox create` again (`--checkout <branch>` keeps its branch). Teardown
+needs no record: without one, a worktree that has the runner-owned resource
+manifest below is torn down as a docker worktree, and any other as a host
+worktree.
+
+**Host-isolation worktrees** get the same record. They have no sandbox, so the
+agent can reach the record like any other host file; the record is not a
+boundary against a host-run agent, which already has your full user
+privileges. It gives both modes one code path, so the mode of a worktree is
+never read from its git state and a host worktree is never silently treated
+as anything else.
+
+Before first Docker setup, the runner also writes exact per-workspace image
+and volume ownership to
 `<worktree-parent>/.containers/<name>/treebox-resources.json`, outside every
-sandbox mount. Here, `<worktree-parent>` is the selected worktree's immediate
-parent, which can be below the configured discovery root.
-`teardown --remove-volumes` validates and trusts only that
+sandbox mount. `teardown --remove-volumes` validates and trusts only that
 manifest, so it can still remove volumes when the container and user template
 are both gone.
-To recover creation-time choices, `teardown` reads worktree state through the
-repo's own worktree registration rather than the worktree's `.git` pointer,
-so the recorded choices survive even a corrupt worktree whose pointer file
-is gone.
-An explicit `--isolation` that disagrees with the recorded mode is a conflict,
-not an override.
 
-Older worktrees without a resource manifest remain tear-downable, but volume
-removal is skipped with a warning. The same safe behavior applies if an
-operator manually deletes the rendered config directory: treebox
-does not guess ownership from volume names, current templates, container
-mounts, or sandbox-writable state.
+If an operator manually deletes the rendered config directory (and with it the
+manifest) of a docker worktree that still has its record, the worktree stays
+tear-downable, but image and volume removal are skipped with a warning:
+treebox does not guess ownership from volume names, current templates,
+container mounts, or sandbox-writable state.
 
 ## Warmth lives in the cache, not the tree
 
@@ -126,6 +167,12 @@ edit the config that defines its own sandbox.**
 - The container template (Dockerfile, `container.json`, firewall setup) is
   **operator-owned** — bundled with treebox or copied to your
   `~/.treebox/templates/`, never read from the target repo.
+- A template **name** is an identifier (letters, digits, `.`, `_`, `-`), never
+  a path: an absolute path or `..` is refused, so a name can only select a
+  directory under the operator-owned locations (`$TREEBOX_TEMPLATE_DIR`, then
+  `~/.treebox/templates/<name>`, then the bundled `default`).
+- The choice of template is in the [host-owned record](#the-host-owned-record),
+  not in sandbox-writable state.
 - It is rendered into a directory *beside* the worktree, outside the container
   mount. Inside the box, the agent simply cannot reach it.
 - The target repo's own container config, treebox config, and setup hooks are
