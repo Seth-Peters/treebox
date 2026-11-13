@@ -5,7 +5,74 @@ All notable changes to treebox will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+Entries are written at release time, from the squash-commit titles of the pull
+requests merged since the previous tag, so this file has no `[Unreleased]`
+section. To see what has merged since the latest release, run
+`git log --oneline <latest-tag>..origin/main`.
+
+## [1.0.2] - 2026-07-27
+
+### Fixed
+
+- Submodule copies no longer break git in the new worktree: a submodule's
+  `.git` pointer file (or an old-style embedded `.git` directory, nested
+  submodules included) is no longer copied, so `git status`, `git diff` and
+  `git add` work instead of exiting 128 with "not a git repository" (#18).
+
+- `--print` and `--json` sessions on a docker worktree whose container has
+  stopped now restart the container, and re-apply the `--firewall` egress
+  lockdown, before they emit `entry_command`, so the printed command works on
+  replay (#19).
+
+- A docker `--template` that does not exist is now `TEMPLATE_NOT_FOUND`
+  (exit 3) on `create`, `enter` and `--dry-run`, not the exit-1 `ERROR`
+  catch-all. `create` checks the template before it makes any git state, so a
+  missing template no longer leaves a worktree and branch behind (#22).
+
+- `teardown --remove-volumes` now removes a docker worktree's volumes even
+  when its container and its recorded template are gone: the volume names are
+  recorded in the worktree state when it is provisioned. A worktree whose
+  directory was deleted by hand still gets its container and volumes cleaned
+  up (#23).
+
+- `enter` refuses a corrupt worktree whose `.git` pointer file is missing with
+  `SLUG_CONFLICT` (exit 5) and the `treebox teardown <name>` recovery hint,
+  instead of re-running setup against the main checkout and writing state into
+  its `.git/` (#27).
+
+- An unknown top-level key in `config.toml` is now an `INVALID_CONFIG` error
+  (exit 2) with a did-you-mean suggestion, instead of being silently ignored.
+  A `caches` value that is not a table gets the same clean error (#28).
+
+- A template with a malformed or unreadable `container.json`, or a
+  `--firewall` run with a template that has no `firewall.json`, now fails with
+  `TEMPLATE_INVALID` (exit 1) and a `treebox template path <name>` hint instead
+  of a traceback. `create` checks this before it makes any git state.
+  `template list` shows which templates can serve `--firewall` (a new FIREWALL
+  column, and new `invalid` and `firewall` fields in `--json`) (#29).
+
+- `doctor --json` now reports `ok: false` whenever `doctor` exits 1 (for
+  example when the Docker daemon is unreachable), and off-TTY `doctor` output
+  no longer hard-wraps long paths onto a new line (#30).
+
+- The human `list` table shows each worktree's recorded isolation (`host` or
+  `docker`, `unknown` only when its state cannot be read), names the worktree
+  root in a footer, and keeps the name, branch and isolation columns readable
+  at narrow widths. The `--json` payload is unchanged (#31).
+
+- A missing git binary is now a clean `GIT_MISSING` error (exit 1, with an
+  install hint) on every command instead of a traceback, and `doctor` still
+  renders its full checklist with the git row failed (#33).
+
+- When the worktree root contains the repository (for example `root = ".."`),
+  `list`, the teardown chooser and ref resolution no longer show the main
+  checkout as a worktree, and `teardown` refuses it with `MAIN_WORKTREE`
+  (exit 5) instead of deleting the repository (#35).
+
+### Fixed
+
+- Docker isolation now checks the [non-root user requirement](docs/install.md#what-each-isolation-mode-needs)
+  before provisioning (#60).
 
 ### Changed
 

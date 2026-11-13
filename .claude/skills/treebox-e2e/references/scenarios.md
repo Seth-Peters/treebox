@@ -50,9 +50,10 @@ Conventions used below:
       Expect: exit 0; JSON on stdout with `ok`, `isolation`, `checks[]`,
       `advisories`; `ok` true iff every hard check passed.
 - [ ] **A4 doctor docker** — `tb doctor --repo "$REPO" --isolation docker --json`
-      Expect: exit 0 with `ok: true` when a docker daemon is available — this
-      result **gates phase H**; otherwise a docker hard-check failure and exit 1
-      (then mark H skipped, not failed).
+      Expect: exit 0 with `ok: true` when the
+      [Docker requirements](../../../../docs/install.md#what-each-isolation-mode-needs)
+      are met. This result **gates phase H**. If the Docker check fails, expect
+      exit 1 and mark H skipped, not failed.
 - [ ] **A5 bad isolation** — `tb doctor --isolation qemu`
       Expect: exit 2; message names the valid values.
 
