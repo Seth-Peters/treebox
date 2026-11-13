@@ -10,8 +10,8 @@ sh -c 'cd __ROOT__/wts/golden-host && export TREEBOX_NAME=golden-host TREEBOX_ID
     base            main
     isolation       host  →  claude
 
-  ✓ fetch           origin up to date
   ✓ ports           20000-20009 · TREEBOX_PORT_BASE=20000
+  ✓ fetch           origin up to date
   ✓ worktree        golden-host from origin/main
   ✓ push guard      treebox/* refs are un-pushable
   ✓ secrets         copied

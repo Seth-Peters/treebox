@@ -3,9 +3,9 @@
 #
 # Runs a fixed matrix of commands: doctor, create --print/--dry-run,
 # enter --print, list, and their --json forms, for both isolations, against a
-# hermetic throwaway repo, normalizes the machine-specific bits (paths,
-# uid/gid, git version, container-name digests), and diffs the result against
-# the committed snapshots in tests/golden/. Behavior-preserving changes must
+# hermetic throwaway repo, normalizes paths, fixture uid/gid, git version,
+# and container-name digests, then diffs against the committed snapshots in
+# tests/golden/. Behavior-preserving changes must
 # leave every snapshot byte-identical: the "output identical" gate is
 # mechanical, not eyeballed.
 #
@@ -34,9 +34,9 @@ ROOT="$(cd "$ROOT" && pwd -P)"
 WORK="$ROOT/out"
 trap 'rm -rf "$ROOT"' EXIT
 
-TREEBOX="$PWD/.venv/bin/treebox"
-[[ -x "$TREEBOX" ]] || uv sync --quiet
-[[ -x "$TREEBOX" ]] || { echo "FATAL: $TREEBOX not found after uv sync" >&2; exit 1; }
+VENV="$PWD/.venv"
+[[ -x "$VENV/bin/treebox" ]] || uv sync --quiet
+[[ -x "$VENV/bin/treebox" ]] || { echo "FATAL: $VENV/bin/treebox not found after uv sync" >&2; exit 1; }
 
 mkdir -p "$WORK" "$ROOT/tbhome" "$ROOT/home-empty"
 
@@ -122,11 +122,24 @@ WTS="$ROOT/wts"
 GITVER="$(git --version | awk '{print $3}')"
 GITVER_PARSED="$(git --version | perl -lane 'my $s = $F[-1]; my @parts = split /\./, $s; my @nums; for my $p (@parts[0..2]) { $p //= ""; $p =~ s/\D//g; push @nums, length($p) ? $p : 0; } push @nums, 0 while @nums < 3; print join ".", @nums[0..2]')"
 export GD_ROOT="$ROOT" GD_PRIVROOT="/private$ROOT" GD_GITVER="$GITVER" GD_GITVER_PARSED="$GITVER_PARSED"
+# Use a fixed non-root identity so Docker cases also run when the process is root.
 # Literal (not pattern) uid/gid substitutions, so a regression that changed
 # one number into another is a snapshot diff, not silently normalized away.
-GD_UID="$(id -u)"
-GD_GID="$(id -g)"
+GD_UID=1000
+GD_GID=1000
 export GD_UID GD_GID
+
+TREEBOX=("$VENV/bin/python" -c '
+import os
+
+from treebox import system
+from treebox.cli import app
+
+system.identity = lambda: system.Identity(
+    uid=int(os.environ["GD_UID"]), gid=int(os.environ["GD_GID"])
+)
+app(prog_name="treebox")
+')
 
 normalize() {
   perl -0pe '
@@ -168,7 +181,7 @@ run_case() {
       -u NO_COLOR -u FORCE_COLOR -u CLICOLOR_FORCE \
       HOME="$home" TREEBOX_CONFIG="$CFG" TREEBOX_HOME="$ROOT/tbhome" \
       PATH="$SHIM:$PATH" COLUMNS=80 \
-      "$TREEBOX" "$@" >"$WORK/$name.stdout" 2>"$WORK/$name.stderr"
+      "${TREEBOX[@]}" "$@" >"$WORK/$name.stdout" 2>"$WORK/$name.stderr"
   rc=$?
   set -e
   {

@@ -55,7 +55,7 @@ run (pluggable)** — with three registries that define everything swappable.
 Module map:
 
 - **`provision.py`** owns the host-side half, identical for every runner:
-  `fetch → resolve branch → write record (setup pending) → git worktree add →
+  `write record (setup pending) → fetch → resolve branch → git worktree add →
   install pre-push guard → copy submodules → copy .env → runner.setup
   (cache-backed) → record the setup result → hand to runner`. An explicit
   `create NAME` uses the name as the branch, created fresh from
@@ -74,6 +74,12 @@ Module map:
   CLI-facing `DestinationConflictError` (exit 5, `DESTINATION_CONFLICT`) and
   `SubmoduleCopyFailedError` (exit 1, `SUBMODULE_COPY_FAILED`). `cli.py`
   classifies `ProvisionError`s only and reads `error.path` off the base class.
+  `copy_submodules` follows the worktree branch's own `.gitmodules` (never
+  written): it copies only paths the main checkout also declares and has on
+  disk, and skips the rest with a note. No `git submodule update` runs, so the
+  copied content mirrors the main checkout. `plan_submodules` is that one
+  selection rule; `--dry-run` applies it to the planned revision's
+  `.gitmodules` (`git.submodule_paths_at_revision`), so plan and run agree.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
   hides its autonomous launch argv, host login dir, staged login files, and
   login advice behind a small method interface; `VALID_HARNESSES` and the
@@ -102,8 +108,8 @@ Module map:
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
   `create` and `enter` share `_run_session` for runner preflight, the
   worktree lock (see `locking.py`), provision error classification, and the final
-  `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
-  so the printed `entry_command` is never dead on replay).
+  `--json`/`--print`/launch fork. Every path first calls `runner.prepare_entry`.
+  See its contract in `runners/base.py`.
   `_reconcile_with_record` folds the host-owned record (`record.py`) into
   existing-worktree sessions before the runner and harness objects are
   resolved: recorded isolation conflicts with a mismatched explicit
@@ -115,6 +121,19 @@ Module map:
   output carrying a `schemaVersion` that only gains fields within a version —
   a breaking reshape bumps it (git-porcelain discipline). Agents
   branch on these, so don't change their meanings casually.
+- **`locking.py`** holds the three cross-process locks, on three keys.
+  `worktree_lock(path)` is per worktree and non-blocking: a second operation
+  on the *same* worktree fails fast (`LOCK_HELD`). `repo_lock(path)` is per
+  repository (keyed by the git common dir, so every root and linked worktree
+  shares it) and *waits*: `create` holds it from the fetch through
+  `git worktree add` (the port block and the record are written before it,
+  under the worktree lock only), `teardown` around `worktree remove`/`prune`/branch
+  delete, and the small writers of shared files (`extensions.worktreeConfig`,
+  `info/exclude`) take it too. Anything that writes git state shared by the
+  whole repository belongs under it; setup, container work, and the agent
+  session never do. `ports_lock` is machine-wide (see `ports.py`) and also
+  waits. Lock order is always worktree, then repo or ports; the repo and ports
+  locks are never nested in each other.
 - **`ecosystems.py`** detects package managers (uv, npm, pnpm, go, cargo),
   drives their cache-backed setup, and defines which manifest files feed the
   SHA-256 hash. "Warmth" lives in shared host caches, not the tree. Its
@@ -130,12 +149,13 @@ Module map:
   bound to the registered worktree path, written atomically by `create`
   under the worktree lock before any runner resource depends on it.
   API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
-  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. To
-  extend it, add a field to `WorktreeRecord` as a required key of the one
-  schema version. On `enter`, a missing or invalid record is a classified
-  error (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to
-  recreate the worktree (`teardown`, then `create`), never a fallback to
-  config defaults. `teardown` needs no record: without one it picks the
+  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. The
+  record format has never been released, so to extend it, add a field to
+  `WorktreeRecord` as a required key of the one schema version, without a
+  `SCHEMA_VERSION` bump and without an upgrade path. On `enter`, a missing or
+  invalid record is a classified error (`RECORD_MISSING` / `RECORD_INVALID`,
+  exit 5) whose recovery is to recreate the worktree (`teardown`, then
+  `create`), never a fallback to config defaults. `teardown` needs no record: without one it picks the
   docker runner when the runner-owned resource manifest exists
   (`runners.docker.has_resource_manifest`), else the host runner. Besides the
   policy the record holds the host-observed `setup` result (a required key):
@@ -149,7 +169,8 @@ Module map:
   for which blocks are taken, across every repo and root; the record holds
   only a copy. `reserve` (create, enter: ledger first, then the record copy)
   and `release` (teardown, after the record is gone) run under
-  `locking.ports_lock`, a waiting lock taken after the worktree lock. A stale
+  `locking.ports_lock`, a waiting lock taken after the worktree lock and never
+  inside `repo_lock` (create reserves before it, teardown releases after it). A stale
   entry (no directory, no git registration, no lock holder) is reclaimed by
   the next allocation, so a crash between two writes neither leaks nor
   double-allocates a block. The range and block size are user config only
@@ -161,14 +182,15 @@ Module map:
   `list` reports). A failed setup step is a failed `create`/`enter`
   (`SETUP_FAILED`, exit 1, output in `<parent>/.logs/<leaf>.setup.log`).
 - **`cleanup.py`** owns one worktree's cleanup through `cleanup_one`: runner
-  resources, then the worktree and git registration, then the ownership record
-  and port release.
+  resources, then the worktree, git registration and branch (under
+  `locking.repo_lock`), then the ownership record, then the port release
+  (both outside the repo lock).
   A failed step keeps the resources and records a retry needs (the record,
   and the docker resource manifest that picks the runner when the record is
   missing or invalid). Git refusal never falls back to filesystem deletion.
   `CleanupResult` returns completed effects and remaining resources.
   Incomplete cleanup fails with `TEARDOWN_INCOMPLETE` (exit 1); the same
-  command retries. The CLI owns batch validation, locking,
+  command retries. The CLI owns batch validation, the worktree lock,
   confirmation and result rendering; runner adapters own their resources.
   Worktree health (`healthy`, `directory_missing`,
   `invalid_linkage`, `unregistered`, `unreadable_state`) is classified once,
@@ -183,8 +205,10 @@ Module map:
   registration becomes a candidate (it also owns root-alias spelling). See the
   [path identity contract](docs/how-it-works.md#names-are-identity-branches-are-mutable).
   Branch-shaped inputs (`create feature/auth`,
-  `create --checkout feature/auth`) derive the name by flattening slashes to
-  `--` (`feature--auth`); generated names come from `names.py`.
+  `create --checkout feature/auth`) derive the name in one place,
+  `derive_name`: drop a `treebox/` placeholder prefix, then flatten slashes to
+  `--` (`feature--auth`, `treebox/a/b` -> `a--b`), so treebox never nests a
+  worktree; generated names come from `names.py`.
   `worktree_id(path)` is the one path hash: `TREEBOX_ID` (10 lowercase hex,
   documented contract) and the docker container/image name suffix.
   `Worktree.treebox_env()` is what both runners export to setup and the agent
@@ -255,10 +279,13 @@ What a sandboxed backend must **guarantee** (the security invariants):
   sandbox-writable worktree state never records Docker volume ownership.
 - The shared `.git/hooks` is presented read-only (host git executes it).
 - Egress lockdown, when enabled, exists before any workspace-derived code
-  runs (firewall-before-post-create), and is re-established when
-  `prepare_entry` restarts a stopped sandbox (iptables rules don't survive
-  a container restart).
+  runs and at every entry. For runner changes, read the `prepare_entry`
+  contract in `runners/base.py`. For Docker host access, read the
+  [operator-template firewall rules](docs/configuration.md#the-containerjson-schema).
 - Only user-level treebox config is ever read — never the target repo's.
+- Sandboxed runners must enforce the
+  [non-root user requirement](docs/install.md#what-each-isolation-mode-needs)
+  before provisioning.
 
 What a backend may **assume** (host locality):
 
@@ -282,6 +309,11 @@ needs path translation today, so building it would be indirection).
   exits `4` loudly. `--no-fetch` is the only (explicit) escape.
 - **Subscription auth only.** Agents launch via `~/.claude` / `~/.codex` logins;
   `ANTHROPIC_API_KEY` is never used.
+- **Parallel dispatch is safe.** Creates and teardowns of different worktrees
+  in one repo may run concurrently: shared git state is written only under
+  `locking.repo_lock`, and a failed `git worktree add` rolls back the branch
+  it created (`git.worktree_add` is all-or-nothing), so a retry never
+  dead-ends on `BRANCH_EXISTS`.
 - **Non-interactive friendly.** Data → stdout, diagnostics → stderr; color and
   spinners degrade when stderr is not a TTY; `--json` / `--print` / `--dry-run`
   exist for scripting and must keep working.
@@ -303,7 +335,7 @@ above is about the agents treebox launches, not this tooling.
 
 - Conventional Commit subjects (`feat(...)`, `fix:`, `docs:`); keep commits
   scoped and separate docs-only edits when practical.
-- Bundled bash assets (`Dockerfile`, `*.sh`, `container.json`) under
-  `src/treebox/assets/` ship as package data and are read via
+- Bundled bash assets (`Dockerfile`, `*.sh`, the `treebox-fetch` /
+  `treebox-online` build helpers, `container.json`) under `src/treebox/assets/` ship as package data and are read via
   `importlib.resources` — edit them in place rather than rewriting in Python.
 - Do not commit secrets or generated `.env` files.

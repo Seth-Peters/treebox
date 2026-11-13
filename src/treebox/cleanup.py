@@ -2,7 +2,9 @@
 
 Callers resolve the runner, validate the batch and hold the worktree lock.
 This module owns runner resources, worktree removal and ownership record
-removal and port release. Runner adapters retain ownership of their resource manifests.
+removal and port release, and takes the repository lock (after the worktree
+lock) for the git steps; the port release stays outside it. Runner adapters
+retain ownership of their resource manifests.
 """
 
 from __future__ import annotations
@@ -81,7 +83,20 @@ def cleanup_one(
             resources, "cleanup_incomplete", branch, resources.remaining, runner_error=runner_error
         )
 
-    removal, remaining = _remove_worktree(wt, force=force)
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
+    branch_deleted = False
+    branch_error = None
+    with locking.repo_lock(wt.repo):
+        removal, remaining = _remove_worktree(wt, force=force)
+        if not remaining and delete_branch and branch:
+            try:
+                git.delete_branch(wt.repo, branch)
+                branch_deleted = True
+            except git.GitError as exc:
+                branch_error = str(exc)
     if remaining:
         return CleanupResult(
             resources,
@@ -91,23 +106,20 @@ def cleanup_one(
             runner_error=runner_error,
         )
 
+    # The host-owned record goes last, after the worktree it describes: a
+    # failure above leaves it in place, so a retried teardown still knows the
+    # mode. It is not shared git state, so it stays outside the repo lock; the
+    # worktree lock the caller holds already covers it.
     record.remove(wt.path)
     # The record is gone, so a failed release leaves a stale ledger entry.
-    # The next allocation can reclaim it without a teardown retry.
+    # The next allocation can reclaim it without a teardown retry. Outside the
+    # repo lock: the ports lock is never nested in it.
     released_ports = None
     port_error = None
     try:
         released_ports = ports.release(wt.path)
     except (ports.PortsError, locking.LockError) as exc:
         port_error = str(exc)
-    branch_deleted = False
-    branch_error = None
-    if delete_branch and branch:
-        try:
-            git.delete_branch(wt.repo, branch)
-            branch_deleted = True
-        except git.GitError as exc:
-            branch_error = str(exc)
     return CleanupResult(
         resources,
         removal,

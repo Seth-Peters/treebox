@@ -22,6 +22,7 @@ import stat
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Literal
 
 from . import ecosystems, git, lifecycle, locking, ports, record
 from .config import Config
@@ -54,7 +55,7 @@ class DestinationConflictError(ProvisionError):
     sits at its destination. Nothing is ever removed to make room: the worktree
     tree is untrusted, and the entry may be the user's (or the branch's) own
     content. A submodule copy surfaces this as exit 5, DESTINATION_CONFLICT;
-    the managed-file copies (``.env``, ``.gitmodules``) catch it and skip."""
+    the managed ``.env`` copy catches it and skips."""
 
     def __init__(self, path: Path, message: str) -> None:
         super().__init__(message)
@@ -213,7 +214,10 @@ def install_push_guard(wt: Worktree, reporter: Reporter) -> None:
     hook = hooks / "pre-push"
     hook.write_text(script, encoding="utf-8")
     hook.chmod(0o755)
-    git.enable_worktree_config(wt.path)
+    # The extension flag lives in the config every worktree shares; the hooks
+    # path below is this worktree's own file and needs no repository lock.
+    with locking.repo_lock(wt.path):
+        git.enable_worktree_config(wt.path)
     git.set_worktree_hooks_path(wt.path, hooks)
     reporter.ok("push guard", _guard_detail(wt.branch))
 
@@ -271,10 +275,11 @@ def dry_run_plan(
         cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
         cmds.append(reserve)
     else:
+        # The real create reserves the block before it takes the repo lock.
+        cmds.append(reserve)
         if fetch:
             cmds.append(f"git -C {repo} fetch origin --quiet")
         plan = git.resolve_branch(repo, branch, base)
-        cmds.append(reserve)
         if plan.kind == "local":
             cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
             source_ref = plan.name
@@ -285,8 +290,7 @@ def dry_run_plan(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
     )
-    if git.has_gitmodules(repo):
-        cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
+    cmds.extend(_dry_run_submodules(repo, wt, source_ref))
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
     cmds.extend(runner.dry_run_setup(wt, cold=cold, source_ref=source_ref))
     return wt, cmds
@@ -335,10 +339,10 @@ def _is_directory_no_follow(path: Path) -> bool:
 
 
 def _copy_managed_file(src: Path, dest: Path, reporter: Reporter) -> bool:
-    """Copy a file treebox manages (``.env``, ``.gitmodules``) into the
+    """Copy a file treebox manages (``.env``) into the
     worktree; False when the worktree keeps a directory at that name.
 
-    A branch can commit ``.env/`` or ``.gitmodules/`` as a directory, and a
+    A branch can commit ``.env/`` as a directory, and a
     boxed agent can create one. That must neither crash provisioning nor cost
     the branch its content, so the copy is skipped with a warning and the
     worktree stays usable: the directory is left exactly as it is.
@@ -363,13 +367,15 @@ def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:
     except git.GitError:
         return  # not a git worktree; nothing git could ever track
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    content = exclude.read_text() if exclude.is_file() else ""
-    lines = content.splitlines()
-    if any(p in lines for p in patterns):
-        return
-    if content and not content.endswith("\n"):
-        content += "\n"
-    exclude.write_text(content + patterns[0] + "\n")
+    # A read-modify-write of a file every worktree of the repository shares.
+    with locking.repo_lock(tree):
+        content = exclude.read_text() if exclude.is_file() else ""
+        lines = content.splitlines()
+        if any(p in lines for p in patterns):
+            return
+        if content and not content.endswith("\n"):
+            content += "\n"
+        exclude.write_text(content + patterns[0] + "\n")
 
 
 def _ensure_env_ignored(worktree: Path) -> None:
@@ -426,9 +432,9 @@ def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bo
     return True
 
 
-def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | None:
-    """Validate an untrusted ``.gitmodules`` path; the repo-relative path to
-    copy, or None to skip.
+def _unsafe_submodule_path(repo: Path, rel: str) -> str | None:
+    """Why an untrusted ``.gitmodules`` path must not be copied (the warning
+    to show), or None when it is safe.
 
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
@@ -438,36 +444,99 @@ def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | Non
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
-        reporter.warn(f"skipping submodule with unsafe path: {rel!r}")
-        return None
+        return f"skipping submodule with unsafe path: {rel!r}"
     src = repo / p
     if src.is_symlink():
-        reporter.warn(f"skipping submodule behind a symlink: {rel!r}")
-        return None
-    if not src.is_dir():
-        return None  # not checked out in the source repo; nothing to copy
+        return f"skipping submodule behind a symlink: {rel!r}"
     if not src.resolve().is_relative_to(repo.resolve()):
-        reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
-        return None
-    return p
+        return f"skipping submodule escaping the repo: {rel!r}"
+    return None
+
+
+@dataclass(frozen=True)
+class SubmoduleStep:
+    """What provisioning does with one path the branch's ``.gitmodules``
+    declares: ``copy`` it from the main checkout, ``skip`` it (the main
+    checkout does not have it: a note), or ``refuse`` it (unsafe: a warning).
+    ``message`` is the note or the warning; empty for ``copy``."""
+
+    path: str
+    action: Literal["copy", "skip", "refuse"]
+    message: str = ""
+
+
+def plan_submodules(repo: str, declared: list[str]) -> list[SubmoduleStep]:
+    """Decide, without writing anything, what happens to each submodule path
+    the worktree's branch declares (``declared``, in its order).
+
+    The single selection rule for both ``copy_submodules`` and the dry-run
+    plan, so the plan cannot drift from the real run: a path is copied only
+    when it is safe, the main checkout ``repo`` declares the same path, and
+    has it on disk.
+    """
+    if not declared:
+        return []
+    source = Path(repo)
+    available = {Path(rel) for rel in git.submodule_paths(source)}
+    steps: list[SubmoduleStep] = []
+    for rel in declared:
+        refusal = _unsafe_submodule_path(source, rel)
+        if refusal is not None:
+            steps.append(SubmoduleStep(rel, "refuse", refusal))
+        elif Path(rel) not in available or not (source / rel).is_dir():
+            steps.append(SubmoduleStep(rel, "skip", f"skipped {rel} · not checked out in {repo}"))
+        else:
+            steps.append(SubmoduleStep(rel, "copy"))
+    return steps
+
+
+def _dry_run_submodules(repo: str, wt: Worktree, source_ref: str | None) -> list[str]:
+    """The submodule lines of the dry-run plan: ``plan_submodules`` over the
+    ``.gitmodules`` the real run will read - the planned revision's for a new
+    worktree (nothing is checked out), the tree on disk for a resumed one."""
+    if source_ref is not None:
+        declared = git.submodule_paths_at_revision(repo, source_ref)
+    else:
+        declared = git.submodule_paths(wt.path)
+    lines: list[str] = []
+    for step in plan_submodules(repo, declared):
+        if step.action == "copy":
+            lines.append(f"# copy submodule {step.path} from {repo} into {wt.path}")
+        else:
+            lines.append(f"# submodules: {step.message}")
+    return lines
 
 
 def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
-    """Copy submodule working trees from the source repo (copy only, no linkage)."""
-    if not git.has_gitmodules(repo):
+    """Copy submodule working trees from the main checkout (copy only, no
+    linkage), for the submodules the worktree's own branch declares.
+
+    The branch's ``.gitmodules`` is the authority and is never written: the
+    main checkout's file can describe another branch (a renamed or removed
+    submodule), and copying it would leave the fresh worktree dirty.
+    ``plan_submodules`` selects the paths; every skipped path gets a note.
+    The copied content mirrors the main checkout, not the commit the branch
+    pins.
+    """
+    steps = plan_submodules(repo, git.submodule_paths(worktree))
+    if not steps:
         return 0
-    _copy_managed_file(Path(repo) / ".gitmodules", worktree / ".gitmodules", reporter)
+    source = Path(repo)
     copied = 0
-    for rel in git.submodule_paths(repo):
-        relative = _safe_submodule_path(Path(repo), rel, reporter)
-        if relative is None:
+    for step in steps:
+        if step.action == "refuse":
+            reporter.warn(step.message)
             continue
-        # The source side is validated above; ``copy_submodule`` owns the
+        if step.action == "skip":
+            reporter.note("submodules", step.message)
+            continue
+        relative = Path(step.path)
+        # ``plan_submodules`` validated the source side; ``copy_submodule`` owns the
         # destination side (the worktree tree is untrusted) and skips ``.git``
         # pointers, whose relative gitdir would break git in the linked
         # worktree (issue #16).
         try:
-            copy_submodule(Path(repo), worktree, relative)
+            copy_submodule(source, worktree, relative)
         except UnsafeDestinationError as exc:
             raise DestinationConflictError(exc.path, str(exc)) from exc
         except SubmoduleCopyError as exc:
@@ -738,51 +807,25 @@ def _check_base_exists(repo: str, *, base: str, existing_branch: bool) -> None:
         raise exc
 
 
-def create(
-    config: Config,
-    runner: Runner,
-    *,
+def _announce_repo_wait(reporter: Reporter) -> None:
+    reporter.info("waiting for another treebox operation on this repository…")
+
+
+def _add_worktree(
     repo: str,
+    wt: Worktree,
+    *,
     name: str,
     branch: str,
     base: str,
-    harness: Harness,
-    cold: bool,
     fetch: bool,
     interactive: bool,
+    existing_branch: bool,
     reporter: Reporter,
-    existing_branch: bool = False,
-) -> Outcome:
-    """Provision the worktree ``name`` on ``branch`` and prepare it via ``runner``.
-
-    ``branch`` is one of three things: the ``treebox/<name>`` placeholder a
-    nameless ``create`` generates, a user-chosen branch created fresh from
-    origin/``base`` (an explicit ``create NAME`` — the branch must not exist
-    yet), or, with ``existing_branch``, an exact branch that must already
-    exist locally or on origin (the ``create --checkout`` path). Every path
-    installs the pre-push guard; only placeholders are affected by it.
-    """
-    wt = Worktree.locate(repo, config.root, name, branch, base)
-    policy = _creation_record(config, runner, wt, harness.name)
-
-    # An existing target directory is a conflict except when a prior run created
-    # it on this exact branch and setup did not finish (pending or failed in the
-    # host-owned record). Launching into that half-built tree would be the
-    # "said Ready, then failed" bug; finish it.
-    if wt.path.exists():
-        # Resume ONLY a genuinely half-built treebox worktree: healthy,
-        # registered with git on the exact expected branch, setup unfinished.
-        # Anything else is a conflict.
-        if _is_resumable_unprovisioned_worktree(repo, wt, branch):
-            prior = _check_resume_policy(wt, policy)
-            wt, _ = _reserve_ports(config, wt, prior.ports if prior else None, reporter)
-            rec, _ = _record_policy(wt, policy)
-            reporter.note("worktree", "exists but setup unfinished - finishing setup")
-            return _finish_setup(
-                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter
-            )
-        raise _slug_conflict_for_existing_path(repo, wt)
-
+) -> None:
+    """Fetch, validate the branch request against the fresh refs, and add the
+    worktree. The caller holds ``locking.repo_lock``: everything here reads or
+    writes git state shared by every worktree of the repository."""
     # Freshness is the whole point: a fetch is REQUIRED by default and fails
     # loudly (never silently falls back to stale local refs). The only escape is
     # an explicit --no-fetch, or a repo with no origin (nothing to be fresh
@@ -851,8 +894,60 @@ def create(
         "track-remote": f"tracking {plan.start_point}",
         "new": f"{plan.name} from {plan.start_point}",
     }[plan.kind]
+    with reporter.task("worktree", detail):
+        git.worktree_add(repo, wt.path, plan)
+
+
+def create(
+    config: Config,
+    runner: Runner,
+    *,
+    repo: str,
+    name: str,
+    branch: str,
+    base: str,
+    harness: Harness,
+    cold: bool,
+    fetch: bool,
+    interactive: bool,
+    reporter: Reporter,
+    existing_branch: bool = False,
+) -> Outcome:
+    """Provision the worktree ``name`` on ``branch`` and prepare it via ``runner``.
+
+    ``branch`` is one of three things: the ``treebox/<name>`` placeholder a
+    nameless ``create`` generates, a user-chosen branch created fresh from
+    origin/``base`` (an explicit ``create NAME`` — the branch must not exist
+    yet), or, with ``existing_branch``, an exact branch that must already
+    exist locally or on origin (the ``create --checkout`` path). Every path
+    installs the pre-push guard; only placeholders are affected by it.
+    """
+    wt = Worktree.locate(repo, config.root, name, branch, base)
+    policy = _creation_record(config, runner, wt, harness.name)
+
+    # An existing target directory is a conflict except when a prior run created
+    # it on this exact branch and setup did not finish (pending or failed in the
+    # host-owned record). Launching into that half-built tree would be the
+    # "said Ready, then failed" bug; finish it.
+    if wt.path.exists():
+        # Resume ONLY a genuinely half-built treebox worktree: healthy,
+        # registered with git on the exact expected branch, setup unfinished.
+        # Anything else is a conflict.
+        if _is_resumable_unprovisioned_worktree(repo, wt, branch):
+            prior = _check_resume_policy(wt, policy)
+            wt, _ = _reserve_ports(config, wt, prior.ports if prior else None, reporter)
+            rec, _ = _record_policy(wt, policy)
+            reporter.note("worktree", "exists but setup unfinished - finishing setup")
+            return _finish_setup(
+                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter
+            )
+        raise _slug_conflict_for_existing_path(repo, wt)
+
     # The port block first (a full range fails here, before anything exists),
-    # then the record copy, then the worktree.
+    # then the record copy. Both are written under the worktree lock the
+    # caller holds, before the repo lock (the ports lock is never nested in
+    # it) and before `git worktree add`; a failed add removes both, as nothing
+    # exists yet that they could describe.
     prior = _check_resume_policy(wt, policy)
     wt, reserved = _reserve_ports(config, wt, prior.ports if prior else None, reporter)
     try:
@@ -861,11 +956,25 @@ def create(
         _release_new_block(wt, reserved)
         raise
     try:
-        with reporter.task("worktree", detail):
-            git.worktree_add(repo, wt.path, plan)
+        # Every step from the fetch to `git worktree add` writes git state the
+        # whole repository shares, so creates of *different* names queue here
+        # (they hold different worktree locks). Setup - the slow part - runs
+        # after the lock is released, concurrently.
+        with locking.repo_lock(repo, on_wait=lambda: _announce_repo_wait(reporter)):
+            _add_worktree(
+                repo,
+                wt,
+                name=name,
+                branch=branch,
+                base=base,
+                fetch=fetch,
+                interactive=interactive,
+                existing_branch=existing_branch,
+                reporter=reporter,
+            )
     except BaseException:
         if wrote:
-            record.remove(wt.path)  # nothing exists yet that the record could describe
+            record.remove(wt.path)
         _release_new_block(wt, reserved)
         raise
 

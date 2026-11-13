@@ -11,8 +11,8 @@ docker exec -i -e TREEBOX_NAME=golden-docker -e TREEBOX_ID=__HASH__ -e TREEBOX_P
     isolation       docker  →  claude
 
   runner: docker (daemon reachable)
-  ✓ fetch           origin up to date
   ✓ ports           20030-20039 · TREEBOX_PORT_BASE=20030
+  ✓ fetch           origin up to date
   ✓ worktree        golden-docker from origin/main
   ✓ push guard      treebox/* refs are un-pushable
   ✓ secrets         copied

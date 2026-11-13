@@ -131,6 +131,7 @@ A template is a directory. Copy it out (below) and these become yours:
 | `container.json`                    | How the container runs — most edits touch only `postCreate` here. Schema below.   |
 | `post-create.sh`                    | The default setup script `postCreate` runs. Edit inline or point elsewhere.       |
 | `init-firewall.sh` · `allowed-domains.sh` | Egress rules, applied only when the firewall is on.                         |
+| `treebox-fetch` · `treebox-online`  | Build helpers the default `Dockerfile` copies in. Optional: a template needs them only if its `Dockerfile` copies them. |
 | `firewall.json`                     | Overrides merged onto `container.json` when the firewall is on.                    |
 
 ### 1. Scaffold a template
@@ -144,8 +145,9 @@ treebox template init node          # copies from the built-in default
 treebox template init node --from python   # or fork one of your own
 ```
 
-It always writes the full required file set, so a later `create` never fails
-with "*file* not found in template dir". Inspect what you have any time:
+For copy and recovery behavior, see the
+[`template` command reference](usage.md#template-scaffold-and-inspect-sandbox-templates).
+Inspect what you have any time:
 
 ```bash
 treebox template list               # names, source, firewall, status, default + what the default bundles (`ls` works too)
@@ -207,9 +209,136 @@ First run builds your image (cached after that), provisions the worktree, runs
 - `postCreate` → the command exec'd in the workspace after the container starts
 
 When the firewall is enabled (`firewall = true` in config, or `--firewall` per
-run; `--no-firewall` opts one run out), `firewall.json` deep-merges on top. Any
-container config in the target repo itself is deliberately ignored — see
+run; `--no-firewall` opts one run out), `firewall.json` deep-merges on top.
+The bundled `init-firewall.sh` permits DNS, GitHub IP ranges, and addresses
+resolved from `ALLOWED_DOMAINS` in `allowed-domains.sh`.
+
+The default gateway has no blanket exception. To permit specific TCP ports
+at that address, set `ALLOWED_HOST_PORTS` in your template's
+`allowed-domains.sh`, for example `ALLOWED_HOST_PORTS=(5432 8080)`.
+Use decimal port numbers from `1` to `65535`, without leading zeros.
+An empty or absent array opens no additional ports. On Docker Desktop, the
+gateway is the engine VM, not the macOS host.
+
+The allowlist is baked into the image from the operator template. After an
+edit, [re-create the sandbox](usage.md#docker-entry-and-firewall-recovery)
+to apply the change. Existing operator templates keep their own scripts;
+treebox does not replace them with updated bundled scripts. Any container
+config in the target repo itself is deliberately ignored. See
 [how it works](how-it-works.md#the-sandbox-config-lives-outside-the-box).
+
+### Build inputs
+
+The image is not published. Each machine builds it from the template. The
+bundled `Dockerfile` pins the base image and direct tool versions. These pins
+do not guarantee reproducible images because Debian package versions and npm
+dependency ranges can resolve differently between builds.
+
+- The base image uses a multi-architecture index digest. The index selects
+  the platform-specific image for amd64 or arm64.
+- Direct tool downloads have an exact version and a SHA-256 for each architecture
+  (`*_SHA256_AMD64`, `*_SHA256_ARM64`). The helper `treebox-fetch` verifies
+  each downloaded file. A wrong checksum stops the build. No installer script
+  is piped into a shell.
+- Direct npm packages have exact versions. Their transitive dependencies
+  are not locked by the template.
+- Debian packages come from the signed Debian archive of the base image's
+  release (trixie). They are not pinned to a version: they take Debian's
+  security updates, so these package versions can change between builds.
+
+| Tool | Pin (`ARG`) | Pin or checksum source |
+| ---- | ----------- | ---------------------- |
+| Base image | `FROM …@sha256:` | Docker Hub index digest (`docker buildx imagetools inspect`) |
+| Node.js | `NODE_VERSION` | `SHASUMS256.txt` of the release on nodejs.org |
+| GitHub CLI | `GH_VERSION` | `gh_<version>_checksums.txt` of the GitHub release |
+| uv | `UV_VERSION` | `<asset>.sha256` of the GitHub release |
+| Claude Code | `CLAUDE_CODE_VERSION` | `manifest.json` of the release on downloads.claude.ai |
+| Codex CLI | `CODEX_CLI_VERSION` | exact npm version |
+| Playwright | `PLAYWRIGHT_VERSION`, `PLAYWRIGHT_CLI_VERSION` | exact npm versions (each pins its browser build) |
+
+**Update policy for the agent CLIs.** `CLAUDE_CODE_VERSION` is the release
+that the Claude Code `stable` channel
+(`https://downloads.claude.ai/claude-code-releases/stable`) gives when it is
+bumped. `CODEX_CLI_VERSION` is the npm `latest` dist-tag of `@openai/codex`
+when it is bumped. treebox bumps both on purpose, in a dedicated change, at
+least once a month and soon after an upstream security fix. A Claude Code
+update changes its version and both architecture checksums together, from the
+upstream source in the table. A Codex update changes its npm version.
+
+To run a different tool version in your own template, edit its `Dockerfile`.
+For a checksummed download, change the version and both architecture checksums
+together. A version-only `build.args` override in `container.json` fails
+checksum verification.
+
+**What the image leaves out.** To keep the image small, it installs only
+what a supported setup path or a bundled agent uses:
+
+- Playwright installs Chromium's headless shell and FFmpeg. Firefox, WebKit,
+  and full Chromium are not installed. Browser workflows must run headless.
+  `playwright-cli` opens it through `/opt/google/chrome/chrome`.
+- AWS CLI, vim, fzf, delta, cmake, man-db, and GitHub CLI man pages are omitted.
+  Other Debian packages can still include man pages.
+- Debian's `python3-dev` and `python3-venv` are omitted. The image's CPython
+  includes its own headers, and `uv` creates virtual environments. If a build
+  backend needs CMake, declare `cmake` as a build dependency or add it to your
+  template.
+- gcc, g++, make, and pkg-config stay, so `uv sync` and `npm install` can
+  build native dependencies from source.
+
+To add a tool, put it in your own template's `Dockerfile` (see
+[Scaffold a template](#1-scaffold-a-template)), for example:
+
+```dockerfile
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends vim cmake \
+  && rm -rf /var/lib/apt/lists/*
+USER ${USERNAME}
+```
+
+**Chromium runs without its own sandbox.** In the container, Playwright
+starts Chromium with `--no-sandbox`. Chromium's sandbox needs new user
+namespaces, and Docker's default seccomp profile blocks them on a Linux Docker
+host (for example a stock Ubuntu 24.04 host or a GitHub Actions runner), so
+there Chromium stops with `No usable sandbox!`. This is acceptable because the
+container is the isolation boundary: the agent in it already runs any code
+it likes, so Chromium's sandbox adds no protection against the agent. The
+playwright library and `playwright screenshot` turn the sandbox off by
+default. `playwright-cli` turns it on, so the image sets
+`ENV PLAYWRIGHT_MCP_SANDBOX=false` (see the `PLAYWRIGHT_MCP_SANDBOX` variable
+in the [playwright-cli README](https://github.com/microsoft/playwright-cli#configuration-file), under "Configuration via env").
+To turn the sandbox back on, remove that line from your own template's
+`Dockerfile`, and give the container a seccomp profile that allows user
+namespaces (`runArgs` in `container.json`); a script also needs
+`chromiumSandbox: true` in its launch options.
+
+**Hosts the build needs.** A build needs outbound HTTPS to these hosts (Debian
+uses HTTP):
+
+| Host | For |
+| ---- | --- |
+| `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | the base image (only if it is not already pulled) |
+| `deb.debian.org` | Debian packages, and the Chromium libraries Playwright installs |
+| `nodejs.org` | Node.js |
+| `github.com`, `release-assets.githubusercontent.com` | GitHub CLI, uv (GitHub redirects release downloads) |
+| `downloads.claude.ai` | Claude Code |
+| `registry.npmjs.org` | Codex CLI, Playwright |
+| `cdn.playwright.dev` | the Chromium headless shell (and FFmpeg) for Playwright |
+
+If the build cannot reach one of them, the step fails with a message that
+names the host, for example:
+
+```text
+treebox: cannot download https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz (curl exit 7).
+treebox: this build needs network access to nodejs.org.
+```
+
+The egress firewall (`--firewall`) does not apply to the build: it only
+limits the running container.
+
+**Builders.** The bundled `Dockerfile` supports BuildKit and Docker's legacy
+builder. On a Docker installation that provides the legacy builder, set
+`DOCKER_BUILDKIT=0` to select it. The buildx plugin is optional when the legacy
+builder is available.
 
 ## Environment variables
 
@@ -234,5 +363,6 @@ the branch commits `.env/`, or an agent created one - treebox leaves it
 untouched and skips the copy with a warning (`.env not copied: ... is a
 directory in this worktree`); `create` and `enter` still succeed, and
 `treebox list --json` reports `"env": "absent"` for that worktree. Rename or
-remove the directory on the branch to get the copy back. `.gitmodules` follows
-the same rule.
+remove the directory on the branch to get the copy back. Treebox never copies
+`.gitmodules`: the worktree keeps its branch's own file (see
+[submodule copies](usage.md#submodule-copies-and-recovery)).
