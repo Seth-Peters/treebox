@@ -53,6 +53,10 @@ test against a throwaway local remote:
 ./scripts/validate.sh
 ```
 
+For bundled sandbox changes, also use the opt-in Docker checks described in
+[tests/test_sandbox_image.py](tests/test_sandbox_image.py). The normal validation
+gate skips these image checks unless you enable them.
+
 For behavior-preserving refactors, `scripts/golden-diff.sh` is the focused
 snapshot-only gate. Refresh snapshots only after you've deliberately accepted a
 behavior change.

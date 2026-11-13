@@ -1,14 +1,7 @@
 # The bundled treebox sandbox image.
 #
-# Every build input is pinned, so two builds of this file a week apart install
-# the same tools: the base image by its multi-arch index digest, every download
-# by version and SHA-256 (one checksum for each architecture, amd64 and arm64),
-# and every npm package by exact version. Debian packages come from the signed
-# Debian archive of the base image's release and take its security updates.
-#
-# The hosts a build needs, where each pin comes from, and the update policy are
-# in docs/configuration.md ("Build inputs"). A build that cannot reach a
-# required host fails with a "treebox:" message that names that host.
+# For build inputs, required hosts, and the pin update policy, see
+# docs/configuration.md ("Build inputs").
 FROM python:3.14.6-slim-trixie@sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144
 
 ARG TZ=UTC
@@ -114,17 +107,10 @@ RUN case "$(dpkg --print-architecture)" in \
     rm /tmp/uv.tar.gz && \
     uv --version
 
-# The steps below are ordered from the one that changes least to the one that
-# changes most (the agent CLIs are bumped at least monthly), so a bump rebuilds
-# only its own step and the ones after it.
+# Keep agent installs last so version updates can reuse earlier build layers.
 
-# Playwright: exact npm versions (each pins its own Chromium build), the
-# browser's system libraries from Debian, and the browser from Playwright's CDN.
-# Only Chromium's headless shell is installed: the container has no display,
-# so every supported use (playwright-cli, `playwright screenshot`, scripts) is
-# headless. Firefox, WebKit and the full Chromium build are not installed.
-# playwright-cli opens the "chrome" channel, which it finds at
-# /opt/google/chrome/chrome: that path points to the headless shell.
+# playwright-cli opens the "chrome" channel at /opt/google/chrome/chrome.
+# Point it at the headless shell to share the installed browser with library use.
 USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ARG PLAYWRIGHT_CLI_VERSION=0.1.24
@@ -164,9 +150,8 @@ RUN case "$(dpkg --print-architecture)" in \
     treebox-online downloads.claude.ai "$CLAUDE_BIN" install "${CLAUDE_CODE_VERSION}" && \
     claude --version
 
-# Codex CLI: an exact npm version. Its platform binary is an exact-version
-# optional dependency, so the whole install is pinned. The npm cache would
-# keep a second, compressed copy of that binary in the image, so it is removed.
+# Remove the npm cache so it does not retain a second, compressed copy of the
+# Codex binary in the image.
 USER root
 ARG CODEX_CLI_VERSION=0.167.2
 RUN treebox-online registry.npmjs.org npm install -g "@openai/codex@${CODEX_CLI_VERSION}" && \
