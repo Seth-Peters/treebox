@@ -75,8 +75,12 @@ Module map:
   `SubmoduleCopyFailedError` (exit 1, `SUBMODULE_COPY_FAILED`). `cli.py`
   classifies `ProvisionError`s only and reads `error.path` off the base class.
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
-  hides its autonomous launch argv, host login dir, staged login files, and
-  login advice behind a small method interface; `VALID_HARNESSES` and the
+  hides its autonomous launch argv, host login dir, staged login files, the
+  one login file among them (`login_file`), and login advice behind a small
+  method interface. It also decides what a real login is: `sandbox_login`
+  (the login file holds a JSON object - what a sandbox gets a copy of) and
+  `host_login` (that file, or on macOS the Keychain item the CLI keeps it in;
+  an attribute-only probe that never prompts). `VALID_HARNESSES` and the
   doctor login rows derive from `HARNESSES`. Boundary values (CLI/TOML/state)
   stay `str` and are resolved to the object once, in `cli.py`.
 - **`runners/base.py`** defines the `Runner` protocol — the *only* thing that
@@ -104,6 +108,16 @@ Module map:
   worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
   so the printed `entry_command` is never dead on replay).
+  The launch fork is the unattended contract: `_require_agent` fails a launch
+  before provisioning (`HARNESS_MISSING`; `LOGIN_MISSING` when unattended),
+  the agent's exit code passes through and a non-zero one is named in one
+  final stderr line (`AGENT_EXIT_PREFIX`), and a cancel signal is
+  `CANCELLED` (`128 + signal`). Runners launch through `system.run_agent`,
+  which passes SIGINT / SIGTERM / SIGHUP on to the agent (the docker runner
+  signals the agent's process group inside the container) and kills it after
+  a grace time. The global `--non-interactive` (`TREEBOX_NON_INTERACTIVE`)
+  and stdin being a TTY feed one gate, `_interactive()`, for every picker,
+  prompt and credential prompt.
   `_reconcile_with_record` folds the host-owned record (`record.py`) into
   existing-worktree sessions before the runner and harness objects are
   resolved: recorded isolation conflicts with a mismatched explicit
@@ -260,7 +274,12 @@ needs path translation today, so building it would be indirection).
   `ANTHROPIC_API_KEY` is never used.
 - **Non-interactive friendly.** Data → stdout, diagnostics → stderr; color and
   spinners degrade when stderr is not a TTY; `--json` / `--print` / `--dry-run`
-  exist for scripting and must keep working.
+  exist for scripting and must keep working. Unattended mode (`--non-interactive`,
+  or no TTY on stdin) never opens a picker, asks a question, prompts for
+  git/ssh credentials, or lets a setup step read the terminal - also with a
+  terminal attached; what would need an answer is a classified error. Under
+  `--json` stderr holds exactly one error object, and success payloads carry
+  `warnings`.
 - **Never trust the target repo's config.** No reading its container config,
   its treebox config, or its setup hooks for the sandbox definition.
 

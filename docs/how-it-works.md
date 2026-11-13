@@ -251,6 +251,12 @@ treebox assumes the caller is often another program:
   want the commands, not the side effects. An emitted entry command is
   entry-ready: a stopped docker sandbox is restarted (firewall re-applied)
   before the command is printed, never dead on replay.
+- **Unattended mode** (`--non-interactive`, also with a terminal attached):
+  no picker, question or credential prompt; what would need an answer is a
+  classified failure. When treebox launches the agent it passes the agent's
+  exit code through and names a non-zero one in a fixed final stderr line, and
+  a cancel signal stops the agent in both runners - inside the container for
+  docker. See [unattended use](usage.md#unattended-use).
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
   so concurrent operations on the same worktree conflict (exit `5`). Separate
   worktrees with the same name have separate locks. Explicit batch teardown

@@ -41,7 +41,10 @@ Conventions used below:
       `pyproject.toml` — it is `dynamic` here, derived from git tags, so there is
       no literal to match; a `0.7.1.dev12`-style value is normal off a tag.)
 - [ ] **A2 doctor human** — `tb doctor --repo "$REPO"`
-      Expect: exit 0 when git + at least one harness login are healthy; check
+      Expect: exit 0 when git, the selected harness binary (`agent: claude`) and
+      its login (`login: claude`: a real login file, or the macOS Keychain on
+      host) are healthy; exit 1 otherwise (other harnesses' logins are
+      optional rows). Check
       rows on stdout are readable off-TTY (no raw ANSI garbage when piped).
       Against a repo with no `.env`, the `.env` row is a muted `·` note ending
       in `· optional` (still showing the configured path), never a red `✗`,
@@ -203,8 +206,10 @@ Prereq: `fix-auth` worktree from B1 exists.
       dirty tree takes the uncommitted-changes branch below and hides this path).
       `tb teardown e2e-clean-td --repo "$REPO" --root "$ROOT"` (no `--force`, stdin
       not a TTY)
-      Expect: exit 5; worktree untouched; message says confirmation/`--force` is
-      required for non-interactive teardown.
+      Expect: exit 5; worktree untouched; message says `--yes` (or `--force`) is
+      required for non-interactive teardown. Then `--yes`: exit 0, removed.
+      With a dirty tree, `--yes` is still exit 5 `DIRTY_WORKTREE` (it confirms
+      only).
 - [ ] **E2 dirty worktree needs --force** — `touch "$ROOT/fix-auth/junk.txt"`,
       teardown without `--force`
       Expect: exit 5 (dirty), worktree intact; then with `--force`: removed.
@@ -324,6 +329,23 @@ one behind on purpose.
       record and `.containers/<name>/treebox-resources.json` stay. Without the
       wrapper the same teardown exits 0 and leaves no container, image, volume,
       manifest or record.
+
+## U. unattended mode
+
+- [ ] **U1 agent args on create** - `tb create u1 --repo "$REPO" --root "$ROOT" --json -- -p "a task"`
+      Expect: exit 0; `entry_command` ends with the agent args; `warnings: []`.
+- [ ] **U2 no prompt with a terminal** - with a pty attached (`python3 -c
+      'import pty,sys; pty.spawn(sys.argv[1:])' ...`), `tb --non-interactive
+      teardown u1 --repo "$REPO" --root "$ROOT"`
+      Expect: exit 5 `NEEDS_CONFIRMATION` at once, no prompt.
+- [ ] **U3 agent exit line** - stub `claude` (exits 3) first on `PATH`;
+      `tb enter u1 --repo "$REPO" --root "$ROOT"`
+      Expect: exit 3; last stderr line `treebox: agent exited with status 3`.
+- [ ] **U4 cancellation** - stub `claude` that sleeps; `kill -TERM` the
+      treebox process during `tb enter u1 ...`
+      Expect: exit 143; the stub process is gone; error `CANCELLED`. For a
+      docker worktree (`e2e-` name), `docker top` shows no stub afterwards
+      and the container is still running.
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 

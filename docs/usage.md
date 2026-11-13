@@ -27,6 +27,7 @@ treebox create                  # generated name (brave-otter), placeholder bran
 treebox create fix-auth         # named up front: works on branch fix-auth
 treebox create feature/auth     # slash names: branch feature/auth, dir feature--auth
 treebox create --checkout feature/auth  # exact existing branch (resume work, PR review)
+treebox create fix-auth -- -p "Fix the login race"  # launch the agent on a task
 ```
 
 Fetches `origin`, cuts a worktree from the fresh `origin/main`, copies your
@@ -64,6 +65,12 @@ The branch is a *mutable attribute*: rename it whenever the work takes shape
 (`git branch -m fix/flaky-teardown`) — the directory never moves, and `list` /
 `enter` / `teardown` follow the rename automatically. `git push --no-verify`
 remains the deliberate human escape hatch.
+
+Anything after `--` goes to the agent verbatim, exactly as for
+[`enter`](#enter-come-back-to-a-worktree): `create NAME -- ARGS` starts the
+agent on a task, and with `--json` or `--print` the args are part of the
+emitted `entry_command`. Agent args need a `NAME` (a nameless `create` takes
+none).
 
 `--checkout` checks out an **existing** branch (local or `origin/`) exactly —
 for resuming work or reviewing a PR. The worktree's name derives from the
@@ -307,12 +314,18 @@ treebox teardown                                # pick interactively (no refs)
 treebox teardown fix-auth                       # remove one worktree
 treebox teardown fix-auth brave-otter --force   # several at once
 treebox teardown fix-auth --delete-branch       # ...and its local branch
+treebox teardown fix-auth --yes --json          # unattended: confirm, keep the dirty check
 ```
 
 Takes one or more refs (name, branch, or unique substring). Every ref is
 resolved before anything is removed — a typo among three targets removes
 nothing. Refuses to remove a worktree with uncommitted changes unless you pass
-`--force`. For docker-sandboxed worktrees, `--remove-volumes` also removes
+`--force`. It asks for confirmation in a terminal; unattended (`--json`,
+[`--non-interactive`](#unattended-use), or no terminal) there is no prompt
+and it refuses with `NEEDS_CONFIRMATION` (exit `5`) unless you pass `--yes`.
+`--yes` only answers the prompt: a worktree with uncommitted changes is still
+refused (`DIRTY_WORKTREE`, exit `5`); `--force` removes it anyway. For
+docker-sandboxed worktrees, `--remove-volumes` also removes
 per-workspace volumes authorized by the
 [runner-owned manifest](how-it-works.md#freshness-is-enforced-not-hoped-for) written outside
 the sandbox mount at create time, so they are still removed when the container
@@ -404,8 +417,9 @@ uncommitted changes are **kept and reported** (like `trusty-robin` above), so
 one dirty tree never blocks the rest. treebox exits `5` when it kept anything,
 so a script can still tell the run wasn't total. (Passing refs explicitly stays
 all-or-nothing — naming a dirty tree stops the whole run. `--force` removes
-dirty worktrees either way.) The chooser is interactive-only: under `--json`
-or a non-TTY, pass refs explicitly.
+dirty worktrees either way.) The chooser is interactive-only: under `--json`,
+`--non-interactive`, or a non-TTY, pass refs explicitly (no refs is
+`NEEDS_CONFIRMATION`, exit `5`).
 
 `teardown` is also the recovery path for a **corrupt** worktree - a registered
 directory whose `.git` pointer file is gone (say, after an interrupted removal
@@ -415,7 +429,7 @@ checkout, so `create` and `enter` both refuse it loudly (exit `5`,
 setup or an agent against your real checkout. `teardown` instead verifies the
 worktree's git linkage before asking whether it is dirty: a corrupt worktree is never blocked as "dirty" just because your
 main checkout has uncommitted changes. It takes the normal confirmation path
-instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
+instead (the interactive prompt, or `--yes` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
 touching the main checkout's files. Container cleanup survives the corruption
 too: teardown reads the worktree's isolation and template from its host-owned
@@ -456,16 +470,28 @@ the worktree root was moved). `--json` prints the recorded policy.
 ```bash
 treebox doctor                       # checks for host isolation
 treebox doctor --isolation docker    # also checks the Docker daemon
+treebox doctor -H codex              # check codex instead of the config default
 ```
 
-Checks git, agent logins, `.env`, and — because `create` requires a fresh
-fetch — whether git can authenticate to `origin` without a prompt. A missing
-`.env` is not a failure: the row renders as a muted `·` note marked
+Checks git, the agent and its login, `.env`, and - because `create` requires
+a fresh fetch - whether git can authenticate to `origin` without a prompt. A
+missing `.env` is not a failure: the row renders as a muted `·` note marked
 "optional" (the configured path still shown), since `create` simply skips the
-copy. Every failing row comes with the command that fixes it. Hard failures
-(`git`, `repo`, or the selected isolation mode) exit `1` in both human and
-`--json` modes, so `treebox doctor --json && treebox create ...` works in
-scripts.
+copy. Every failing row comes with the command that fixes it.
+
+For the **selected harness** (`--harness`, else the config default: the one
+`create` launches) doctor checks what a launch needs, where the agent runs:
+
+| Row | Host isolation | Docker isolation |
+| --- | -------------- | ---------------- |
+| `agent: <harness>` | The harness binary (`claude`, `codex`) is on `PATH`. | Part of the sandbox image: always `ok` here, checked in the container at launch (`HARNESS_MISSING`). |
+| `login: <harness>` | A real login: the login file (`~/.claude/.credentials.json`, `~/.codex/auth.json`) holds a JSON object, or, on macOS, Claude Code's Keychain item exists. | The login file holds a JSON object: it is the file the sandbox gets a copy of (a Keychain login cannot reach a sandbox). |
+
+A login dir that merely exists (settings, history) is no login. The other
+harnesses' login rows are shown as optional. Hard failures (`git`, `repo`,
+the selected agent and its login, or the selected isolation mode) exit `1` in
+both human and `--json` modes (`ok: false`), so
+`treebox doctor --json && treebox create ...` works in scripts.
 
 ## `template` — scaffold and inspect sandbox templates
 
@@ -509,6 +535,10 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 | `4`  | required fetch or its authentication failed             |
 | `5`  | conflict — name taken, dirty tree, or lock held        |
 
+`create` and `enter` that launch the agent exit with the **agent's** exit code
+instead, and a [cancel signal](#cancellation) exits `128 + signal`; see
+[unattended use](#unattended-use) for how a caller tells the two apart.
+
 The worktree commands and `doctor` take `--json`; payloads carry a
 `schemaVersion` — fields are only ever added within a version, and a breaking
 reshape or rename bumps it. Agents branch on these payloads, so treat the shape
@@ -530,18 +560,26 @@ It is also entry-ready: for a docker worktree, a stopped container is
 restarted (with the firewall re-applied) before the command is printed, so
 the emitted command is never dead on replay.
 Without `--json`, `--print`, or `--dry-run`, `create` and `enter` launch the
-agent and exit with the agent process's exit code. Human `--dry-run` writes the
+agent and exit with the agent process's exit code (see
+[the agent exit line](#agent-exit-codes)). Human `--dry-run` writes the
 would-run plan to stderr; `--dry-run --json` writes its payload to stdout.
 
 Current success payloads:
 
 | Command | Top-level fields |
 | ------- | ---------------- |
-| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created` |
-| `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands` |
+| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created`, `warnings` |
+| `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands`, `warnings` |
 | `list --json` | `schemaVersion`, `worktrees` |
-| `teardown --json` | `schemaVersion`, `worktrees` |
+| `teardown --json` | `schemaVersion`, `worktrees`, `warnings` |
+| `adopt --json` | `schemaVersion`, `name`, `worktree_path`, `record`, `warnings` |
 | `doctor --json` | `schemaVersion`, `ok`, `isolation`, `checks`, `advisories` |
+
+`warnings` is a list of strings: every warning the run printed (or, under
+`--json`, would have printed) on stderr, such as a `.env` copy skipped because
+the worktree has a directory at `.env`, or a teardown step that warned. It is
+`[]` when nothing was skipped, so a caller can branch on a non-empty list
+instead of parsing stderr.
 
 `list` rows contain `name`, `branch`, `unnamed`, `missing`, `last_commit`,
 `commit_epoch`, `path`, `base`, `isolation`, `harness`, `deps`, `env`,
@@ -595,6 +633,10 @@ JSON errors are emitted to stderr as:
 `error.code` and `error.message` are always present; `error.hint` and
 `error.path` appear when treebox has useful remediation or a path-specific
 failure. Both submodule copy errors include `error.path` and `error.hint`.
+Under `--json`, stderr holds exactly this one object: a failed step's output
+is never printed there, but kept in the file `error.path` names
+(`SETUP_FAILED`); `--verbose` streams step output to stderr (never stdout) if
+you want it live.
 
 `error.code` and the exit code are the scripting contract:
 
@@ -610,10 +652,13 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `GIT_MISSING` | `1` | git itself is not installed or not on PATH. |
 | `MISSING_DEPENDENCY` | `1` | Required runner dependency is missing. |
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
+| `HARNESS_MISSING` | `1` | A launch found no harness binary: not on `PATH` (host, checked before anything is provisioned) or not in the sandbox image (docker, checked at launch). `doctor` reports it as `agent: <harness>`. |
+| `LOGIN_MISSING` | `1` | An [unattended](#unattended-use) launch found no usable login for the harness (the agent would wait in its own login flow). Checked before anything is provisioned; `doctor` reports it as `login: <harness>`. |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
 | `SETUP_FAILED` | `1` | A setup step exited non-zero. The message names the step and its exit status; `error.path` is its output. The worktree is kept, marked unfinished; `enter` or the same `create` retries the setup. |
 | `TEARDOWN_INCOMPLETE` | `1` | A teardown step did not finish (a container, image or volume removal failed, Docker is not reachable, or git refused to remove the worktree). The message names what remains; the worktree and its ownership record are kept, so the same `teardown` retries. |
 | `ERROR` | `1` | Runtime failure, including a staged credential refresh failure. |
+| `CANCELLED` | `128 + signal` | A [cancel signal](#cancellation) (SIGINT `130`, SIGTERM `143`, SIGHUP `129`) reached treebox while the agent ran; the agent was stopped. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
@@ -634,3 +679,109 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
+
+## Unattended use
+
+A coordinator, a CI job or another agent can create, run, inspect and remove a
+worktree with no terminal input. Give the global `--non-interactive` before
+the command (`treebox --non-interactive create ...`), or set
+`TREEBOX_NON_INTERACTIVE=1` once for the whole job. It holds **also with a
+terminal attached**; without a terminal on stdin treebox already behaves this
+way. In unattended mode:
+
+- Nothing opens a picker, asks a question, or waits on the terminal.
+  `teardown` without refs, or without `--yes` / `--force`, is
+  `NEEDS_CONFIRMATION` (exit `5`).
+- git and ssh never prompt for credentials. treebox only tries its silent
+  credential paths (an ssh-agent, a credential helper, a `gh` / `glab` login,
+  an HTTPS token), with git's terminal prompt off, ssh in `BatchMode`, and Git
+  Credential Manager told not to open dialogs. A fetch that would need you to
+  type something is `FETCH_FAILED` (exit `4`) at once. (In a terminal without
+  `--non-interactive`, treebox lets git and ssh ask, like `git pull`.)
+- Setup steps never read the terminal: their stdin is empty, so a step that
+  asks a question gets end-of-file and fails as `SETUP_FAILED`.
+- A launch checks the agent before anything is provisioned: no harness binary
+  is `HARNESS_MISSING`, no usable login is `LOGIN_MISSING` (both exit `1`) -
+  an agent without a login would otherwise wait in its own login flow. Run
+  [`doctor`](#doctor-is-this-host-ready) first to check both.
+- Subscription logins stay the only auth: treebox never reads or passes an API
+  key.
+
+### The clean flow
+
+Create the worktree with the task, replay its entry command, inspect it, and
+remove it. Every step is one command with a classified result:
+
+```bash
+export TREEBOX_NON_INTERACTIVE=1
+
+treebox doctor --json > /dev/null              # exit 1: the agent cannot run here
+out=$(treebox create fix-login --json -- -p "Fix the login race and commit")
+eval "$(jq -r '.entry_command | @sh' <<<"$out")"   # runs the agent; $? is its exit code
+treebox list --json | jq '.worktrees[] | select(.name == "fix-login")'
+treebox teardown fix-login --yes --json        # exit 5 if the agent left uncommitted work
+```
+
+`create --json` provisions without launching and puts the agent args in
+`entry_command`; check its `warnings` (for example a skipped `.env` copy).
+The entry command is self-contained, so it runs the agent in the worktree from
+any directory, and its exit status is the agent's. `list --json` shows the
+worktree's `health` and `setup`. `teardown --yes` confirms the removal but
+keeps the uncommitted-changes check: work the agent did not commit is
+`DIRTY_WORKTREE` (exit `5`) and stays on disk, and `--force` removes it on
+purpose.
+
+To let treebox run the agent itself, launch directly:
+`treebox create fix-login -- -p "Fix the login race and commit"` (or
+`treebox enter fix-login -- ...` for an existing worktree). Then treebox
+handles [cancellation](#cancellation) for you, and names the agent's exit
+code as described below.
+
+### Agent exit codes
+
+When treebox launches the agent, it exits with the **agent's** exit code, so
+an agent exit of `1` to `5` would look like a treebox failure. The two are
+told apart by the last line on stderr:
+
+- A **treebox failure** always prints its classified error (code, message and
+  hint; one JSON object under `--json`) and never the line below.
+- When the **agent** exits non-zero, treebox prints one final line on stderr
+  with this fixed prefix, then exits with the same code:
+
+  ```text
+  treebox: agent exited with status 3
+  ```
+
+  An agent killed by a signal shows the shell-style status and the signal:
+  `treebox: agent exited with status 137 (killed by SIGKILL)`. An agent exit
+  of `0` prints no line.
+
+The prefix `treebox: agent exited with status ` is a contract: match the last
+stderr line against `^treebox: agent exited with status ([0-9]+)`.
+
+### Cancellation
+
+A cancel signal sent to the treebox process while it runs the agent stops the
+agent, in both runners:
+
+| Signal to treebox | Host isolation | Docker isolation | treebox exits |
+| ----------------- | -------------- | ---------------- | :-----------: |
+| `SIGINT` | Passed on to the agent process. | Passed on to the agent's process group **inside the container**. | `130` |
+| `SIGTERM` | Same. | Same. | `143` |
+| `SIGHUP` | Same. | Same. | `129` |
+
+If the agent is still running 10 seconds after the signal, treebox kills it
+(`SIGKILL`). treebox returns only when the agent is gone, and then fails with
+`CANCELLED` (exit `128 + signal`, never the agent exit line). The worktree is
+kept; for docker the **container keeps running**, so the next
+`treebox enter <name>` starts the agent again at once. (Stopping the local
+`docker exec` client alone would leave the agent running in the container:
+treebox signals the agent itself.)
+
+This covers the agent session that treebox launches. A replayed
+`entry_command` is a plain process that treebox does not supervise: on the
+host, a signal to it reaches the agent directly; for docker, stopping the
+`docker exec` client does not stop the agent in the container, so launch
+through treebox when you need defined cancellation. A signal while treebox
+is still provisioning stops treebox: SIGINT interrupts the step, the setup
+result stays `pending`, and the next `enter` finishes it.
