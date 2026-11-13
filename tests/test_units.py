@@ -1859,7 +1859,9 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     assert run.config.template == "hardened"  # recovered from state, not the config default
 
 
-def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
+def test_docker_doctor_gates_on_binary_and_daemon(
+    monkeypatch: pytest.MonkeyPatch, non_root_identity
+):
     """doctor is the only safety gate before a sandboxed create: each missing
     dependency must raise its own loud PreflightError carrying a stable machine
     code and a remediation hint. Docker is the whole dependency: the binary and
@@ -1886,6 +1888,29 @@ def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
     runner.preflight(rep)  # all dependencies present → no raise
+
+
+def test_docker_preflight_refuses_root_before_any_other_gate(monkeypatch: pytest.MonkeyPatch):
+    """Docker isolation as uid 0 is refused up front: the sandbox user would be
+    root (it could delete its own firewall rules) and the template cannot add a
+    second uid-0 user. The root gate comes first, so a root user with no docker
+    is told the real blocker. The host runner stays usable as root."""
+    from treebox.output import Reporter
+    from treebox.runners import docker as dr
+    from treebox.runners.base import PreflightError
+    from treebox.runners.host import HostRunner
+
+    rep = Reporter(quiet=True)
+    monkeypatch.setattr(dr.system, "identity", lambda: dr.system.Identity(uid=0, gid=0))
+    monkeypatch.setattr(dr.system, "have", lambda c: False)
+    monkeypatch.setattr(dr, "_docker_available", lambda: False)
+
+    with pytest.raises(PreflightError, match="root") as exc_info:
+        DockerRunner(Config(isolation="docker")).preflight(rep)
+    assert exc_info.value.error_code == "RUNNING_AS_ROOT"
+    assert "useradd" in (exc_info.value.hint or "")
+
+    HostRunner(Config()).preflight(rep)  # host isolation as root: no raise
 
 
 def test_docker_preflight_hints_are_platform_aware(monkeypatch: pytest.MonkeyPatch):

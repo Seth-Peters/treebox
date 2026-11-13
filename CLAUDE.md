@@ -220,6 +220,9 @@ What a sandboxed backend must **guarantee** (the security invariants):
   `prepare_entry` restarts a stopped sandbox (iptables rules don't survive
   a container restart).
 - Only user-level treebox config is ever read — never the target repo's.
+- Sandboxed runners must enforce the
+  [non-root user requirement](docs/install.md#what-each-isolation-mode-needs)
+  before provisioning.
 
 What a backend may **assume** (host locality):
 

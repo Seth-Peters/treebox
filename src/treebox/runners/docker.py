@@ -3,11 +3,10 @@ Docker container with shared caches + scoped copies of the login credentials
 mounted in.
 
 Buys isolation + a pinned toolchain + an optional firewall, so it is opt-in.
-Docker is the only dependency: the container is built, started, and entered
-with plain ``docker build`` / ``docker run`` / ``docker exec``. The image's
-baked-in ``post-create.sh`` is the setup hook for this runner; shared caches
-are wired in as bind mounts so containerized setup resolves from the same
-store as the host.
+Container operations use plain ``docker build``, ``docker run``, and
+``docker exec``. The image's baked-in ``post-create.sh`` is the setup hook
+for this runner; shared caches are wired in as bind mounts so containerized
+setup resolves from the same store as the host.
 
 Lockdown invariant: the files that *define* the sandbox (container.json and
 its build context) are materialized in a host-side directory **outside** the
@@ -146,6 +145,13 @@ _FIREWALL_GUARDED = (
     "sh",
     "-c",
     'if [ "$TREEBOX_FIREWALL" = "1" ]; then /usr/local/bin/init-firewall.sh; fi',
+)
+
+
+_ROOT_HINT = (
+    "Run treebox as a non-root user that can reach the Docker daemon. Create one "
+    "with `useradd --create-home --groups docker treebox`, then run treebox as "
+    "that user (`su - treebox`). Host isolation still works as root."
 )
 
 
@@ -299,6 +305,17 @@ class DockerRunner:
     # --- preflight -----------------------------------------------------------
 
     def preflight(self, reporter: Reporter) -> None:
+        # Checked first: no docker setup fixes it. The sandbox user takes the
+        # invoking uid (see _inject), so as uid 0 it would be root inside the
+        # box and free to delete its own firewall rules (and the template's
+        # `useradd -u 0` fails mid-build). Refuse before any provisioning.
+        if system.identity().uid == 0:
+            raise PreflightError(
+                "docker isolation cannot run as root (uid 0): the sandbox user "
+                "would be root and could remove its own firewall.",
+                error_code="RUNNING_AS_ROOT",
+                hint=_ROOT_HINT,
+            )
         if not system.have("docker"):
             raise PreflightError(
                 "docker runner needs docker on PATH.",

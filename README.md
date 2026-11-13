@@ -63,9 +63,10 @@ uv tool install treebox
 ```
 
 Host isolation needs `git` plus the selected agent CLI on PATH and logged in.
-Docker isolation additionally needs `docker`; the default template supplies the
-agent CLI, and treebox copies scoped login files from your `~/.claude` /
-`~/.codex` subscription login. See the
+For Docker isolation, see the
+[requirements](https://seth-peters.github.io/treebox/install/#what-each-isolation-mode-needs).
+The default template supplies the agent CLI, and treebox copies scoped login
+files from your `~/.claude` / `~/.codex` subscription login. See the
 [install guide](https://seth-peters.github.io/treebox/install/) for
 requirements and installer overrides.
 

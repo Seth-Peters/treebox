@@ -410,8 +410,7 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Runner dependency problems keep exit 1 (codes are stable; agents
-        # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE).
+        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
@@ -539,7 +538,9 @@ def create(
         None, "--base", help="Base branch for the new branch (resolved as origin/<base>)."
     ),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -711,7 +712,9 @@ def enter(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -1599,7 +1602,9 @@ def _teardown_one(
 def doctor(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
