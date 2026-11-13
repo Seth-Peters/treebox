@@ -8,16 +8,15 @@ mount, beside the lock and the docker runner's config dir::
 
     <worktree parent>/.records/<worktree leaf>.json
 
-Only host-side treebox writes it, and only under the worktree lock: ``create``
-writes it before any runner resource depends on it, and ``adopt`` (the
-operator's explicit migration step) writes it for a worktree that has none.
-Nothing in the sandbox-writable git dir is read for any decision; the
-``treebox-state.json`` files older treebox versions wrote there are ignored.
+Only host-side treebox writes it: ``create`` writes it under the worktree
+lock, before any runner resource depends on it. Nothing in the
+sandbox-writable git dir is read for any decision.
 
 The record is bound to the registered worktree path it describes: a record
 whose ``worktree`` names another path (a copied or moved file) is invalid.
 A missing or invalid record is a ``RecordError``; callers surface it as a
-classified error with a recovery path and never fall back to config defaults.
+classified error whose recovery is to tear the worktree down and create it
+again, and never fall back to config defaults.
 
 Module API (what later features extend)::
 
@@ -25,18 +24,15 @@ Module API (what later features extend)::
     record.save(dataclasses.replace(rec, ...)) # atomic replace
     record.remove(path)                        # on teardown
 
-Extending it: add a field to ``WorktreeRecord``, bump ``SCHEMA_VERSION``, and
-teach ``_parse`` to read (and upgrade) every older supported version. Unknown
-keys and unknown versions are rejected, so an older treebox never silently
-drops a newer policy field - it refuses the record instead.
+There is one schema version. Extending it: add a field to
+``WorktreeRecord`` as a required key of that version. A record with another
+version, an unknown key or a missing key is invalid, so a worktree made by
+another treebox version is torn down and created again, never reinterpreted.
 
 Besides the policy, the record holds the host-observed result of the last
 setup (``setup``, see the setup model in ``lifecycle.py``): a sandbox that
 could mark its own setup done could make treebox skip setup forever or report
 stale dependencies as fresh, so that fact is host-owned too.
-
-Versions: 1 (policy only) is upgraded on read with ``setup`` pending - nothing
-says setup finished, so the next ``enter`` runs it again; 2 adds ``setup``.
 """
 
 from __future__ import annotations
@@ -50,27 +46,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .harnesses import VALID_HARNESSES
 from .lifecycle import SetupResult, setup_log_path
 from .models import is_valid_template_name, same_path
+from .runners import VALID_ISOLATION
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 # Sibling of the worktrees under one parent, like `.locks/` and `.containers/`.
 RECORD_DIR = ".records"
 
-_V1_KEYS = frozenset(
-    {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template"}
+_KEYS = frozenset(
+    {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template", "setup"}
 )
-_KEYS = _V1_KEYS | {"setup"}
 
 
 @dataclass(frozen=True)
 class WorktreeRecord:
     """The creation policy of the worktree at ``worktree`` (its registered path).
 
-    ``isolation`` and ``harness`` are registry names (validated against the
-    registries by the CLI, like every other boundary string); ``template`` is
-    a template identifier (``models.is_valid_template_name``); ``firewall`` is
+    ``isolation`` and ``harness`` are registry names; ``template`` is a
+    template identifier (``models.is_valid_template_name``); ``firewall`` is
     always a real bool (``False`` for host worktrees). ``setup`` is not
     policy: it is the result of the last setup attempt (``lifecycle.py``)."""
 
@@ -97,13 +93,14 @@ class RecordError(RuntimeError):
 
 
 class RecordMissingError(RecordError):
-    """No record exists: a worktree from an older treebox (legacy), one whose
-    record was deleted, or one created outside treebox."""
+    """No record exists: a worktree made by another treebox version, one
+    whose record was deleted, or one created outside treebox."""
 
 
 class RecordInvalidError(RecordError):
-    """A record exists but cannot be trusted: unreadable, malformed, an
-    unsupported ``schemaVersion``, or bound to a different worktree path."""
+    """A record exists but cannot be trusted: unreadable, malformed, another
+    ``schemaVersion``, an unknown isolation mode or harness, or bound to a
+    different worktree path."""
 
 
 def record_path(worktree: Path) -> Path:
@@ -146,34 +143,33 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
     if not isinstance(data, dict):
         raise _invalid(worktree, path, "not a JSON object")
     version = data.get("schemaVersion")
-    if type(version) is not int or version not in (1, SCHEMA_VERSION):
+    if type(version) is not int or version != SCHEMA_VERSION:
         raise _invalid(
             worktree, path, f"unsupported schemaVersion {version!r} (expected {SCHEMA_VERSION})"
         )
-    keys = _V1_KEYS if version == 1 else _KEYS
-    unknown = sorted(set(data) - keys)
+    unknown = sorted(set(data) - _KEYS)
     if unknown:
         raise _invalid(worktree, path, f"unknown key(s) {', '.join(unknown)}")
-    missing = sorted(keys - set(data))
+    missing = sorted(_KEYS - set(data))
     if missing:
         raise _invalid(worktree, path, f"missing key(s) {', '.join(missing)}")
     for key in ("worktree", "base", "isolation", "harness", "template"):
         if not isinstance(data[key], str):
             raise _invalid(worktree, path, f"{key} must be a string")
+    if data["isolation"] not in VALID_ISOLATION:
+        raise _invalid(worktree, path, f"unknown isolation mode {data['isolation']!r}")
+    if data["harness"] not in VALID_HARNESSES:
+        raise _invalid(worktree, path, f"unknown harness {data['harness']!r}")
     if type(data["firewall"]) is not bool:
         raise _invalid(worktree, path, "firewall must be true or false")
     if not is_valid_template_name(data["template"]):
         raise _invalid(worktree, path, f"template {data['template']!r} is not a template name")
     if not same_path(data["worktree"], worktree):
         raise _invalid(worktree, path, f"it is bound to worktree {data['worktree']!r}")
-    # Version 1 recorded no setup result: pending (never "done"), so the next
-    # enter runs setup again instead of trusting anything else.
-    setup = SetupResult()
-    if version >= 2:
-        try:
-            setup = SetupResult.from_json(data["setup"])
-        except ValueError as exc:
-            raise _invalid(worktree, path, str(exc)) from exc
+    try:
+        setup = SetupResult.from_json(data["setup"])
+    except ValueError as exc:
+        raise _invalid(worktree, path, str(exc)) from exc
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
