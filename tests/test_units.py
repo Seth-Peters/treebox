@@ -1400,8 +1400,8 @@ def test_reconcile_isolation_and_harness_policy():
     """The remaining rows of the precedence table, at the unit level (the CLI
     paths — conflict exit codes, recorded-harness launches — are pinned by the
     contract and integration suites): recorded isolation wins over the config
-    default; a matching explicit --isolation is fine; a known recorded harness
-    wins unless -H overrides; an unknown recorded harness falls back."""
+    default; a matching explicit --isolation is fine; the recorded harness
+    wins unless -H overrides (an unknown one never parses: RECORD_INVALID)."""
     rec = _rec(isolation="docker", harness="codex")
     out = _reconcile(Config(isolation="host", harness="claude"), rec)
     assert out.isolation == "docker"  # recorded wins over the config default
@@ -1414,10 +1414,6 @@ def test_reconcile_isolation_and_harness_policy():
         Config(isolation="docker", harness="claude"), rec, isolation="docker", harness="claude"
     )
     assert out.isolation == "docker" and out.harness == "claude"
-
-    # Unknown recorded harness falls back to the config default.
-    weird = _rec(isolation="host", harness="aider")
-    assert _reconcile(Config(harness="claude"), weird).harness == "claude"
 
 
 def test_docker_setup_cold_reuse_warns_about_frozen_mounts(tmp_path: Path, fake_common_dir):
@@ -1630,11 +1626,13 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     assert not cfg_dir.exists()
 
 
-@pytest.mark.parametrize("config_dir_exists", [True, False], ids=["legacy", "manually-deleted"])
+@pytest.mark.parametrize(
+    "config_dir_exists", [True, False], ids=["config-dir-left", "config-dir-deleted"]
+)
 def test_docker_teardown_without_manifest_never_guesses_volumes(
     tmp_path: Path, config_dir_exists: bool
 ):
-    """A legacy worktree or manually deleted metadata dir is cleaned safely:
+    """A missing manifest (with or without its config dir) is cleaned safely:
     no volume lookup/removal guess, a warning, and any config dir is removed."""
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
@@ -1813,40 +1811,42 @@ def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, 
     assert runner._resource_manifest_file(wt).read_text() == before
 
 
-def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
-    """teardown has no --template flag, so its runner must recover the created-time
-    template from the host-owned record for the non-destructive runner
-    configuration."""
+@pytest.mark.parametrize(
+    ("record_state", "manifest", "want"),
+    [
+        ("docker", False, "docker"),  # the record decides when it is valid
+        ("host", True, "host"),
+        ("missing", True, "docker"),  # no record: the resource manifest decides
+        ("missing", False, "host"),
+        ("invalid", True, "docker"),
+        ("invalid", False, "host"),
+    ],
+)
+def test_teardown_runner_reads_only_host_owned_files(tmp_path, record_state, manifest, want):
+    """teardown is the recovery for a missing or invalid record, so it picks
+    the runner without one: from the record when valid, else from the docker
+    runner's host-owned resource manifest. Never the config default."""
     from treebox import record
     from treebox.cli import _teardown_runner
     from treebox.config import Config
-    from treebox.output import Reporter
     from treebox.resolve import Candidate
 
     work = tmp_path / "work"
     work.mkdir()
-    record.save(
-        record.WorktreeRecord(
-            worktree=work,
-            base="main",
-            isolation="docker",
-            harness="claude",
-            firewall=False,
-            template="hardened",
-        )
-    )
-    cand = Candidate(name="work", branch="treebox/work", path=str(work))
+    if record_state in ("docker", "host"):
+        record.save(_record_for(work, isolation=record_state))
+    elif record_state == "invalid":
+        record.record_path(work).parent.mkdir(parents=True)
+        record.record_path(work).write_text('{"schemaVersion": 2}')
+    if manifest:
+        path = tmp_path / ".containers" / "work" / "treebox-resources.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    cand = Candidate(name="work", branch="work", path=str(work))
 
-    run = _teardown_runner(
-        Reporter(quiet=True),
-        Config(isolation="docker", template="default"),
-        cand,
-        explicit=None,
-        remove_volumes=True,
-        json_out=False,
-    )
-    assert run is not None
-    assert run.config.template == "hardened"  # recovered from the record, not the config default
+    config_default = "host" if want == "docker" else "docker"
+    run = _teardown_runner(Config(isolation=config_default), cand, remove_volumes=True)
+    assert run.name == want
 
 
 def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
@@ -2061,8 +2061,8 @@ def test_state_provisioned_roundtrips(tmp_path, monkeypatch):
     assert state.load(tmp_path).provisioned is False
 
 
-def test_state_holds_observations_only_and_ignores_legacy_policy_keys(tmp_path, monkeypatch):
-    """Sandbox-writable state never carries policy: a legacy (or forged) file
+def test_state_holds_observations_only_and_ignores_policy_keys(tmp_path, monkeypatch):
+    """Sandbox-writable state never carries policy: a forged file
     with isolation/template/firewall keys reads as observations only, and the
     next save drops those keys."""
     import json
@@ -2176,14 +2176,16 @@ def test_record_save_is_atomic(tmp_path, monkeypatch):
         (lambda d: d.update(template="/etc"), "not a template name"),
         (lambda d: d.update(template="../x"), "not a template name"),
         (lambda d: d.update(firewall="yes"), "firewall"),
+        (lambda d: d.update(isolation="bogus"), "unknown isolation mode"),
+        (lambda d: d.update(harness="aider"), "unknown harness"),
         (lambda d: d.update(limits={}), "unknown key"),
         (lambda d: d.pop("isolation"), "missing key"),
     ],
 )
 def test_record_invalid_contents_are_classified(tmp_path, mutate, reason):
     """Anything the reader cannot trust is RecordInvalidError - never a silent
-    default. Unknown keys and versions are refused, so an older treebox never
-    drops a newer policy field."""
+    default. Unknown keys and any other schemaVersion are refused: there is
+    one version and no upgrade path."""
     import json
 
     from treebox import record

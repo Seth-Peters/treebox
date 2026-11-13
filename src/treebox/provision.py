@@ -122,18 +122,6 @@ class RecordConflictError(ProvisionError):
         )
 
 
-class RecordExistsError(ProvisionError):
-    """``adopt`` found a record already in place (exit 5, RECORD_EXISTS)."""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__(f"Worktree '{path.name}' already has a host-owned record.")
-        self.path = record.record_path(path)
-        self.hint = (
-            "Nothing to adopt. To replace the record on purpose, add --force "
-            "(the settings you pass become the worktree's policy)."
-        )
-
-
 @dataclass
 class Outcome:
     worktree: Worktree
@@ -449,8 +437,8 @@ def _check_resume_policy(wt: Worktree, policy: record.WorktreeRecord) -> bool:
     A resumed create (an earlier run died before setup finished) must restate
     the recorded policy: the sandbox-writable ``provisioned`` flag decides
     whether create resumes, so a resume must never be a way to change the
-    policy of an existing worktree. An unreadable record is not overwritten
-    either (``adopt --force`` is the explicit way to replace one). Read-only,
+    policy of an existing worktree. An invalid record is not overwritten either
+    (it is RECORD_INVALID: tear the worktree down and create it again). Read-only,
     so ``--dry-run`` fails exactly like a real run."""
     try:
         prior = record.load(wt.path)
@@ -791,18 +779,3 @@ def enter(
         reporter.note("deps", "unchanged · skipping setup")
 
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=args), created=False)
-
-
-def adopt(repo: str, path: Path, policy: record.WorktreeRecord, *, force: bool) -> None:
-    """Write the host-owned record for an existing worktree that has none (a
-    legacy worktree from before records existed) or, with ``force``, replace
-    an existing one. This is the operator's explicit migration step: the
-    policy comes only from what the operator states, never from the
-    worktree's sandbox-writable state. Callers hold the worktree lock."""
-    if not path.is_dir():
-        raise NotFoundError(f"Worktree not found: {path}")
-    if not links_to_worktree_gitdir(repo, path):
-        raise _slug_conflict_for_existing_path(repo, Worktree.at(repo, path))
-    if record.exists(path) and not force:
-        raise RecordExistsError(path)
-    record.save(policy)

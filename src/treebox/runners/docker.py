@@ -149,6 +149,14 @@ _FIREWALL_GUARDED = (
 )
 
 
+def has_resource_manifest(worktree: Path) -> bool:
+    """Whether the host-owned resource manifest of the docker worktree at
+    ``worktree`` is present (valid or not). ``initialize`` writes it before
+    any docker resource exists, so teardown uses it to tell a docker worktree
+    from a host one when the worktree's record is missing or invalid."""
+    return os.path.lexists(worktree.parent / _CONFIG_ROOT / worktree.name / _RESOURCE_MANIFEST)
+
+
 def _install_hint() -> str:
     """Platform-aware install instructions for a missing docker binary."""
     if sys.platform == "darwin":
@@ -355,8 +363,8 @@ class DockerRunner:
 
         An existing valid manifest is merged, keeping resources discoverable
         across an interrupted create retry. Provisioning calls this only for a
-        first-time create, never for ``enter``: legacy worktrees cannot be
-        safely migrated from sandbox-writable state.
+        first-time create, never for ``enter``: sandbox-writable state never
+        decides what a manifest holds.
         """
         volumes = set(self._template_volumes(wt))
         manifest_file = self._resource_manifest_file(wt)
@@ -380,9 +388,7 @@ class DockerRunner:
         try:
             data = json.loads(manifest_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            raise RuntimeError(
-                f"{manifest_file} is missing (legacy worktree or manually deleted metadata)"
-            ) from None
+            raise RuntimeError(f"{manifest_file} is missing (deleted metadata)") from None
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"cannot read {manifest_file}: {exc}") from exc
 

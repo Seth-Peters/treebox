@@ -1481,16 +1481,23 @@ def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
 
 
 def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, hermetic_config):
-    """A worktree recorded with a runner this version doesn't know is a loud
-    conflict — never silently entered with the host default."""
+    """A worktree recorded with a runner this version doesn't know has an
+    invalid record: a loud conflict, never silently entered with the host
+    default. The recovery the hint names (teardown) works on it."""
+    base = ["--repo", str(repo), "--root", root]
     wt = Path(root) / "feature-auth"
-    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    _run(["create", "feature-auth", *base, "--print"])
     _rewrite_recorded_runner(wt, "bogus")
 
-    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])
+    res = _run(["enter", "feature-auth", *base, "--json"])
     assert res.exit_code == 5, res.output  # EXIT_CONFLICT
     err = json.loads(res.stderr)
-    assert err["error"]["code"] == "UNKNOWN_ISOLATION"
+    assert err["error"]["code"] == "RECORD_INVALID"
+    assert "treebox teardown feature-auth" in err["error"]["hint"]
+
+    res = _run(["teardown", "feature-auth", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert not wt.exists() and not record.exists(wt)
 
 
 def test_enter_explicit_runner_mismatch_is_conflict(repo: Path, root: str, hermetic_config):
@@ -1635,7 +1642,7 @@ def test_provisioned_tree_is_still_a_slug_conflict(repo: Path, root: str, hermet
 def test_teardown_uses_recorded_runner(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """teardown without --isolation must tear down via the recorded isolation mode, so a
+    """teardown must tear down via the recorded isolation mode, so a
     docker-sandboxed worktree's container/image/config dir are not leaked."""
     from treebox.runners.docker import DockerRunner
 
@@ -1653,48 +1660,6 @@ def test_teardown_uses_recorded_runner(
     assert res.exit_code == 0, res.output
     assert calls == ["feature-auth"]  # DockerRunner.teardown was invoked
     assert not wt.exists()
-
-
-def test_teardown_explicit_runner_mismatch_is_conflict(repo: Path, root: str, hermetic_config):
-    wt = Path(root) / "feature-auth"
-    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_recorded_runner(wt, "docker")
-
-    res = _run(
-        [
-            "teardown",
-            "feature-auth",
-            "--repo",
-            str(repo),
-            "--root",
-            root,
-            "--force",
-            "--isolation",
-            "host",
-        ]
-    )
-    assert res.exit_code == 5  # EXIT_CONFLICT
-    assert wt.exists()  # nothing was removed
-
-
-def test_teardown_batch_isolation_mismatch_is_all_or_nothing(
-    repo: Path, root: str, hermetic_config
-):
-    """An --isolation mismatch on the SECOND target must abort the batch before
-    anything is removed: previously it fired mid-loop, so the first worktree
-    was gone but the --json payload carried only the error object — a scripting
-    agent reasonably concluded nothing was removed."""
-    base = ["--repo", str(repo), "--root", root]
-    _run(["create", "first", *base, "--print"])
-    _run(["create", "second", *base, "--print"])
-    _rewrite_recorded_runner(Path(root) / "second", "docker")
-
-    res = _run(["teardown", "first", "second", *base, "--force", "--isolation", "host", "--json"])
-    assert res.exit_code == 5  # EXIT_CONFLICT
-    assert json.loads(res.stderr)["error"]["code"] == "ISOLATION_MISMATCH"
-    # All-or-nothing: the matching first target must NOT have been removed.
-    assert (Path(root) / "first").exists()
-    assert (Path(root) / "second").exists()
 
 
 def test_teardown_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
@@ -2181,30 +2146,22 @@ def test_teardown_cancel_at_branch_question_removes_nothing(
     assert "Cancelled" in res.stderr
 
 
-def test_teardown_refuses_unknown_recorded_isolation(repo: Path, root: str, hermetic_config):
-    """A worktree whose recorded isolation mode treebox can't drive is a hard
-    conflict on teardown, exactly as on enter: the batch aborts untouched.
-    --skip-container is the escape hatch that removes it anyway."""
+def test_teardown_removes_a_worktree_with_an_unknown_recorded_isolation(
+    repo: Path, root: str, hermetic_config
+):
+    """A record naming an isolation mode treebox can't drive is invalid, so
+    teardown - its recovery - picks the runner from host-owned files (no
+    docker resource manifest here: the host runner) and removes it. Never a
+    batch-wide conflict, never the config default."""
     for name in ("broken", "modern"):
         _run(["create", name, "--repo", str(repo), "--root", root, "--print"])
-
-    # Rewrite one worktree's recorded isolation to a mode treebox no longer knows.
     _rewrite_recorded_runner(Path(root) / "broken", "devcontainer")
 
-    # The conflict fires before any removal, so the whole batch is left untouched.
     res = _run(["teardown", "broken", "modern", "--repo", str(repo), "--root", root, "--force"])
-    assert res.exit_code == 5, res.output  # EXIT_CONFLICT
-    assert "unknown isolation mode" in res.stderr
-    assert (Path(root) / "broken").is_dir()  # nothing removed
-    assert (Path(root) / "modern").is_dir()
-
-    # --skip-container does no container work, so it skips isolation resolution
-    # and removes the otherwise-undrivable tree anyway.
-    res = _run(
-        ["teardown", "broken", "--repo", str(repo), "--root", root, "--force", "--skip-container"]
-    )
     assert res.exit_code == 0, res.output
-    assert not (Path(root) / "broken").is_dir()
+    assert not (Path(root) / "broken").exists()
+    assert not (Path(root) / "modern").exists()
+    assert not record.exists(Path(root) / "broken")
 
 
 def test_teardown_chooser_cancel_removes_nothing(
@@ -3048,20 +3005,20 @@ def test_list_human_table_through_the_cli(repo: Path, root: str, hermetic_config
 def test_list_human_table_marks_unavailable_isolation_unknown(
     repo: Path, root: str, hermetic_config
 ):
-    """A pre-state-file worktree must not be mislabeled with the current
+    """A worktree without a host-owned record must not be mislabeled with the current
     config default. The human table says unknown while JSON v1 keeps its
     established empty-string fallback."""
-    wt = Path(root) / "legacy"
+    wt = Path(root) / "unrecorded"
     wt.parent.mkdir(parents=True)
-    added = _git(repo, "worktree", "add", "-b", "legacy", str(wt), "main")
+    added = _git(repo, "worktree", "add", "-b", "unrecorded", str(wt), "main")
     assert added.returncode == 0, added.stderr
 
     human = _run(["list", "--repo", str(repo), "--root", root])
     assert human.exit_code == 0, human.output
-    assert "legacy" in human.stdout and "unknown" in human.stdout
+    assert "unrecorded" in human.stdout and "unknown" in human.stdout
 
     payload = json.loads(_run(["list", "--repo", str(repo), "--root", root, "--json"]).stdout)
-    row = next(r for r in payload["worktrees"] if r["name"] == "legacy")
+    row = next(r for r in payload["worktrees"] if r["name"] == "unrecorded")
     assert row["isolation"] == ""
 
 
@@ -3153,57 +3110,93 @@ def test_sandbox_written_state_cannot_choose_the_next_session(
     assert rows[0]["isolation"] == "docker"
 
 
-def test_missing_record_fails_closed_and_adopt_migrates(
+def _spy_teardowns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record which runner tears each worktree down, without touching Docker."""
+    from treebox.runners import RunnerTeardownResult
+    from treebox.runners.docker import DockerRunner
+    from treebox.runners.host import HostRunner
+
+    calls: list[str] = []
+    for cls in (DockerRunner, HostRunner):
+
+        def _teardown(self, wt, *, reporter, _name=cls.name):  # type: ignore[no-untyped-def]
+            calls.append(f"{_name}:{wt.name}")
+            return RunnerTeardownResult.cleaned()
+
+        monkeypatch.setattr(cls, "teardown", _teardown)
+    return calls
+
+
+def test_missing_record_fails_closed_and_teardown_recovers(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """A legacy worktree (no host-owned record, policy only in its
-    sandbox-writable state) is never entered with the config default or the
-    state's claims: enter and teardown fail with RECORD_MISSING and a recovery
-    hint. `adopt` is the operator action that records the policy; after it,
-    enter uses exactly what the operator stated."""
+    """A worktree without a host-owned record (made by another treebox
+    version, or its record was deleted) is never entered with the config
+    default or with its sandbox-writable state's claims: enter is
+    RECORD_MISSING with the recreate hint. `list` still shows it, and a plain
+    teardown (no extra flag) removes it, so `create` works again."""
     base = ["--repo", str(repo), "--root", root]
-    assert _run(["create", "legacy", *base, "--print"]).exit_code == 0
-    wt = Path(root) / "legacy"
+    assert _run(["create", "unrecorded", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "unrecorded"
     record.remove(wt)
     state_file = state._state_path(wt)
-    legacy = json.loads(state_file.read_text())
-    legacy.update(base="main", isolation="host", harness="claude", template="default")
-    state_file.write_text(json.dumps(legacy))
+    forged = json.loads(state_file.read_text())
+    forged.update(base="main", isolation="docker", harness="codex", template="/etc")
+    state_file.write_text(json.dumps(forged))
 
-    for args in (["enter", "legacy"], ["teardown", "legacy", "--force"]):
-        res = _run([*args, *base, "--json"])
-        assert res.exit_code == 5, res.output
-        err = json.loads(res.stderr)["error"]
-        assert err["code"] == "RECORD_MISSING"
-        assert "treebox adopt legacy --isolation" in err["hint"]
-        assert err["path"] == str(record.record_path(wt))
-    assert wt.is_dir()  # teardown refused before touching anything
+    res = _run(["enter", "unrecorded", *base, "--json"])
+    assert res.exit_code == 5, res.output
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "RECORD_MISSING"
+    assert err["hint"] == (
+        "Tear it down and create it again: treebox teardown unrecorded, then treebox create"
+        " (add --checkout <branch> to keep its branch)."
+    )
+    assert err["path"] == str(record.record_path(wt))
     assert not record.exists(wt)  # nothing promoted from state
 
-    # adopt needs the operator to state the isolation; it is never guessed.
-    assert _run(["adopt", "legacy", *base]).exit_code == 2
-    res = _run(["adopt", "legacy", *base, "--isolation", "host", "-H", "codex", "--json"])
+    rows = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    row = next(r for r in rows if r["name"] == "unrecorded")
+    assert row["isolation"] == ""
+
+    # No record and no docker resource manifest: the host runner tears it
+    # down. The forged "docker" in the state is never read.
+    calls = _spy_teardowns(monkeypatch)
+    res = _run(["teardown", "unrecorded", *base, "--force", "--delete-branch", "--json"])
     assert res.exit_code == 0, res.output
-    payload = json.loads(res.stdout)
-    assert payload["record"]["isolation"] == "host"
-    assert payload["record"]["harness"] == "codex"
-    assert record.load(wt).harness == "codex"
+    assert calls == ["host:unrecorded"]
+    assert not wt.exists() and not record.exists(wt)
 
-    # A second adopt is a conflict unless --force replaces the record on purpose.
-    res = _run(["adopt", "legacy", *base, "--isolation", "host", "--json"])
-    assert res.exit_code == 5
-    assert json.loads(res.stderr)["error"]["code"] == "RECORD_EXISTS"
-
-    res = _run(["enter", "legacy", *base, "--print"])
-    assert res.exit_code == 0, res.output
-    assert "codex" in res.stdout
+    assert _run(["create", "unrecorded", *base, "--print"]).exit_code == 0
+    assert record.load(wt).isolation == "host"
 
 
-def test_invalid_record_is_classified_and_adopt_force_recovers(
-    repo: Path, root: str, hermetic_config
+def test_record_less_docker_worktree_is_torn_down_by_its_resource_manifest(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """A record bound to another path (the root was moved, or a file was
-    copied) is RECORD_INVALID with an `adopt --force` recovery path."""
+    """Without a record, the docker runner's host-owned resource manifest
+    (written before any docker resource exists) is what makes teardown use
+    the docker runner, so a docker worktree's container is not leaked."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "boxed", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "boxed"
+    record.remove(wt)
+    manifest = Path(root) / ".containers" / "boxed" / "treebox-resources.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+
+    calls = _spy_teardowns(monkeypatch)
+    res = _run(["teardown", "boxed", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["docker:boxed"]
+    assert not wt.exists() and not record.exists(wt)
+
+
+def test_invalid_record_is_classified_and_teardown_recovers(repo: Path, root: str, hermetic_config):
+    """A record that does not parse - here bound to another path (the root
+    was moved, or a file was copied); another schemaVersion is the same - is
+    RECORD_INVALID with the recreate hint, and a plain teardown removes the
+    worktree and the invalid record."""
     base = ["--repo", str(repo), "--root", root]
     assert _run(["create", "moved", *base, "--print"]).exit_code == 0
     wt = Path(root) / "moved"
@@ -3214,25 +3207,18 @@ def test_invalid_record_is_classified_and_adopt_force_recovers(
     assert res.exit_code == 5
     err = json.loads(res.stderr)["error"]
     assert err["code"] == "RECORD_INVALID"
-    assert "treebox adopt moved --force" in err["hint"]
+    assert "treebox teardown moved" in err["hint"]
 
-    assert _run(["adopt", "moved", *base, "--isolation", "host"]).exit_code == 5
-    assert _run(["adopt", "moved", *base, "--isolation", "host", "--force"]).exit_code == 0
-    assert _run(["enter", "moved", *base, "--print"]).exit_code == 0
-
-
-def test_teardown_without_record_takes_an_explicit_isolation_and_removes_the_record(
-    repo: Path, root: str, hermetic_config
-):
-    """--isolation is the operator naming the mode of a record-less worktree;
-    a normal teardown removes the host-owned record with the worktree."""
-    base = ["--repo", str(repo), "--root", root]
-    for name in ("gone-record", "normal"):
-        assert _run(["create", name, *base, "--print"]).exit_code == 0
-    record.remove(Path(root) / "gone-record")
-
-    res = _run(["teardown", "gone-record", *base, "--force", "--isolation", "host", "--json"])
+    res = _run(["teardown", "moved", *base, "--force", "--delete-branch", "--json"])
     assert res.exit_code == 0, res.output
+    assert not wt.exists() and not path.exists()
+    assert _run(["create", "moved", *base, "--print"]).exit_code == 0
+
+
+def test_teardown_removes_the_record(repo: Path, root: str, hermetic_config):
+    """A normal teardown removes the host-owned record with the worktree."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "normal", *base, "--print"]).exit_code == 0
     res = _run(["teardown", "normal", *base, "--force", "--json"])
     assert res.exit_code == 0, res.output
     assert not record.exists(Path(root) / "normal")

@@ -8,16 +8,16 @@ mount, beside the lock and the docker runner's config dir::
 
     <worktree parent>/.records/<worktree leaf>.json
 
-Only host-side treebox writes it, and only under the worktree lock: ``create``
-writes it before any runner resource depends on it, and ``adopt`` (the
-operator's explicit migration step) writes it for a worktree that has none.
-The sandbox-writable state in ``state.py`` keeps only observations (lockfile
-hash, setup progress) and is never promoted to authority.
+Only host-side treebox writes it: ``create`` writes it under the worktree
+lock, before any runner resource depends on it. The sandbox-writable state in
+``state.py`` keeps only observations (lockfile hash, setup progress) and is
+never promoted to authority.
 
 The record is bound to the registered worktree path it describes: a record
 whose ``worktree`` names another path (a copied or moved file) is invalid.
 A missing or invalid record is a ``RecordError``; callers surface it as a
-classified error with a recovery path and never fall back to config defaults.
+classified error whose recovery is to tear the worktree down and create it
+again, and never fall back to config defaults.
 
 Module API (what later features extend)::
 
@@ -25,10 +25,10 @@ Module API (what later features extend)::
     record.save(dataclasses.replace(rec, ...)) # atomic replace
     record.remove(path)                        # on teardown
 
-Extending it: add a field to ``WorktreeRecord``, bump ``SCHEMA_VERSION``, and
-teach ``_parse`` to read (and upgrade) every older supported version. Unknown
-keys and unknown versions are rejected, so an older treebox never silently
-drops a newer policy field - it refuses the record instead.
+There is one schema version and no upgrade path. Extending it: add a field to
+``WorktreeRecord`` and bump ``SCHEMA_VERSION``. A record with another version
+or an unknown key is invalid, so a worktree made by another treebox version is
+torn down and created again, never reinterpreted.
 """
 
 from __future__ import annotations
@@ -41,7 +41,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .harnesses import VALID_HARNESSES
 from .models import is_valid_template_name, same_path
+from .runners import VALID_ISOLATION
 
 SCHEMA_VERSION = 1
 
@@ -57,9 +59,8 @@ _KEYS = frozenset(
 class WorktreeRecord:
     """The creation policy of the worktree at ``worktree`` (its registered path).
 
-    ``isolation`` and ``harness`` are registry names (validated against the
-    registries by the CLI, like every other boundary string); ``template`` is
-    a template identifier (``models.is_valid_template_name``); ``firewall`` is
+    ``isolation`` and ``harness`` are registry names; ``template`` is a
+    template identifier (``models.is_valid_template_name``); ``firewall`` is
     always a real bool (``False`` for host worktrees)."""
 
     worktree: Path
@@ -80,13 +81,14 @@ class RecordError(RuntimeError):
 
 
 class RecordMissingError(RecordError):
-    """No record exists: a worktree from an older treebox (legacy), one whose
-    record was deleted, or one created outside treebox."""
+    """No record exists: a worktree made by another treebox version, one
+    whose record was deleted, or one created outside treebox."""
 
 
 class RecordInvalidError(RecordError):
-    """A record exists but cannot be trusted: unreadable, malformed, an
-    unsupported ``schemaVersion``, or bound to a different worktree path."""
+    """A record exists but cannot be trusted: unreadable, malformed, another
+    ``schemaVersion``, an unknown isolation mode or harness, or bound to a
+    different worktree path."""
 
 
 def record_path(worktree: Path) -> Path:
@@ -142,6 +144,10 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
     for key in ("worktree", "base", "isolation", "harness", "template"):
         if not isinstance(data[key], str):
             raise _invalid(worktree, path, f"{key} must be a string")
+    if data["isolation"] not in VALID_ISOLATION:
+        raise _invalid(worktree, path, f"unknown isolation mode {data['isolation']!r}")
+    if data["harness"] not in VALID_HARNESSES:
+        raise _invalid(worktree, path, f"unknown harness {data['harness']!r}")
     if type(data["firewall"]) is not bool:
         raise _invalid(worktree, path, "firewall must be true or false")
     if not is_valid_template_name(data["template"]):
