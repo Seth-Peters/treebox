@@ -1,9 +1,18 @@
 """Resolve a user-supplied ``<ref>`` to a worktree.
 
-``enter`` and ``teardown`` accept a worktree name, a branch, or a unique
-substring of either — resolved live from ``git worktree list --porcelain``
-(the branch is a mutable attribute; only git knows the current one).
+``enter`` and ``teardown`` accept a worktree name, a branch, a
+unique substring of either, or an absolute worktree path - resolved live
+from ``git worktree list --porcelain`` (the branch is a mutable attribute;
+only git knows the current one).
 Ambiguity is a loud usage error, never a guess.
+
+An absolute path is the exact ref: it matches only the worktree registered at
+that path (the worktree's identity, see ``models.py``) and never falls back to
+a name, branch or substring match. A caller that retries a request - a
+coordinator whose reply was lost - addresses the task by the
+``worktree_path`` that ``create --json`` returned, so a retry of a request
+that already succeeded finds nothing (``NOT_FOUND``) instead of another
+worktree whose name contains the first one's.
 """
 
 from __future__ import annotations
@@ -78,13 +87,23 @@ def candidates(repo: str, root: str) -> list[Candidate]:
 
 
 def resolve_ref(repo: str, root: str, ref: str) -> Candidate:
-    """Name first (exact), then branch (exact), then a unique substring of
+    """An absolute path matches that registered worktree only. Otherwise:
+    name first (exact), then branch (exact), then a unique substring of
     either. Raises NotFoundError / AmbiguousRefError otherwise."""
     if not ref.strip():
         exc = NotFoundError("No worktree ref given (empty).")
         exc.hint = "Pass a worktree name or branch (treebox list shows them)."
         raise exc
     cands = candidates(repo, root)
+    if Path(ref).is_absolute():
+        at_path = [c for c in cands if same_path(c.path, ref)]
+        if at_path:
+            return at_path[0]
+        exc = NotFoundError(f"No worktree is registered at '{ref}'.")
+        exc.hint = (
+            "A path ref matches only that exact worktree; treebox list --json shows each path."
+        )
+        raise exc
     for exact in ([c for c in cands if c.name == ref], [c for c in cands if c.branch == ref]):
         if len(exact) == 1:
             return exact[0]

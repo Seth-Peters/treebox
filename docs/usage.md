@@ -235,7 +235,11 @@ treebox enter fix-auth --harness codex -- --resume
 configured root, including nested directories. The main checkout is excluded.
 They take a **ref**, matched in this order: exact worktree name, exact current
 branch, then a unique substring of either. Branches are read live from git,
-so a renamed branch still works. An ambiguous ref exits `2` and lists the
+so a renamed branch still works. An **absolute path** is an exact ref: it
+matches only the worktree registered at that path (`worktree_path` in
+`create --json`, `path` in `list --json`) and never falls back to a name or
+substring match, so a script that retries a request can never act on another
+worktree ([remote workers](remote-workers.md#requests-and-results)). An ambiguous ref exits `2` and lists the
 matches. If nested worktrees share a name, use their distinct branch refs or
 set `--root` to the target's parent directory. Operations then follow the
 [selected worktree path](how-it-works.md#names-are-identity-branches-are-mutable).
@@ -367,7 +371,7 @@ treebox teardown fix-auth --delete-branch       # ...and its local branch
 treebox teardown fix-auth --yes --json          # unattended: confirm, keep the dirty check
 ```
 
-Takes one or more refs (name, branch, or unique substring). Every ref is
+Takes one or more refs (name, branch, unique substring, or absolute path). Every ref is
 resolved before anything is removed — a typo among three targets removes
 nothing. Refuses to remove a worktree with uncommitted changes unless you pass
 `--force`. It asks for confirmation in a terminal; unattended (`--json`,
@@ -918,6 +922,13 @@ told apart by the last line on stderr:
 
 The prefix `treebox: agent exited with status ` is a contract: match the last
 stderr line against `^treebox: agent exited with status ([0-9]+)`.
+
+For docker, the status comes from `docker exec`, which also ends when the
+container stops or restarts under the agent (an engine restart,
+`docker restart`, a shutdown). Then the agent's own status is unknown, so
+treebox does not print the agent line: it fails with a runtime error (exit
+`1`) that says the sandbox stopped or restarted. Run `treebox enter` again to
+start the agent again in the same worktree.
 
 ### Cancellation
 

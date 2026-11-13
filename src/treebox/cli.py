@@ -1052,7 +1052,11 @@ def create(
 
 @app.command()
 def enter(
-    ref: str = typer.Argument(..., help="Worktree name, branch, or a unique substring of either."),
+    ref: str = typer.Argument(
+        ...,
+        help="Worktree name, branch, or a unique substring of either; "
+        "an absolute path matches only the worktree registered there.",
+    ),
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     isolation: str | None = typer.Option(
@@ -1711,7 +1715,8 @@ def _parse_selection(raw: str, n: int) -> list[int]:
 def teardown(
     refs: list[str] | None = typer.Argument(
         None,
-        help="Worktrees to remove: name, branch, or a unique substring of either. "
+        help="Worktrees to remove: name, branch, or a unique substring of either; "
+        "an absolute path matches only the worktree registered there. "
         "Omit to pick interactively from a status-annotated list.",
     ),
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),

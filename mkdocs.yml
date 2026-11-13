@@ -19,6 +19,7 @@ nav:
   - How it works: how-it-works.md
   - Agents & sandboxing: agents.md
   - Configuration: configuration.md
+  - Remote workers: remote-workers.md
 
 theme:
   name: material
