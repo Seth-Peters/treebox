@@ -71,7 +71,7 @@ branch (`feature/auth` → `feature--auth`; a placeholder drops its `treebox/`
 prefix first, so `treebox/a/b` → `a--b`) unless you pass `NAME` too. It is
 also the deliberate way to resume a branch you own: `create NAME` for a branch
 that already exists (locally or on origin) is a loud `BRANCH_EXISTS` conflict,
-never a silent adoption of old work.
+never a silent reuse of old work.
 
 Sandbox any of these by picking docker isolation:
 

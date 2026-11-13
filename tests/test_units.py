@@ -1412,7 +1412,7 @@ def test_host_prepare_entry_is_a_noop(tmp_path: Path):
 
 def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir):
     """A labeled container this runner didn't create is an explicit error
-    pointing at teardown — not silently adopted with the wrong
+    pointing at teardown - never silently used with the wrong
     name/mounts/user."""
     fake = _FakeDocker(ids="abc123\n", name="funny_wozniak")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)

@@ -801,7 +801,7 @@ class DockerRunner:
         )
 
     def _require_own_container(self, wt: Worktree, name: str) -> None:
-        """Refuse to adopt a container this runner didn't create: its name,
+        """Refuse to use a container this runner did not create: its name,
         mounts, and user don't match what exec expects, so entering it would
         misbehave."""
         if name != self._slug(wt):
@@ -1003,7 +1003,7 @@ def _docker_available() -> bool:
 
 
 class ContainerState(NamedTuple):
-    """One container's state, from a single inspect: the name (adoption
+    """One container's state, from a single inspect: the name (ownership
     check), whether it is running, and whether it was created with the
     firewall baked in (``TREEBOX_FIREWALL=1`` in its env)."""
 

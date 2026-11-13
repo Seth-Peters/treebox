@@ -95,7 +95,7 @@ class BranchInUseError(ProvisionError):
 class BranchConflictError(ProvisionError):
     """The branch an explicit ``create NAME`` would create already exists
     (exit 5, BRANCH_EXISTS). ``create`` promises a fresh branch off
-    origin/<base>; silently adopting an existing one would be a stale-code
+    origin/<base>; silently reusing an existing one would be a stale-code
     hazard — resuming existing work is ``--checkout``'s job."""
 
     def __init__(self, branch: str, where: str) -> None:
