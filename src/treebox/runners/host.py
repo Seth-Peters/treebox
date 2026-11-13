@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-import subprocess
 import tempfile
 from typing import TYPE_CHECKING
 
@@ -18,17 +17,16 @@ from .. import ecosystems
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter
-from ..system import have
-from .base import RunnerFacts, RunnerTeardownResult
+from ..system import SessionCancelled, have, run_agent, signal_name
+from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
     from ..config import Config
 
-# A subscription login is the host runner's only hard requirement: the agent
-# runs directly with the host's ~/.claude / ~/.codex. Beyond git (checked
-# globally) and the agent CLI (verified at launch) there is nothing
-# container-specific to check.
-_FACTS = RunnerFacts(preflight_detail="no container dependencies", login_required=True)
+# The agent runs directly on the host, with the host login (~/.claude /
+# ~/.codex, or the macOS Keychain) and the harness binary on PATH; `doctor`
+# checks both. There is nothing container-specific to check.
+_FACTS = RunnerFacts(preflight_detail="no container dependencies", sandboxed=False)
 _DRY_RUN_COLD_ROOT = "<temporary-dir>/treebox-cold-XXXXXXXX"
 
 
@@ -155,9 +153,20 @@ class HostRunner:
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
         cmd = harness.launch_argv(args)
         if not have(cmd[0]):
-            raise RuntimeError(f"'{cmd[0]}' not found on PATH. {harness.login_hint()}")
-        proc = subprocess.run(cmd, cwd=str(wt.path), env={**os.environ, **wt.treebox_env()})
-        return proc.returncode
+            raise PreflightError(
+                f"'{cmd[0]}' not found on PATH.",
+                error_code="HARNESS_MISSING",
+                hint=harness.login_hint(),
+            )
+        # A cancel signal to treebox is passed on to the agent (the child
+        # process), which is killed if it has not exited after the grace time.
+        code, cancelled = run_agent(cmd, cwd=str(wt.path), env={**os.environ, **wt.treebox_env()})
+        if cancelled is not None:
+            name = signal_name(cancelled)
+            raise SessionCancelled(
+                cancelled, f"Cancelled by {name}: the agent was sent {name} and has exited."
+            )
+        return code
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         # Nothing host-side to tear down beyond the worktree itself; the note

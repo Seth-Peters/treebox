@@ -30,6 +30,7 @@
     "claude",
     "--dangerously-skip-permissions"
   ],
-  "created": true
+  "created": true,
+  "warnings": []
 }
 # --- stderr ---

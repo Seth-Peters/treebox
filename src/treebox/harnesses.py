@@ -23,13 +23,19 @@ Invariants (part of this module's interface, relied on by every caller):
 
 from __future__ import annotations
 
+import getpass
+import json
 import os
 import secrets
-import shutil
+import subprocess
+import sys
 from collections.abc import Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+# Seconds a Keychain read may wait for a person to answer a macOS dialog.
+KEYCHAIN_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -54,10 +60,24 @@ class Harness:
     # authenticate plus its user-level settings. Everything else in the live
     # dir (state, history, host-executed hooks) stays on the host.
     _credential_files: tuple[str, ...]
+    # The one staged file that holds the subscription login itself (a JSON
+    # object); the other staged files are settings.
+    _login_file: str
+    # The macOS Keychain service where the CLI keeps its login on that
+    # platform instead of ``_login_file`` (None: the file is the only store).
+    _keychain_service: str | None = None
+
+    def __post_init__(self) -> None:
+        if self._login_file not in self._credential_files:
+            raise ValueError(f"{self.name}: the login file must be one of the staged files")
 
     def launch_argv(self, extra: Sequence[str]) -> list[str]:
         """The exact fully-autonomous agent argv (extra args appended verbatim)."""
         return [*self._argv, *extra]
+
+    def binary(self) -> str:
+        """The executable the launch argv starts (looked up on PATH)."""
+        return self._argv[0]
 
     def login_dir(self) -> str:
         """The host login dir as shown to humans (``~/.claude``)."""
@@ -67,22 +87,61 @@ class Harness:
         """The expanded host login dir: doctor's row detail, staging's source."""
         return Path(self._credential_dir).expanduser()
 
-    def credentials_present(self) -> bool:
-        """True when the subscription-login dir exists and is non-empty."""
-        d = self.credential_path()
-        return d.is_dir() and any(d.iterdir())
+    def login_file(self) -> Path:
+        """The host file that holds the subscription login: the one file a
+        sandbox needs a copy of to authenticate."""
+        return self.credential_path() / self._login_file
+
+    def login(self) -> str | None:
+        """Where the login an agent uses (and a sandbox gets a copy of) lives
+        on this machine, or None: a non-empty JSON object from ``_read``.
+        """
+        try:
+            where, content = self._read(self._login_file) or ("", b"")
+            data = json.loads(content)
+        except (OSError, ValueError):
+            return None
+        return where if isinstance(data, dict) and data else None
+
+    def _read(self, name: str) -> tuple[str, bytes] | None:
+        """``(where, contents)`` of one staged file, or None. The one rule:
+        the host file first; for the login file only, when it is absent on
+        macOS, this user's item in the harness's Keychain service. The read
+        has a time limit and no stdin: an unanswered or denied macOS dialog
+        is None, never a wait. A stale item of another account can exist.
+        """
+        path = self.credential_path() / name
+        if path.is_file():
+            return str(path), path.read_bytes()
+        if name != self._login_file or not self._keychain_service or sys.platform != "darwin":
+            return None
+        item = ["-a", getpass.getuser(), "-s", self._keychain_service, "-w"]
+        try:
+            read = subprocess.run(
+                ["security", "find-generic-password", *item],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=KEYCHAIN_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if read.returncode != 0:
+            return None
+        return f"macOS Keychain ({self._keychain_service})", read.stdout.removesuffix(b"\n")
 
     def login_hint(self) -> str:
         """How to obtain a login, for launch errors and doctor advice."""
-        return (
-            f"Install the {self.name} CLI and log in "
-            f"(writes {self._credential_dir}) before launching."
-        )
+        where = self._credential_dir
+        if self._keychain_service:
+            where += (
+                f"; on macOS the Keychain item '{self._keychain_service}': allow access if asked"
+            )
+        return f"Install the {self.name} CLI and log in (writes {where}) before launching."
 
     def stage_credentials(self, dest: Path) -> None:
         """Stage scoped copies of the login files into ``dest`` (created 0700).
 
-        Copy-or-drop semantics: a present source file is copied (0600) so
+        Copy-or-drop semantics: a present source (see ``_read``) is copied (0600) so
         in-container token refresh and agent state work against the copy; a
         staged copy whose source is gone (host logout) is deleted. Both a
         re-login and a revocation therefore reach the sandbox on the next
@@ -107,11 +166,9 @@ class Harness:
                     dest.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
                 )
                 stack.callback(os.close, dest_fd)
-                src_dir = self.credential_path()
                 for name in self._credential_files:
-                    src = src_dir / name
-                    if src.is_file():
-                        _replace_credential(src, name, parent_fd, dest_fd)
+                    if found := self._read(name):
+                        _replace_credential(found[1], name, parent_fd, dest_fd)
                     else:
                         with suppress(FileNotFoundError):
                             os.unlink(name, dir_fd=dest_fd)
@@ -131,7 +188,7 @@ class Harness:
         return staged, f"/home/{user}/.{self.name}"
 
 
-def _replace_credential(src: Path, name: str, parent_fd: int, dest_fd: int) -> None:
+def _replace_credential(content: bytes, name: str, parent_fd: int, dest_fd: int) -> None:
     """Publish a private host-side copy without following destination links."""
     temporary = f".treebox-credential-{secrets.token_hex(16)}"
     fd = os.open(
@@ -141,9 +198,9 @@ def _replace_credential(src: Path, name: str, parent_fd: int, dest_fd: int) -> N
         dir_fd=parent_fd,
     )
     try:
-        with os.fdopen(fd, "wb") as out, src.open("rb") as source:
+        with os.fdopen(fd, "wb") as out:
             os.fchmod(out.fileno(), 0o600)
-            shutil.copyfileobj(source, out)
+            out.write(content)
         os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=dest_fd)
     finally:
         with suppress(FileNotFoundError):
@@ -155,6 +212,8 @@ CLAUDE = Harness(
     _argv=("claude", "--dangerously-skip-permissions"),
     _credential_dir="~/.claude",
     _credential_files=(".credentials.json", "settings.json"),
+    _login_file=".credentials.json",
+    _keychain_service="Claude Code-credentials",
 )
 
 CODEX = Harness(
@@ -162,6 +221,7 @@ CODEX = Harness(
     _argv=("codex", "--dangerously-bypass-approvals-and-sandbox"),
     _credential_dir="~/.codex",
     _credential_files=("auth.json", "config.toml"),
+    _login_file="auth.json",
 )
 
 # The registry. Order is user-facing: doctor's login rows and help text list

@@ -50,7 +50,7 @@ def _fixture(tmp_path: Path):
     (live / "auth.json").write_text("synthetic token")
     dest = tmp_path / "host-owned" / "mounted"
     dest.mkdir(parents=True)
-    return Harness("test", ("test",), str(live), ("auth.json",)), live, dest
+    return Harness("test", ("test",), str(live), ("auth.json",), "auth.json"), live, dest
 
 
 @pytest.mark.parametrize("logged_in", [True, False])

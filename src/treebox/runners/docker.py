@@ -64,13 +64,17 @@ open-egress run.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
@@ -80,6 +84,7 @@ from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
 from ..models import Worktree, derive_name, expand_user, is_valid_name
 from ..output import Reporter, StepError
+from ..system import STOP_GRACE_SECONDS, SessionCancelled, run_agent, signal_name
 from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
@@ -150,6 +155,20 @@ _FIREWALL_GUARDED = (
     'if [ "$TREEBOX_FIREWALL" = "1" ]; then /usr/local/bin/init-firewall.sh; fi',
 )
 
+# In-container helpers for a cancellable agent session (``launch``). The
+# wrapper writes its pid to the file in $0, then execs the agent in that same
+# process. The other two read the pid back: signal the agent's process group
+# (falling back to the agent alone), and test whether the agent still runs.
+_AGENT_WRAPPER = 'echo "$$" > "$0" && exec "$@"'
+_AGENT_SIGNAL = (
+    'p=$(cat "$0" 2>/dev/null) && [ -n "$p" ] && '
+    '{ kill -s "$1" -- "-$p" 2>/dev/null || kill -s "$1" "$p"; }'
+)
+_AGENT_ALIVE = (
+    'p=$(cat "$0" 2>/dev/null) && [ -n "$p" ] && '
+    '{ kill -0 -- "-$p" 2>/dev/null || kill -0 "$p" 2>/dev/null; }'
+)
+
 
 def has_resource_manifest(worktree: Path) -> bool:
     """Whether the host-owned resource manifest of the docker worktree at
@@ -213,9 +232,9 @@ def _mount(
     return spec
 
 
-# Credentials are copied from the host login dirs at setup time, so a missing
-# login is advisory rather than a hard gate in `doctor`'s machine verdict.
-_FACTS = RunnerFacts(preflight_detail="docker daemon ok", login_required=False)
+# The agent runs in the sandbox: its binary comes from the image and its login
+# is a staged copy of the harness login file (what `doctor` checks).
+_FACTS = RunnerFacts(preflight_detail="docker daemon ok", sandboxed=True)
 
 
 class DockerRunner:
@@ -879,7 +898,83 @@ class DockerRunner:
         )
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
-        return subprocess.run(self.entry_command(wt, harness=harness, args=args)).returncode
+        """Run the agent in the sandbox. A cancel signal to treebox is passed
+        on to the agent's process group inside the container (``docker exec``
+        alone would leave it running there); the agent is killed if it has
+        not exited after the grace time. The container keeps running.
+        ``_run_session`` has already run ``prepare_entry``."""
+        user = self._user(wt)
+        slug = self._slug(wt)
+        probe = self._engine(
+            ["exec", "-u", user, slug, "sh", "-c", 'command -v "$0" >/dev/null', harness.binary()]
+        )
+        if probe.returncode != 0:
+            raise PreflightError(
+                f"'{harness.binary()}' not found in the sandbox of '{wt.name}'.",
+                error_code="HARNESS_MISSING",
+                hint="Install it in the operator template's Dockerfile "
+                f"(treebox template path {self.config.template}), then re-create the "
+                f"sandbox: treebox teardown {wt.name} && treebox create {wt.name} "
+                f"--isolation {self.name}",
+            )
+        # The wrapper records the agent's pid (it execs into the agent), so a
+        # cancel can reach the agent itself, not only the local docker CLI.
+        pidfile = f"/tmp/treebox-agent-{secrets.token_hex(8)}.pid"
+        entry = self.entry_command(wt, harness=harness, args=args)
+        at = entry.index(slug) + 1
+        argv = [*entry[:at], "sh", "-c", _AGENT_WRAPPER, pidfile, *entry[at:]]
+
+        def stop(proc: subprocess.Popen[bytes], signum: int) -> None:
+            self._signal_agent(user, slug, pidfile, signum)
+            if signum == signal.SIGKILL:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+
+        code, cancelled = run_agent(argv, stop=stop)
+        if cancelled is None:
+            self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
+            return code
+        # The local docker CLI can end before the agent in the container does
+        # (it got the signal too): wait for the agent itself, then kill it.
+        deadline = time.monotonic() + STOP_GRACE_SECONDS
+        while self._agent_alive(user, slug, pidfile) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if self._agent_alive(user, slug, pidfile):
+            self._signal_agent(user, slug, pidfile, signal.SIGKILL)
+            time.sleep(0.5)
+        alive = self._agent_alive(user, slug, pidfile)
+        self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
+        name = signal_name(cancelled)
+        outcome = (
+            f"treebox could not confirm that the agent stopped (check: docker top {slug})"
+            if alive
+            else "the agent in the container was stopped; the container keeps running"
+        )
+        raise SessionCancelled(cancelled, f"Cancelled by {name}: {outcome}.")
+
+    def _signal_agent(self, user: str, slug: str, pidfile: str, signum: int) -> None:
+        """Send ``signum`` to the agent's process group in the container (or
+        to the agent alone when it leads no group). Runs as the agent's own
+        user, so it can reach nothing the agent could not."""
+        self._engine(
+            [
+                "exec",
+                "-u",
+                user,
+                slug,
+                "sh",
+                "-c",
+                _AGENT_SIGNAL,
+                pidfile,
+                signal_name(signum).removeprefix("SIG"),
+            ]
+        )
+
+    def _agent_alive(self, user: str, slug: str, pidfile: str) -> bool:
+        return (
+            self._engine(["exec", "-u", user, slug, "sh", "-c", _AGENT_ALIVE, pidfile]).returncode
+            == 0
+        )
 
     def prepare_entry(self, wt: Worktree) -> None:
         """Start the container if it stopped since setup (host reboot, manual

@@ -107,6 +107,31 @@ def test_setup_print_json_enter_and_list_expose_the_same_identity(
     assert (row["port_base"], row["port_count"]) == (20000, 10)
 
 
+def test_a_real_host_launch_gives_the_agent_the_identity(
+    repo: Path, tmp_path: Path, agent_ready: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """create and enter without --print / --json launch the stub agent
+    through the cancellable launch path; it sees the same variables."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('setup_hook = ["true"]\n')
+    monkeypatch.setenv("TREEBOX_CONFIG", str(cfg))
+    seen = tmp_path / "agent-env.txt"
+    (agent_ready / "claude").write_text(f'#!/bin/sh\nenv | grep "^TREEBOX_" | sort > {seen}\n')
+    root = str(tmp_path / "wts")
+    res = _run(["create", "svc", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 0, res.output
+    expected = {
+        "TREEBOX_NAME": "svc",
+        "TREEBOX_ID": worktree_id(Path(root) / "svc"),
+        "TREEBOX_PORT_BASE": "20000",
+        "TREEBOX_PORT_COUNT": "10",
+    }
+    assert _treebox_vars(seen.read_text()) == expected
+    seen.unlink()
+    assert _run(["enter", "svc", "--repo", str(repo), "--root", root]).exit_code == 0
+    assert _treebox_vars(seen.read_text()) == expected
+
+
 def test_setup_rerun_by_enter_sees_the_same_identity(
     repo: Path, tmp_path: Path, env_hook: Path
 ) -> None:
