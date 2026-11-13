@@ -98,15 +98,11 @@ last tag, so it has no `[Unreleased]` section.
 
 ## Releasing
 
-1. Write the `CHANGELOG.md` entry for everything merged since the last tag:
-   list it with `git log --oneline <last-tag>..origin/main`, add a
-   `## [X.Y.Z] - YYYY-MM-DD` section with one item per user-facing change
-   (cite the pull request number from the squash-commit title), and merge it
-   to `main`.
-2. Tag that commit `vX.Y.Z` and push the tag. The `Release` workflow
-   (`.github/workflows/release.yml`) builds and publishes it.
-
-## Releasing
+First write the `CHANGELOG.md` entry for everything merged since the last tag:
+list it with `git log --oneline <last-tag>..origin/main`, add a
+`## [X.Y.Z] - YYYY-MM-DD` section with one item per user-facing change
+(cite the pull request number from the squash-commit title), and merge it
+to `main`. Then release that commit as described below.
 
 The `Release` workflow (`.github/workflows/release.yml`) publishes treebox.
 It first runs the full CI validation (`ci.yml`: the test matrix and
