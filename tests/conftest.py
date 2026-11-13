@@ -40,6 +40,40 @@ def isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
 
 
+@pytest.fixture(autouse=True)
+def scratch_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point HOME at an empty scratch dir for every test.
+
+    treebox reads the agent logins from ``~/.claude`` / ``~/.codex`` (and, on
+    macOS, probes the Keychain, which follows HOME). No test may read or
+    write the developer's real logins, and no test may pass or fail because
+    of them. Tests that need a logged-in agent use ``agent_ready``.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.fixture
+def agent_ready(scratch_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A logged-in agent for launch and doctor tests: synthetic login files in
+    the scratch HOME and a stub ``claude`` / ``codex`` first on PATH (it
+    prints its args and exits 0; never a real agent). Returns the stub dir,
+    so a test can replace a stub with its own script."""
+    (scratch_home / ".claude").mkdir()
+    (scratch_home / ".claude" / ".credentials.json").write_text('{"token": "test"}\n')
+    (scratch_home / ".codex").mkdir()
+    (scratch_home / ".codex" / "auth.json").write_text('{"token": "test"}\n')
+    stubs = tmp_path / "agent-stubs"
+    stubs.mkdir()
+    for name in ("claude", "codex"):
+        stub = stubs / name
+        stub.write_text('#!/bin/sh\necho "stub agent: $*"\n')
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stubs}{os.pathsep}{os.environ['PATH']}")
+    return stubs
+
+
 def _git(*args: str, cwd: Path) -> str:
     env = dict(os.environ)
     env.update(

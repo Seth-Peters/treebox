@@ -88,7 +88,9 @@ SCHEMA_VERSION = 1
 _EPILOG = (
     "Exit codes: 0 ok · 1 runtime (incl. failed setup, incomplete teardown)/doctor "
     "hard-check · 2 usage · 3 not-found · 4 auth/permission · 5 conflict "
-    "(exists/locked/dirty)."
+    "(exists/locked/dirty). A launch exits with the agent's exit code (non-zero: "
+    "the last stderr line is 'treebox: agent exited with status N'); a "
+    "SIGINT/SIGTERM/SIGHUP to treebox stops the agent and exits 128+signal."
 )
 
 app = typer.Typer(
@@ -479,8 +481,11 @@ def _short_path(path: Path | str, repo: str) -> str:
         return str(p)
 
 
-def _emit_result(outcome: provision.Outcome, *, json_out: bool, print_only: bool) -> None:
-    """Write the machine/script-facing result to stdout."""
+def _emit_result(
+    outcome: provision.Outcome, *, json_out: bool, print_only: bool, warnings: list[str]
+) -> None:
+    """Write the machine/script-facing result to stdout. ``warnings`` are the
+    run's warnings (an additive payload field: empty when nothing was skipped)."""
     if json_out:
         payload = {
             "schemaVersion": SCHEMA_VERSION,
@@ -490,6 +495,7 @@ def _emit_result(outcome: provision.Outcome, *, json_out: bool, print_only: bool
             "base": outcome.worktree.base,
             "entry_command": outcome.entry_command,
             "created": outcome.created,
+            "warnings": warnings,
         }
         _emit_json(payload)
     elif print_only:
@@ -534,6 +540,7 @@ def _dry_run(
                 "worktree_path": str(wt.path),
                 "branch": branch,
                 "commands": cmds,
+                "warnings": reporter.warnings,
             }
         )
         return
@@ -615,7 +622,16 @@ def create(
         False, "--json", help="Provision, then print a JSON result (no launch)."
     ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Stream raw command output (to stderr)."
+    ),
+    args: list[str] | None = typer.Argument(
+        None,
+        help="Extra args passed to the agent, after -- and after NAME "
+        "(create NAME -- ARGS...), exactly as for enter. With --json or "
+        "--print they are part of the emitted entry_command.",
+        show_default=False,
+    ),
 ) -> None:
     """Provision a worktree and launch the agent harness in it.
 
@@ -630,6 +646,16 @@ def create(
     A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
     exit status, and the file with its output). The worktree is kept and
     marked unfinished; `treebox enter NAME` or the same create retries setup.
+
+    To start the agent on a task, put its args after NAME and --
+    (create fix-auth -- -p "fix the login race"). A nameless create takes
+    no agent args: give a NAME.
+
+    When it launches (no --json, --print, --dry-run), create exits with the
+    agent's exit code; a non-zero one is named in the last stderr line
+    ("treebox: agent exited with status N"). SIGINT, SIGTERM or SIGHUP to
+    treebox stops the agent (inside the container for docker) and exits
+    128+signal (CANCELLED).
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -645,6 +671,22 @@ def create(
         template=template,
         json_out=json_out,
     )
+    if checkout is None and name is not None and name.startswith("-"):
+        # Without --checkout, NAME is the branch, and a dash-led branch is
+        # never valid (INVALID_BRANCH, as always). It usually means
+        # `create -- ARGS`: the first agent arg took the name slot. Say how
+        # to pass agent args. With --checkout, NAME is only the worktree
+        # name, and a dash-led one is valid (`create --checkout B -- -auth`,
+        # the firewall recovery command for a `treebox/-auth` worktree).
+        raise _die(
+            reporter,
+            f"Invalid branch name '{name}'.",
+            code=EXIT_USAGE,
+            error_code="INVALID_BRANCH",
+            hint="A name cannot start with '-'. To pass agent args, name the worktree "
+            "first: treebox create NAME -- ARGS...",
+            json_out=json_out,
+        )
     if name is not None:
         _validate_name(reporter, name, json_out=json_out)
     if checkout is not None:
@@ -724,12 +766,13 @@ def create(
             harness=agent,
             cold=cold,
             fetch=not no_fetch,
-            # Prompt for git credentials whenever a terminal is attached —
-            # like `git pull`. ssh's passphrase prompt uses the tty/stderr,
-            # so it stays out of the way of --json's stdout.
-            interactive=sys.stdin.isatty(),
+            # Prompt for git credentials only when treebox may ask (a
+            # terminal, no --non-interactive) - like `git pull`. git and ssh
+            # ask on the terminal itself, out of the way of --json's stdout.
+            interactive=_interactive(),
             reporter=reporter,
             existing_branch=checkout is not None,
+            args=args or [],
         )
 
     _run_session(
@@ -740,7 +783,7 @@ def create(
         provision_call=_provision,
         json_out=json_out,
         print_only=print_only,
-        args=[],
+        args=args or [],
     )
 
 
@@ -775,7 +818,9 @@ def enter(
         False, "--json", help="Prepare, then print a JSON result (no launch)."
     ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Stream raw command output (to stderr)."
+    ),
     args: list[str] | None = typer.Argument(
         None, help="Extra args passed to the agent (after --)."
     ),
@@ -784,6 +829,11 @@ def enter(
 
     An unfinished or failed setup runs again; if a setup step fails, enter
     fails too (exit 1, SETUP_FAILED) and the next enter retries it.
+
+    When it launches (no --json, --print), enter exits with the agent's exit
+    code; a non-zero one is named in the last stderr line ("treebox: agent
+    exited with status N"). SIGINT, SIGTERM or SIGHUP to treebox stops the
+    agent (inside the container for docker) and exits 128+signal (CANCELLED).
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -881,11 +931,23 @@ def _run_session(
     host runner) fail fast with a clean error + hint — before any git state
     is touched, and never surfacing a stopped docker daemon deep inside
     launch as a misleading "no container" that steers users into a
-    destructive teardown.
+    destructive teardown. A launch also checks the agent first (the harness
+    binary on the host; in unattended mode also its login), so a missing
+    prerequisite fails before anything is provisioned.
+
+    Launch contract: treebox exits with the agent's exit code. When the
+    agent exits non-zero, the last stderr line is ``AGENT_EXIT_PREFIX`` and
+    that code, so a caller can tell an agent exit from a treebox failure
+    (which always prints its classified error instead). A cancel signal
+    (SIGINT, SIGTERM, SIGHUP) stops the agent and exits ``128 + signum``
+    with ``CANCELLED``.
     """
     started = time.monotonic()
+    launching = not (json_out or print_only)
     try:
         run.preflight(reporter)
+        if launching:
+            _require_agent(run, harness, login=not _interactive())
         with locking.worktree_lock(path):
             outcome = provision_call()
             # Every entry - launch and emit alike - makes the sandbox
@@ -897,8 +959,8 @@ def _run_session(
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
-    if json_out or print_only:
-        _emit_result(outcome, json_out=json_out, print_only=print_only)
+    if not launching:
+        _emit_result(outcome, json_out=json_out, print_only=print_only, warnings=reporter.warnings)
         return
     reporter.blank()
     # Style-A closing line: green "Ready", dim "in <total> — launching <harness>".
@@ -907,9 +969,88 @@ def _run_session(
     reporter.restore_terminal()
     try:
         code = run.launch(outcome.worktree, harness=harness, args=args)
+    except system.SessionCancelled as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=128 + exc.signum,
+            error_code="CANCELLED",
+            hint=f"The worktree is kept. Start the agent again: treebox enter "
+            f"{outcome.worktree.name}",
+        ) from exc
     except RuntimeError as exc:
-        raise _die(reporter, str(exc)) from exc
-    raise typer.Exit(code)
+        raise _handle(reporter, exc, json_out=False) from exc
+    if code == 0:
+        raise typer.Exit(0)
+    # A negative code: the agent was killed by that signal (shell convention).
+    status = code if code > 0 else 128 - code
+    killed = f" (killed by {system.signal_name(-code)})" if code < 0 else ""
+    sys.stderr.write(f"{AGENT_EXIT_PREFIX}{status}{killed}\n")
+    sys.stderr.flush()
+    raise typer.Exit(status)
+
+
+# The fixed prefix of the one line treebox prints last, on stderr, when the
+# launched agent exits non-zero: "treebox: agent exited with status <N>". A
+# documented contract (docs/usage.md): a caller tells an agent exit from a
+# treebox failure by it. Never printed for a treebox failure.
+AGENT_EXIT_PREFIX = "treebox: agent exited with status "
+
+
+def _agent_binary_check(run: Runner, harness: Harness) -> DoctorCheck:
+    """The harness binary, where the agent runs. On the host it must be on
+    PATH; in a sandbox it is part of the image, checked at launch."""
+    name = f"agent: {harness.name}"
+    if run.facts().sandboxed:
+        return DoctorCheck(name, True, f"in the {run.name} sandbox image · checked at launch")
+    found = shutil.which(harness.binary())
+    if found:
+        return DoctorCheck(name, True, found)
+    return DoctorCheck(
+        name,
+        False,
+        f"'{harness.binary()}' not found on PATH",
+        f"Install the {harness.name} CLI so '{harness.binary()}' is on PATH.",
+    )
+
+
+def _agent_login_check(run: Runner, harness: Harness, *, required: bool = True) -> DoctorCheck:
+    """The harness's subscription login, as the agent will see it: the host
+    login on the host; in a sandbox, the login file it gets a copy of."""
+    name = f"login: {harness.name}"
+    sandboxed = run.facts().sandboxed
+    found = harness.sandbox_login() if sandboxed else harness.host_login()
+    if found:
+        return DoctorCheck(name, True, found, required=required)
+    advisory = harness.login_hint()
+    if sandboxed:
+        advisory += (
+            f" A {run.name} sandbox gets a copy of {harness.login_file()}, so that "
+            "file must hold the login."
+        )
+    return DoctorCheck(
+        name, False, f"no login at {harness.login_file()}", advisory, required=required
+    )
+
+
+def _require_agent(run: Runner, harness: Harness, *, login: bool) -> None:
+    """Fail a launch before provisioning when the agent cannot start: no
+    harness binary (HARNESS_MISSING) or, with ``login``, no usable login
+    (LOGIN_MISSING) - an unattended agent would otherwise wait in its own
+    login flow."""
+    binary = _agent_binary_check(run, harness)
+    if not binary.ok:
+        raise PreflightError(
+            binary.detail + ".", error_code="HARNESS_MISSING", hint=binary.advisory
+        )
+    if login:
+        check = _agent_login_check(run, harness)
+        if not check.ok:
+            raise PreflightError(
+                f"No {harness.name} login for an unattended launch: {check.detail}.",
+                error_code="LOGIN_MISSING",
+                hint=check.advisory,
+            )
 
 
 # --- list --------------------------------------------------------------------
@@ -1024,6 +1165,17 @@ _PT_STYLE = {
 def _stdin_isatty() -> bool:
     """Indirection so tests can simulate an interactive terminal."""
     return sys.stdin.isatty()
+
+
+# Set by the global --non-interactive option (or $TREEBOX_NON_INTERACTIVE).
+_NON_INTERACTIVE = False
+
+
+def _interactive() -> bool:
+    """Whether treebox may ask the user anything: a terminal on stdin, and no
+    --non-interactive. The one gate for pickers, prompts and credential
+    prompts, so unattended mode holds with or without a terminal."""
+    return not _NON_INTERACTIVE and _stdin_isatty()
 
 
 class _PickerEntry(NamedTuple):
@@ -1266,14 +1418,27 @@ def teardown(
         False, "--remove-volumes", help="Also remove treebox volumes."
     ),
     force: bool = typer.Option(
-        False, "--force", help="Remove even with uncommitted changes / no prompt."
+        False,
+        "--force",
+        help="Remove even with uncommitted changes, and without the confirmation "
+        "prompt. Never removes a worktree locked with `git worktree lock`.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Answer the confirmation prompt with yes, for unattended use. Only "
+        "the prompt: a worktree with uncommitted changes is still refused "
+        "(DIRTY_WORKTREE, exit 5); add --force to remove it anyway.",
     ),
     skip_container: bool = typer.Option(
         False, "--skip-container", help="Do not touch containers/images."
     ),
     json_out: bool = typer.Option(False, "--json", help="Print a JSON record of what was removed."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Stream raw command output (to stderr)."
+    ),
 ) -> None:
     """Remove worktree directories (and optionally their branches); caches are left intact.
 
@@ -1281,6 +1446,10 @@ def teardown(
     names what remains (for example a container docker could not remove) and
     keeps the worktree and its record, so the same command retries. A
     worktree locked with `git worktree lock` is never removed.
+
+    Unattended (--json, --non-interactive, or no terminal) there is no
+    prompt: pass --yes to confirm. --yes keeps the uncommitted-changes
+    check (DIRTY_WORKTREE, exit 5); --force removes those too.
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -1304,7 +1473,7 @@ def teardown(
     # --json / non-TTY must not block on a picker — same contract as the prompt.
     from_chooser = False
     if not refs:
-        if json_out or not _stdin_isatty():
+        if json_out or not _interactive():
             raise _die(
                 reporter,
                 "Refusing to choose a worktree non-interactively.",
@@ -1397,10 +1566,11 @@ def teardown(
     skipped: list[tuple[resolve.Candidate, TeardownBlock]] = []
     targets = _gate(targets)
 
-    if not force and not from_chooser and any(Path(c.path).is_dir() for c in targets):
-        # --json is a scripting contract: never block on a prompt (and never
-        # let one leak into stdout) — require --force instead.
-        if _stdin_isatty() and not json_out:
+    confirmed = force or yes or from_chooser
+    if not confirmed and any(Path(c.path).is_dir() for c in targets):
+        # --json and unattended mode are a scripting contract: never block on
+        # a prompt (and never let one leak into stdout) - require --yes.
+        if _interactive() and not json_out:
             listed = ", ".join(c.name for c in targets)
             plural = "s" if len(targets) != 1 else ""
             typer.confirm(f"Remove worktree{plural} {listed}?", abort=True)
@@ -1410,7 +1580,8 @@ def teardown(
                 "Refusing to remove non-interactively without confirmation.",
                 code=EXIT_CONFLICT,
                 error_code="NEEDS_CONFIRMATION",
-                hint="Pass --force for non-interactive teardown.",
+                hint="Pass --yes to confirm (uncommitted changes still block the removal), "
+                "or --force to also remove uncommitted changes.",
                 json_out=json_out,
             )
 
@@ -1460,7 +1631,9 @@ def teardown(
         _report_skipped(reporter, skipped, removed=sum(r["complete"] for r in records))
 
     if json_out:
-        _emit_json({"schemaVersion": SCHEMA_VERSION, "worktrees": records})
+        _emit_json(
+            {"schemaVersion": SCHEMA_VERSION, "worktrees": records, "warnings": reporter.warnings}
+        )
 
     # An incomplete cleanup is a failed teardown: name what remains. Nothing
     # that names it was deleted, so the same command retries.
@@ -1645,20 +1818,38 @@ def doctor(
         "--isolation",
         help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
+    harness: str | None = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help=f"Agent harness to check: {'|'.join(VALID_HARNESSES)}. Default: the "
+        "config default (the harness create launches).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """Check git, login credentials, UID/GID, and isolation-specific dependencies."""
+    """Check git, the agent, its login, UID/GID, and isolation-specific dependencies.
+
+    For the selected harness (--harness, else the config default) doctor
+    checks what a launch needs, where the agent runs: on the host, the
+    harness binary on PATH and a real login (its login file, or on macOS
+    the Keychain item the CLI keeps it in); in a docker sandbox, the login
+    file the sandbox gets a copy of (the binary is part of the image and is
+    checked at launch). A login dir that merely exists is no login. Those
+    two rows are hard checks (exit 1), like git, repo and isolation; the
+    other harnesses' logins are shown as optional.
+    """
     reporter = Reporter(silent=json_out)
     cfg = _resolve_config(
         reporter,
         isolation=isolation,
-        harness=None,
+        harness=harness,
         base=None,
         root=None,
         firewall=None,
         json_out=json_out,
     )
     run = get_runner(cfg)
+    selected = get_harness(cfg.harness)
 
     # Instant checks: no I/O worth spinning on, so they print immediately.
     checks: list[DoctorCheck] = []
@@ -1677,14 +1868,9 @@ def doctor(
     ident = system.identity()
     checks.append(DoctorCheck("uid/gid", True, f"{ident.uid}:{ident.gid}"))
 
-    for harness in HARNESSES:
-        checks.append(
-            DoctorCheck(
-                f"login: {harness.name}",
-                harness.credentials_present(),
-                str(harness.credential_path()),
-            )
-        )
+    checks.append(_agent_binary_check(run, selected))
+    for h in HARNESSES:
+        checks.append(_agent_login_check(run, h, required=h is selected))
 
     # Same resolver copy_env uses, so doctor reports the exact secrets source
     # provisioning will copy.
@@ -1733,28 +1919,20 @@ def doctor(
         ("checking git auth", _check_git_auth),
         ("checking isolation", _check_runner),
     ]
-    advisories: list[str] = []
-
     if json_out:
-        for _, check in slow:
-            result = check()
-            checks.append(result)
-            if result.advisory:
-                advisories.append(result.advisory)
-        # Credentials are the only hard gate for the host runner: at least one login.
-        has_login = any(c.ok for c in checks if c.name.startswith("login:"))
-        problems = _doctor_problems(checks)
+        checks.extend(check() for _, check in slow)
+        problems = _doctor_problems(checks, selected)
         payload = {
             "schemaVersion": SCHEMA_VERSION,
-            "ok": not problems and (has_login or not run.facts().login_required),
+            "ok": not problems,
             "isolation": cfg.isolation,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
-            "advisories": advisories,
+            "advisories": _doctor_advisories(checks),
         }
         _emit_json(payload)
         # Same exit-code contract as the human path: hard checks (git, repo,
-        # runner) failing mean exit 1, so `doctor --json && create` in CI can
-        # branch on $? instead of parsing `ok`.
+        # the selected agent and its login, runner) failing mean exit 1, so
+        # `doctor --json && create` in CI can branch on $? instead of `ok`.
         if problems:
             raise typer.Exit(1)
         return
@@ -1764,22 +1942,27 @@ def doctor(
     names_ = [c.name for c in checks] + ["git auth", f"isolation: {run.name}"]
     width = max(len(name) for name in names_)
 
-    checks, advisories = reporter.render_doctor(checks, slow, cfg.isolation, width)
-    has_login = any(c.ok for c in checks if c.name.startswith("login:"))
-    problems = _doctor_problems(checks)
-    reporter.render_doctor_verdict(problems=problems, has_login=has_login, advisories=advisories)
+    checks, _ = reporter.render_doctor(checks, slow, cfg.isolation, width)
+    problems = _doctor_problems(checks, selected)
+    reporter.render_doctor_verdict(problems=problems, advisories=_doctor_advisories(checks))
     if problems:
         raise typer.Exit(1)
 
 
-def _doctor_problems(checks: list[DoctorCheck]) -> list[str]:
-    """The hard-check failures (git, repo, isolation) that make doctor exit 1 —
-    one definition so the human and --json paths share an exit-code contract."""
+def _doctor_problems(checks: list[DoctorCheck], selected: Harness) -> list[str]:
+    """The hard-check failures (git, repo, the selected harness's binary and
+    login, isolation) that make doctor exit 1 - one definition so the human
+    and --json paths share an exit-code contract."""
+    hard = {"git", "repo", f"agent: {selected.name}", f"login: {selected.name}"}
     return [
-        c.name
-        for c in checks
-        if not c.ok and (c.name.startswith("isolation") or c.name in ("git", "repo"))
+        c.name for c in checks if not c.ok and (c.name in hard or c.name.startswith("isolation"))
     ]
+
+
+def _doctor_advisories(checks: list[DoctorCheck]) -> list[str]:
+    """How to fix each failing check that matters (an optional row's
+    advisory, such as another harness's login, is not shown)."""
+    return [c.advisory for c in checks if c.advisory and not c.ok and c.required]
 
 
 # --- version -----------------------------------------------------------------
@@ -2112,7 +2295,22 @@ def main(
         is_eager=True,
         help="Show version and exit.",
     ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        envvar="TREEBOX_NON_INTERACTIVE",
+        help="Unattended mode, also with a terminal attached: treebox never "
+        "opens a picker, asks a question, prompts for git or ssh credentials, "
+        "or waits on the terminal. What would need an answer fails with a "
+        "classified error instead (teardown without --yes or --force is "
+        "NEEDS_CONFIRMATION; a fetch that needs credentials is FETCH_FAILED), "
+        "and a launch without a usable agent login is LOGIN_MISSING. Give it "
+        "before the command: treebox --non-interactive create NAME. "
+        "Without a terminal on stdin, treebox already behaves this way.",
+    ),
 ) -> None:
+    global _NON_INTERACTIVE
+    _NON_INTERACTIVE = non_interactive
     # Restore default SIGPIPE handling on POSIX so piping output into `head` /
     # `grep -m1` ends the process quietly (SIGPIPE, exit 141) instead of
     # surfacing "BrokenPipeError ignored" noise or a traceback at shutdown.

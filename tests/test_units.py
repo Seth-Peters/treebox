@@ -977,7 +977,7 @@ def test_harness_credentials_are_scoped_copies(tmp_path: Path, monkeypatch: pyte
 
     claude = get_harness("claude")
     assert claude.credential_path() == live  # staging reads the login dir
-    assert claude.credentials_present()
+    assert claude.sandbox_login() == str(live / ".credentials.json")
 
     staged = tmp_path / "staged" / "claude"
     claude.stage_credentials(staged)
@@ -996,9 +996,9 @@ def test_harness_credentials_are_scoped_copies(tmp_path: Path, monkeypatch: pyte
     claude.stage_credentials(staged)
     assert not (staged / ".credentials.json").exists()
 
-    # An absent login dir stages nothing and is reported not-present.
+    # An absent login dir stages nothing and is reported as no login.
     codex = get_harness("codex")
-    assert not codex.credentials_present()
+    assert codex.sandbox_login() is None
     codex.stage_credentials(tmp_path / "staged" / "codex")
     assert list((tmp_path / "staged" / "codex").iterdir()) == []
 
@@ -3186,19 +3186,18 @@ def test_runner_dry_run_setup_protocol_cannot_drift():
 
 
 def test_runner_facts_pin_doctor_vocabulary():
-    """Doctor's per-runner strings and login gate come from RunnerFacts: the
-    host runner hard-requires a subscription login (the agent runs with the
-    live host dirs); the docker runner stages copies, so a missing login is
-    advisory."""
+    """Doctor's per-runner strings and where the agent runs come from
+    RunnerFacts: the host runner runs it on the host (binary on PATH, host
+    login); the docker runner in a sandbox (a staged copy of the login file)."""
     from treebox.runners import DockerRunner, HostRunner
 
     host = HostRunner(Config()).facts()
     assert host.preflight_detail == "no container dependencies"
-    assert host.login_required is True
+    assert host.sandboxed is False
 
     boxed = DockerRunner(Config(isolation="docker")).facts()
     assert boxed.preflight_detail == "docker daemon ok"
-    assert boxed.login_required is False
+    assert boxed.sandboxed is True
 
 
 def test_config_setup_hook_string_normalizes_to_list(tmp_path: Path):
@@ -3470,7 +3469,8 @@ def test_fetch_origin_interactive_prompt_is_last_resort(monkeypatch: pytest.Monk
     order: list[str] = []
 
     def fake_run(argv, **kw):
-        silent = "stdout" in kw  # _silent_fetch captures; _fetch_prompt inherits stdio
+        # The silent attempts run under the batch env; the prompt fetch may ask.
+        silent = kw["env"].get("GIT_TERMINAL_PROMPT") == "0"
         order.append("silent" if silent else "prompt")
         return subprocess.CompletedProcess(argv, 1 if silent else 0, "", "")
 
@@ -3692,10 +3692,12 @@ def test_host_launch_missing_harness_is_instructive(
     from treebox.runners import host as host_mod
 
     monkeypatch.setattr(host_mod, "have", lambda c: False)
-    with pytest.raises(RuntimeError, match=r"not found on PATH.*writes ~/\.claude"):
+    with pytest.raises(host_mod.PreflightError, match=r"not found on PATH") as caught:
         host_mod.HostRunner(Config()).launch(
             _host_worktree(tmp_path), harness=get_harness("claude"), args=[]
         )
+    assert caught.value.error_code == "HARNESS_MISSING"
+    assert caught.value.hint and "writes ~/.claude" in caught.value.hint
 
 
 # --- output: degradation matrix & step contract ------------------------------------
@@ -3904,10 +3906,10 @@ def test_render_doctor_verdict_branches():
         r.render_doctor_verdict(**kw)
         return buf.getvalue()
 
-    assert "blocked: repo" in verdict(problems=["repo"], has_login=True)
-    assert "usable, but" in verdict(problems=[], has_login=True, advisories=["a"])
-    assert "no subscription login" in verdict(problems=[], has_login=False)
-    assert "everything looks good" in verdict(problems=[], has_login=True)
+    assert "blocked: repo" in verdict(problems=["repo"])
+    assert "blocked: login: claude" in verdict(problems=["login: claude"])
+    assert "usable, but" in verdict(problems=[], advisories=["a"])
+    assert "everything looks good" in verdict(problems=[])
 
 
 # --- teardown pickers: wiring around questionary -----------------------------------
@@ -4774,3 +4776,80 @@ def test_render_list_shows_unfinished_setup_and_unusable_worktrees():
     assert "◐ setup unfinished" in out
     assert "⚠ invalid linkage" in out
     assert "Summary: 3 worktrees · 2 setup unfinished · 1 unhealthy" in out
+
+
+def test_docker_launch_cancel_signals_the_agent_inside_the_container(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
+    """Stopping the local `docker exec` client alone leaves the agent running
+    in the container, so launch wraps the agent to record its pid, and a
+    cancel signal is sent to the agent's process group in the container, as
+    the agent's own user. treebox then waits for the agent itself, and the
+    session is CANCELLED (the container keeps running)."""
+    import signal
+    import subprocess
+
+    from treebox import system
+    from treebox.harnesses import get_harness
+    from treebox.runners import docker as docker_mod
+
+    wt = _boxed_worktree(tmp_path)
+    cfg = Config(isolation="docker")
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=True)
+    gone = {"yes": False}
+
+    def engine(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if docker_mod._AGENT_ALIVE in args:
+            fake.calls.append(list(args))
+            return subprocess.CompletedProcess(args, 1 if gone["yes"] else 0, "", "")
+        return fake(args)
+
+    launched: list[list[str]] = []
+
+    def fake_run_agent(argv, *, cwd=None, stop=None, grace=system.STOP_GRACE_SECONDS):
+        launched.append(argv)
+        stop(None, signal.SIGTERM)  # what the handler does when SIGTERM arrives
+        gone["yes"] = True
+        return 143, signal.SIGTERM
+
+    monkeypatch.setattr(docker_mod, "run_agent", fake_run_agent)
+    runner = DockerRunner(cfg, docker=engine)
+    with pytest.raises(system.SessionCancelled, match="container keeps running") as caught:
+        runner.launch(wt, harness=get_harness("claude"), args=["-p", "task"])
+    assert caught.value.signum == signal.SIGTERM
+
+    (argv,) = launched
+    at = argv.index(slug)
+    assert argv[at + 1 : at + 4] == ["sh", "-c", docker_mod._AGENT_WRAPPER]
+    pidfile = argv[at + 4]
+    assert pidfile.startswith("/tmp/treebox-agent-")
+    assert argv[at + 5 :] == ["claude", "--dangerously-skip-permissions", "-p", "task"]
+    kill = next(c for c in fake.calls if docker_mod._AGENT_SIGNAL in c)
+    assert kill[:3] == ["exec", "-u", "agent"] and kill[-2:] == [pidfile, "TERM"]
+    assert ["exec", "-u", "agent", slug, "rm", "-f", pidfile] in fake.calls
+
+
+def test_docker_launch_without_the_harness_binary_is_classified(tmp_path: Path, fake_common_dir):
+    """The harness binary is part of the image: a launch probes it in the
+    container first, and a missing one is HARNESS_MISSING, not an agent exit
+    of 127."""
+    from treebox.harnesses import get_harness
+    from treebox.runners.base import PreflightError
+
+    wt = _boxed_worktree(tmp_path)
+    cfg = Config(isolation="docker")
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=True)
+
+    def engine(args: list[str]):
+        import subprocess
+
+        if "command -v" in " ".join(args):
+            fake.calls.append(list(args))
+            return subprocess.CompletedProcess(args, 1, "", "")
+        return fake(args)
+
+    with pytest.raises(PreflightError, match="not found in the sandbox") as caught:
+        DockerRunner(cfg, docker=engine).launch(wt, harness=get_harness("claude"), args=[])
+    assert caught.value.error_code == "HARNESS_MISSING"

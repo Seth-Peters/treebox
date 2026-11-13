@@ -14,6 +14,7 @@ the JSON reaches stdout.
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
@@ -30,7 +31,6 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-from .harnesses import HARNESSES
 from .models import TemplateRow, WorktreeRow
 
 # Style A — uv/Astral-minimal: mostly dim + default, one colored glyph per line,
@@ -123,6 +123,15 @@ def _deps_cell(row: WorktreeRow, deps_style: dict[str, str]) -> Text:
     return Text(f"● {row['deps']}", style=deps_style[row["deps"]])
 
 
+def _stderr_fd() -> int:
+    """The process's stderr descriptor (fd 2 when ``sys.stderr`` has none,
+    as under a test runner's captured stream)."""
+    try:
+        return sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        return 2
+
+
 class StepError(RuntimeError):
     """A progress step failed; carries the captured command output."""
 
@@ -152,6 +161,9 @@ class Reporter:
         self.verbose = verbose
         self.console = Console(stderr=True, theme=THEME, highlight=False, file=stream)
         self.data_console = new_console(stderr=False)
+        # Every warning, also in silent (--json) mode: success payloads carry
+        # them as `warnings`, so a caller can branch on what was skipped.
+        self.warnings: list[str] = []
 
     # --- headers & summaries -------------------------------------------------
 
@@ -249,6 +261,7 @@ class Reporter:
             self._print(Text("  " + msg, style="wt.muted"))
 
     def warn(self, msg: str) -> None:
+        self.warnings.append(msg)
         if self.silent:
             return
         text = Text("  ")
@@ -334,12 +347,17 @@ class Reporter:
         env: dict[str, str] | None = None,
     ) -> str:
         """Run ``argv`` as a status step. Output is hidden on success and shown,
-        cleanly framed, on failure (or streamed live in verbose mode)."""
+        cleanly framed, on failure (or streamed live, to stderr, in verbose
+        mode). A step never reads the terminal: its stdin is empty, so a
+        command that would ask a question gets end-of-file instead of waiting."""
         start = time.monotonic()
         if self.verbose:
-            # Stream raw output straight through; nothing to capture or dump.
+            # Stream raw output straight through, to stderr: it is
+            # diagnostics, and stdout stays data only (the --json payload).
             self.note(label, "running")
-            returncode = subprocess.run(argv, cwd=cwd, env=env).returncode
+            returncode = subprocess.run(
+                argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=_stderr_fd()
+            ).returncode
             return self._finish_step(label, detail, start, returncode, "")
 
         with self._status(label):
@@ -347,6 +365,7 @@ class Reporter:
                 argv,
                 cwd=cwd,
                 env=env,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -704,7 +723,6 @@ class Reporter:
         self,
         *,
         problems: list[str],
-        has_login: bool,
         advisories: list[str] | None = None,
     ) -> None:
         """Render the advisory block and closing verdict line under the checklist."""
@@ -726,19 +744,6 @@ class Reporter:
                 Text("  ! ", style="wt.warn")
                 + Text("usable, but see the advisory above", style="wt.warn")
             )
-        elif not has_login:
-            # Derived from the harness registry: every login dir listed, and
-            # the default (first) harness's CLI named as the way to log in.
-            line = Text("  ! ", style="wt.warn")
-            line.append("no subscription login in ", style="wt.warn")
-            for i, harness in enumerate(HARNESSES):
-                if i:
-                    line.append(" / ", style="wt.warn")
-                line.append(harness.login_dir(), style="wt.accent")
-            line.append(" — run ", style="wt.warn")
-            line.append(HARNESSES[0].name, style="wt.accent")
-            line.append(" once to log in", style="wt.warn")
-            console.print(line)
         else:
             console.print(
                 Text("  ✓ ", style="wt.ok") + Text("everything looks good", style="wt.ok")

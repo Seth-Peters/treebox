@@ -12,6 +12,7 @@
     "-c",
     "cd __ROOT__/wts/golden-host-json && exec claude --dangerously-skip-permissions"
   ],
-  "created": true
+  "created": true,
+  "warnings": []
 }
 # --- stderr ---

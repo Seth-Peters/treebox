@@ -249,6 +249,12 @@ treebox assumes the caller is often another program:
   (git-porcelain discipline), plus `--print` and `--dry-run` for scripts that
   want the commands, not the side effects. Before it emits an entry command,
   treebox completes the [Docker entry checks](usage.md#docker-entry-and-firewall-recovery).
+- **Unattended mode** (`--non-interactive`, also with a terminal attached):
+  no picker, question or credential prompt; what would need an answer is a
+  classified failure. When treebox launches the agent it passes the agent's
+  exit code through and names a non-zero one in a fixed final stderr line, and
+  a cancel signal stops the agent in both runners - inside the container for
+  docker. See [unattended use](usage.md#unattended-use).
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
   so concurrent operations on the same worktree conflict (exit `5`). Separate
   worktrees with the same name have separate locks. Explicit batch teardown

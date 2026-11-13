@@ -45,7 +45,7 @@ HOME_FAKE="$ROOT/home"
 mkdir -p "$HOME_FAKE/.claude" "$HOME_FAKE/.codex"
 printf '{"token": "golden"}\n' > "$HOME_FAKE/.claude/.credentials.json"
 printf '{}\n' > "$HOME_FAKE/.claude/settings.json"
-printf '{}\n' > "$HOME_FAKE/.codex/auth.json"
+printf '{"token": "golden"}\n' > "$HOME_FAKE/.codex/auth.json"
 printf '\n' > "$HOME_FAKE/.codex/config.toml"
 
 # --- docker shim: simulates a healthy engine with persistent containers ------
@@ -89,6 +89,14 @@ esac
 exit 0
 EOF
 chmod +x "$SHIM/docker"
+
+# --- stub harness binaries: doctor checks the selected agent is on PATH -------
+# Never a real agent: they are never launched (every case ends with --json,
+# --print or --dry-run); they only make the host's PATH check deterministic.
+for agent in claude codex; do
+  printf '#!/bin/sh\nexit 0\n' > "$SHIM/$agent"
+  chmod +x "$SHIM/$agent"
+done
 
 # --- hermetic config: setup is a marker-writing hook, never a real installer -
 CFG="$ROOT/config.toml"
@@ -226,6 +234,7 @@ run_case enter-host-json      "$HOME_FAKE" enter golden-host "${RW[@]}" --json
 # --- docker isolation (through the shim) ---------------------------------------
 run_case doctor-docker        "$HOME_FAKE" doctor "${R[@]}" --isolation docker
 run_case doctor-docker-json   "$HOME_FAKE" doctor "${R[@]}" --isolation docker --json
+run_case doctor-docker-no-login "$ROOT/home-empty" doctor "${R[@]}" --isolation docker --json
 run_case create-dryrun-docker      "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run
 run_case create-dryrun-docker-json "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run --json
 run_case create-docker-print  "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --print

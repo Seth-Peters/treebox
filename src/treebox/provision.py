@@ -608,6 +608,7 @@ def _finish_setup(
     harness: Harness,
     cold: bool,
     reporter: Reporter,
+    args: list[str] | None = None,
 ) -> Outcome:
     """The shared tail of every create path: guard, submodules, .env, setup.
     The record ``rec`` is already on disk, outside every sandbox mount:
@@ -621,7 +622,7 @@ def _finish_setup(
     # trust sandbox-writable state.
     runner.initialize(wt)
     _run_setup(runner, wt, rec, cold=cold, reporter=reporter)
-    return Outcome(wt, runner.entry_command(wt, harness=harness, args=[]), created=True)
+    return Outcome(wt, runner.entry_command(wt, harness=harness, args=args or []), created=True)
 
 
 # --- orchestration -----------------------------------------------------------
@@ -860,6 +861,7 @@ def create(
     interactive: bool,
     reporter: Reporter,
     existing_branch: bool = False,
+    args: list[str] | None = None,
 ) -> Outcome:
     """Provision the worktree ``name`` on ``branch`` and prepare it via ``runner``.
 
@@ -869,6 +871,7 @@ def create(
     yet), or, with ``existing_branch``, an exact branch that must already
     exist locally or on origin (the ``create --checkout`` path). Every path
     installs the pre-push guard; only placeholders are affected by it.
+    ``args`` are extra agent args, part of the returned entry command.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     policy = _creation_record(config, runner, wt, harness.name)
@@ -885,7 +888,7 @@ def create(
             rec, _ = _record_policy(wt, policy)
             reporter.note("worktree", "exists but setup unfinished - finishing setup")
             return _finish_setup(
-                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter
+                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter, args=args
             )
         raise _slug_conflict_for_existing_path(repo, wt)
 
@@ -915,7 +918,9 @@ def create(
             record.remove(wt.path)
         raise
 
-    return _finish_setup(config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter)
+    return _finish_setup(
+        config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter, args=args
+    )
 
 
 def enter(
