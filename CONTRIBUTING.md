@@ -83,8 +83,28 @@ docs: document the template command
 footer. treebox's public contract is its CLI surface, its `--json` payloads
 (which carry a `schemaVersion`), and its exit codes: if you change that
 observable output, bump `SCHEMA_VERSION` when the JSON shape changes and
-regenerate the golden snapshots with `scripts/golden-diff.sh --update`. Note
-user-facing changes under `[Unreleased]` in `CHANGELOG.md`.
+regenerate the golden snapshots with `scripts/golden-diff.sh --update`. A new
+`error.code` also needs its row in the error-code table in `docs/usage.md`;
+`tests/test_contract.py` fails until the table and the code agree.
+
+The PR title becomes the squash-commit title, and that title is what the
+changelog is written from, so make it describe the user-facing change.
+
+## Changelog
+
+Do not edit `CHANGELOG.md` in a pull request. Its entries are written at
+release time, from the squash-commit titles of everything merged since the
+last tag, so it has no `[Unreleased]` section.
+
+## Releasing
+
+1. Write the `CHANGELOG.md` entry for everything merged since the last tag:
+   list it with `git log --oneline <last-tag>..origin/main`, add a
+   `## [X.Y.Z] - YYYY-MM-DD` section with one item per user-facing change
+   (cite the pull request number from the squash-commit title), and merge it
+   to `main`.
+2. Tag that commit `vX.Y.Z` and push the tag. The `Release` workflow
+   (`.github/workflows/release.yml`) builds and publishes it.
 
 ## Boundaries
 
