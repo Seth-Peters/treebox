@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -50,7 +51,6 @@ from .models import (
     WorktreeRow,
     derive_name,
     expand_user,
-    flatten_branch,
     is_placeholder,
     is_valid_name,
     is_valid_template_name,
@@ -62,7 +62,15 @@ from .models import (
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
 from .resources import ResourceLimitError, ResourceLimits
-from .runners import VALID_ISOLATION, DockerRunner, HostRunner, PreflightError, Runner, get_runner
+from .runners import (
+    VALID_ISOLATION,
+    DockerRunner,
+    FirewallError,
+    HostRunner,
+    PreflightError,
+    Runner,
+    get_runner,
+)
 from .runners.docker import has_resource_manifest
 
 # Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
@@ -471,6 +479,29 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
         ) from exc
 
 
+def _check_root(reporter: Reporter, repo_path: str, root: str, *, json_out: bool = False) -> None:
+    """Refuse a worktree root that cannot hold worktrees: the root, or its
+    nearest existing ancestor, is not a directory (a regular file, a dangling
+    symlink). A root that does not exist yet is fine - create makes it."""
+    base = worktree_root(repo_path, root)
+    probe = base
+    while not os.path.lexists(probe) and probe != probe.parent:
+        probe = probe.parent
+    if probe.is_dir():
+        return
+    where = "" if probe == base else f" ({probe} is not a directory)"
+    raise _die(
+        reporter,
+        f"Worktree root {base} is not a directory{where}.",
+        code=EXIT_USAGE,
+        error_code="INVALID_ROOT",
+        hint="Point --root (or root in config.toml) at a directory, "
+        "or at a path that does not exist yet.",
+        path=str(base),
+        json_out=json_out,
+    )
+
+
 def _validate_branch(reporter: Reporter, branch: str, *, json_out: bool = False) -> None:
     if not git.check_ref_format(branch):
         raise _die(
@@ -608,9 +639,10 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Runner dependency problems keep exit 1 (codes are stable; agents
-        # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE).
+        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    if isinstance(exc, FirewallError):
+        return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -756,7 +788,9 @@ def create(
         None, "--base", help="Base branch for the new branch (resolved as origin/<base>)."
     ),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -832,14 +866,15 @@ def create(
     if checkout is not None:
         _validate_branch(reporter, checkout, json_out=json_out)
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     if checkout is not None:
-        wt_name = flatten_branch(name) if name else derive_name(checkout)
+        wt_name = derive_name(name or checkout)
         target_branch = checkout
     elif name is not None:
         # An explicit name IS the branch: slashes stay in the branch, the
         # directory flattens them (feature/auth -> feature--auth).
-        wt_name = flatten_branch(name)
+        wt_name = derive_name(name)
         target_branch = name
         _validate_branch(reporter, target_branch, json_out=json_out)
     else:
@@ -949,7 +984,9 @@ def enter(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -1000,6 +1037,7 @@ def enter(
     )
     config_limits = cfg.resources
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
@@ -1105,13 +1143,12 @@ def _run_session(
         run.preflight(reporter)
         with locking.worktree_lock(path):
             outcome = provision_call()
-            if json_out or print_only:
-                # The launch path makes the sandbox entry-ready inside
-                # run.launch; the emit path must do the same, or a stopped
-                # container yields an entry_command that is dead on replay
-                # (and a manual `docker start` workaround would silently
-                # skip the firewall re-init).
-                run.prepare_entry(outcome.worktree)
+            # Every entry - launch and emit alike - makes the sandbox
+            # entry-ready first: a stopped container is started, and the
+            # firewall is re-applied even on a running one (`docker restart`
+            # outside treebox drops the rules). A failure here is classified
+            # and nothing launches or is emitted.
+            run.prepare_entry(outcome.worktree)
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
@@ -1214,6 +1251,7 @@ def list_cmd(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     rows = _collect_rows(repo_path, cfg)
 
@@ -1503,6 +1541,7 @@ def teardown(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     targets: list[resolve.Candidate] = []
     # Which targets also lose their local branch, by path. The chooser fills this
@@ -1772,48 +1811,54 @@ def _teardown_one(
             container = "failed"
             reporter.warn(f"isolation teardown: {exc}")
 
-    if exists:
-        try:
-            git.worktree_remove(repo_path, wt.path, force=force)
-        except git.GitError:
-            # Last-resort cleanup for corrupt *linked* worktrees git refuses to
-            # remove. It must never run against the main working tree (git's
-            # refusal is also a GitError): that would delete the whole repo.
-            if same_path(wt.path, repo_path):
-                raise _die(
-                    reporter,
-                    f"Refusing to remove the main working tree '{cand.name}'.",
-                    code=EXIT_CONFLICT,
-                    error_code="MAIN_WORKTREE",
-                    hint="treebox only manages linked worktrees; "
-                    "the repo itself is never a target.",
-                    path=str(wt.path),
-                    json_out=json_out,
-                ) from None
-            import shutil as _sh
-
-            _sh.rmtree(wt.path, ignore_errors=True)
-            git.worktree_prune(repo_path)
-        reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
-    else:
-        git.worktree_prune(repo_path)
-        reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
-
-    # The host-owned record goes last, with the worktree it describes: a
-    # failure above leaves it in place, so a retried teardown still knows
-    # the mode.
-    record.remove(wt.path)
-
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
     branch_deleted = False
-    if delete_branch and branch_name:
-        try:
-            git.delete_branch(repo_path, branch_name)
-            branch_deleted = True
-            reporter.ok("branch", f"deleted {branch_name}")
-        except git.GitError as exc:
-            reporter.warn(f"could not delete branch: {exc}")
-    elif branch_name:
-        reporter.note("branch", f"kept {branch_name}")
+    with locking.repo_lock(repo_path):
+        if exists:
+            try:
+                git.worktree_remove(repo_path, wt.path, force=force)
+            except git.GitError:
+                # Last-resort cleanup for corrupt *linked* worktrees git refuses to
+                # remove. It must never run against the main working tree (git's
+                # refusal is also a GitError): that would delete the whole repo.
+                if same_path(wt.path, repo_path):
+                    raise _die(
+                        reporter,
+                        f"Refusing to remove the main working tree '{cand.name}'.",
+                        code=EXIT_CONFLICT,
+                        error_code="MAIN_WORKTREE",
+                        hint="treebox only manages linked worktrees; "
+                        "the repo itself is never a target.",
+                        path=str(wt.path),
+                        json_out=json_out,
+                    ) from None
+                import shutil as _sh
+
+                _sh.rmtree(wt.path, ignore_errors=True)
+                git.worktree_prune(repo_path)
+            reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
+        else:
+            git.worktree_prune(repo_path)
+            reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
+
+        if delete_branch and branch_name:
+            try:
+                git.delete_branch(repo_path, branch_name)
+                branch_deleted = True
+                reporter.ok("branch", f"deleted {branch_name}")
+            except git.GitError as exc:
+                reporter.warn(f"could not delete branch: {exc}")
+        elif branch_name:
+            reporter.note("branch", f"kept {branch_name}")
+
+    # The host-owned record goes last, after the worktree it describes: a
+    # failure above leaves it in place, so a retried teardown still knows the
+    # mode. It is not shared git state, so it stays outside the repo lock; the
+    # worktree lock the caller holds already covers it.
+    record.remove(wt.path)
 
     return TeardownRecord(
         name=cand.name,
@@ -1833,7 +1878,9 @@ def _teardown_one(
 def doctor(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
@@ -2033,8 +2080,7 @@ def template_init(
     """Copy a template into $TREEBOX_HOME/templates/<name> so you can edit it.
 
     This is the sanctioned replacement for hand-copying the shipped directory:
-    it works from any install and always yields a directory with the full
-    required file set. Then edit the Dockerfile and container.json and run
+    it works from any install. Then edit the Dockerfile and container.json and run
     `treebox create <name> --isolation docker --template <name>`.
     """
     reporter = Reporter(silent=json_out)
@@ -2044,6 +2090,14 @@ def template_init(
         raise _die(
             reporter,
             f"Invalid template name '{name}'. Use letters, digits, '.', '_', or '-'.",
+            code=EXIT_USAGE,
+            error_code="INVALID_NAME",
+            json_out=json_out,
+        )
+    if name == assets.STAGING_DIR:
+        raise _die(
+            reporter,
+            f"Invalid template name '{name}': treebox reserves it for its staging directory.",
             code=EXIT_USAGE,
             error_code="INVALID_NAME",
             json_out=json_out,
@@ -2095,17 +2149,19 @@ def template_init(
         elif target.is_symlink() or target.exists():
             target.unlink()
 
-    # Copy into a staging dir beside the destination and swap it into place, so
-    # a failed copy leaves any existing template untouched rather than deleting
-    # it up front — and no OSError escapes as a bare traceback.
-    staging = dest.parent / f".{name}.treebox-tmp"
+    # Keep the old template byte-for-byte until the new copy is installed, so
+    # rollback needs only a rename. Use a unique staging dir under STAGING_DIR:
+    # another process may still own a directory left by an earlier run.
+    staging_root = dest.parent / assets.STAGING_DIR
+    staging: Path | None = None
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        _remove(staging)
-        shutil.copytree(src, staging)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f"{name}.", dir=staging_root))
+        shutil.copytree(src, staging / "new")
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        if staging is not None:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
             f"Could not copy template into {dest}: {exc}.",
@@ -2115,15 +2171,17 @@ def template_init(
             json_out=json_out,
         ) from exc
 
+    old = staging / "old"
     if existing:
         try:
-            _remove(dest)
+            dest.rename(old)
         except OSError as exc:
             with contextlib.suppress(OSError):
                 _remove(staging)
             raise _die(
                 reporter,
-                f"Could not overwrite existing template at {dest}: {exc}.",
+                f"Could not overwrite existing template at {dest}: {exc}. "
+                "The existing template is unchanged.",
                 code=EXIT_ERROR,
                 error_code="OVERWRITE_FAILED",
                 path=str(dest),
@@ -2131,18 +2189,35 @@ def template_init(
             ) from exc
 
     try:
-        staging.rename(dest)
+        (staging / "new").rename(dest)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        kept = ""
+        if existing:
+            try:
+                old.rename(dest)
+            except OSError:
+                # Do not delete the staging dir: it holds the only copy of the
+                # old template now.
+                kept = f" The previous template is kept at {old}."
+        if not kept:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
-            f"Could not copy template into {dest}: {exc}.",
+            f"Could not copy template into {dest}: {exc}.{kept}",
             code=EXIT_ERROR,
             error_code="COPY_FAILED",
             path=str(dest),
             json_out=json_out,
         ) from exc
+
+    leftover = ""
+    try:
+        _remove(staging)
+    except OSError as exc:
+        leftover = (
+            f"could not remove the previous template copy at {staging} ({exc}); delete it by hand"
+        )
 
     missing = assets.missing_template_files(dest)
     if json_out:
@@ -2164,6 +2239,8 @@ def template_init(
         reporter.warn(
             f"copied from an incomplete source — missing required files: {', '.join(missing)}"
         )
+    if leftover:
+        reporter.warn(leftover)
     reporter.hint(
         "Edit the Dockerfile and container.json, then: "
         f"treebox create <name> --isolation docker --template {name}"

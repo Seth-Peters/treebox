@@ -54,6 +54,18 @@ class PreflightError(RuntimeError):
         self.hint = hint
 
 
+class FirewallError(RuntimeError):
+    """The requested egress lockdown could not be established.
+
+    The sandbox is not entry-ready: the CLI classifies this
+    (``FIREWALL_FAILED``, with the remediation ``hint``) and never launches
+    the agent or emits an ``entry_command`` after it."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
 RunnerTeardownStatus = Literal["cleaned", "skipped", "failed"]
 
 
@@ -159,14 +171,13 @@ class Runner(Protocol):
         ...
 
     def prepare_entry(self, wt: Worktree) -> None:
-        """Make the sandbox entry-ready before the agent (or an emitted
-        ``entry_command``) enters it: the docker runner restarts a stopped
-        container and re-establishes the firewall; a no-op on the host. The
-        CLI calls it before emitting ``--print``/``--json`` output, and
-        ``launch`` implementations needing the same guarantee call it
-        themselves (the docker runner's does) - so an emitted
-        ``entry_command`` is never dead on arrival and a treebox-owned
-        restart never leaves egress silently open."""
+        """Prepare the sandbox before launch or entry-command emission.
+
+        The CLI calls this method on every entry, before ``launch`` or
+        ``--print``/``--json`` output. Docker starts a stopped container and
+        checks its enabled firewall even when the container is already running.
+        A failed firewall initialization raises ``FirewallError`` and blocks
+        launch and command emission. This method is a no-op on the host."""
         ...
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
