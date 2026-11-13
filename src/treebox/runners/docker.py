@@ -60,6 +60,14 @@ present; treebox never reads the flag itself.
 Capabilities can't be added to an existing container, so asking for the
 firewall on a container created without it is a loud error, never a silent
 open-egress run.
+
+Resource limits: the generic ``cpus`` / ``memory`` / ``pids`` limits map to
+``docker run --cpus / --memory / --pids-limit``. They come from the host-owned
+record (``self.config.resources``), never from the rendered config. A raw
+``runArgs`` limit is the template's own value: ``template_resources`` folds it
+into the lowest-precedence tier when a worktree is created, and ``docker run``
+drops the raw flag for every limit treebox sets, so the recorded value is the
+one the container gets - never Docker's last-flag-wins.
 """
 
 from __future__ import annotations
@@ -84,6 +92,16 @@ from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
 from ..models import Worktree, derive_name, expand_user, is_valid_name
 from ..output import Reporter, StepError
+from ..resources import (
+    RESOURCE_NAMES,
+    ResourceLimitError,
+    ResourceLimits,
+    format_value,
+    from_mapping,
+    parse_cpus,
+    parse_memory,
+    parse_pids,
+)
 from ..system import STOP_GRACE_SECONDS, SessionCancelled, run_agent, signal_name
 from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
 
@@ -131,6 +149,7 @@ class ContainerConfig(TypedDict, total=False):
     env: dict[str, str]
     runArgs: list[str]
     postCreate: str
+    resources: dict[str, Any]
 
 
 class ResourceManifest(TypedDict):
@@ -140,7 +159,16 @@ class ResourceManifest(TypedDict):
     volumes: list[str]
 
 
-_KNOWN_KEYS = frozenset({"build", "user", "mounts", "env", "runArgs", "postCreate"})
+_KNOWN_KEYS = frozenset({"build", "user", "mounts", "env", "runArgs", "postCreate", "resources"})
+
+# The docker run flag (and its spellings in raw runArgs) for each generic limit.
+_LIMIT_FLAGS: dict[str, str] = {"cpus": "--cpus", "memory": "--memory", "pids": "--pids-limit"}
+_LIMIT_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "cpus": ("--cpus",),
+    "memory": ("--memory", "-m"),
+    "pids": ("--pids-limit",),
+}
+_LIMIT_PARSERS = {"cpus": parse_cpus, "memory": parse_memory, "pids": parse_pids}
 
 # Keeps the detached sandbox container alive between execs. `docker run --init`
 # puts a real PID 1 above it so orphaned grandchildren get reaped.
@@ -239,6 +267,7 @@ _FACTS = RunnerFacts(preflight_detail="docker daemon ok", sandboxed=True)
 
 class DockerRunner:
     name = "docker"
+    supported_resources: frozenset[str] = frozenset(RESOURCE_NAMES)
 
     def __init__(
         self,
@@ -361,6 +390,63 @@ class DockerRunner:
 
     def facts(self) -> RunnerFacts:
         return _FACTS
+
+    # --- resource limits ---------------------------------------------------------
+
+    def template_resources(self) -> ResourceLimits:
+        """The template tier: the operator template's ``resources`` object
+        plus any raw ``runArgs`` limit (firewall overlay included when the
+        firewall is on). One template that sets a limit twice with different
+        values is invalid - there is no defined winner inside one template."""
+        config = self._overlaid_config()
+        name = self.config.template
+        try:
+            declared = from_mapping(config.get("resources", {}), source="resources")
+        except ResourceLimitError as exc:
+            raise assets.TemplateInvalidError(
+                name, f"Invalid {assets.CONFIG_FILE} of template '{name}': {exc}"
+            ) from exc
+        _, raw = _split_limit_args([str(a) for a in config.get("runArgs", [])])
+        values: dict[str, Any] = {}
+        for limit in RESOURCE_NAMES:
+            found = set()
+            if getattr(declared, limit) is not None:
+                found.add(getattr(declared, limit))
+            for value in raw[limit]:
+                try:
+                    found.add(_LIMIT_PARSERS[limit](value, source=f"runArgs {_LIMIT_FLAGS[limit]}"))
+                except ResourceLimitError as exc:
+                    raise assets.TemplateInvalidError(
+                        name, f"Invalid {assets.CONFIG_FILE} of template '{name}': {exc}"
+                    ) from exc
+            if len(found) > 1:
+                shown = ", ".join(sorted(format_value(limit, v) for v in found))
+                raise assets.TemplateInvalidError(
+                    name,
+                    f"Template '{name}' sets {limit} more than once with different values "
+                    f"({shown}) in resources / runArgs. Keep one value.",
+                )
+            if found:
+                values[limit] = found.pop()
+        return ResourceLimits(**values)
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        """Docker refuses ``--cpus`` above the engine's CPU count at ``docker
+        run``, after the image build: refuse it here instead. Skipped when the
+        engine cannot be asked (preflight reports that on a real run)."""
+        if limits.cpus is None:
+            return
+        proc = self._engine(["info", "--format", "{{.NCPU}}"])
+        try:
+            available = int(proc.stdout.strip()) if proc.returncode == 0 else 0
+        except ValueError:
+            available = 0
+        if available and limits.cpus > available:
+            raise ResourceLimitError(
+                "cpus",
+                f"Invalid --cpus {format_value('cpus', limits.cpus)}: the Docker engine "
+                f"has only {available} CPUs.",
+            )
 
     # --- locations & identity --------------------------------------------------
 
@@ -674,7 +760,16 @@ class DockerRunner:
             "--label",
             self._id_label(wt),
         ]
-        argv += [str(a) for a in config.get("runArgs", [])]
+        # Treebox owns every limit it sets: the raw runArgs spelling of that
+        # limit is dropped (it was folded into the record at create), so the
+        # recorded value is the one the container gets.
+        limits = self.config.resources
+        run_args, _ = _split_limit_args(
+            [str(a) for a in config.get("runArgs", [])], drop=limits.names()
+        )
+        argv += run_args
+        for limit in limits.names():
+            argv += [_LIMIT_FLAGS[limit], format_value(limit, getattr(limits, limit))]
         for key, value in config.get("env", {}).items():
             argv += ["-e", f"{key}={value}"]
         for mount in config.get("mounts", []):
@@ -1148,6 +1243,44 @@ def _require_known_keys(config: dict[str, Any], source: str) -> ContainerConfig:
             f"Supported keys: {', '.join(sorted(_KNOWN_KEYS))}."
         )
     return cast(ContainerConfig, config)
+
+
+def _split_limit_args(
+    run_args: list[str], *, drop: list[str] | None = None
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Find the raw resource-limit flags in ``runArgs`` (``--memory=4g``,
+    ``--memory 4g``, ``-m 4g``, ``-m4g``, and the same for ``--cpus`` /
+    ``--pids-limit``). Returns the args with the limits in ``drop`` removed,
+    and every raw value found, per generic limit name."""
+    remove = set(drop or [])
+    kept: list[str] = []
+    found: dict[str, list[str]] = {n: [] for n in RESOURCE_NAMES}
+    i = 0
+    while i < len(run_args):
+        arg = run_args[i]
+        hit: tuple[str, str, int] | None = None
+        for limit, spellings in _LIMIT_SPELLINGS.items():
+            for flag in spellings:
+                if arg == flag and i + 1 < len(run_args):
+                    hit = (limit, run_args[i + 1], 2)
+                elif arg.startswith(flag + "="):
+                    hit = (limit, arg[len(flag) + 1 :], 1)
+                elif flag == "-m" and arg.startswith("-m") and len(arg) > 2:
+                    hit = (limit, arg[2:], 1)
+                if hit:
+                    break
+            if hit:
+                break
+        if hit is None:
+            kept.append(arg)
+            i += 1
+            continue
+        limit, value, width = hit
+        found[limit].append(value)
+        if limit not in remove:
+            kept.extend(run_args[i : i + width])
+        i += width
+    return kept, found
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:

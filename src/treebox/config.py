@@ -8,6 +8,10 @@ Resolution order, highest priority first:
 2. ``$TREEBOX_CONFIG`` if set, else ``$TREEBOX_HOME/config.toml`` (default
    ``~/.treebox/config.toml``).
 3. Built-in defaults below.
+
+The ``[resources]`` table (``cpus``, ``memory``, ``pids``) is a default for
+every new sandbox; see ``resources.py`` for the full precedence (the operator
+template's ``resources`` object sits below it).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from typing import Any, Literal
 from .ecosystems import ECOSYSTEMS
 from .harnesses import VALID_HARNESSES
 from .models import expand_user, is_valid_template_name
+from .resources import ResourceLimitError, ResourceLimits, from_mapping
 
 # The closed vocabularies treebox understands, validated against the
 # registry-derived VALID_* tuples (harnesses.HARNESSES, runners.RUNNERS —
@@ -91,6 +96,13 @@ class Config:
     # Host cache directories to share across worktrees and (for the docker
     # runner) bind-mount into the container. Keyed by ecosystem.
     caches: dict[str, str] = field(default_factory=dict)
+    # Sandbox CPU/memory/process limits ([resources]). Unset fields mean no
+    # treebox cap. For an existing worktree the CLI replaces this with the
+    # limits in its host-owned record (what the sandbox actually has).
+    resources: ResourceLimits = field(default_factory=ResourceLimits)
+    # Which of ``resources`` an explicit ``create`` flag chose (never read
+    # from TOML): the record keeps it so only config or template values drift.
+    explicit_resources: frozenset[str] = frozenset()
     # The machine-wide port-block allocator's range (`[ports]`, user config only).
     ports: PortRange = field(default_factory=PortRange)
 
@@ -106,6 +118,8 @@ class Config:
         template: str | None = None,
         setup_hook: list[str] | None = None,
         caches: dict[str, str] | None = None,
+        resources: ResourceLimits | None = None,
+        explicit_resources: frozenset[str] | None = None,
     ) -> Config:
         """Return a copy with non-None overrides applied. Values are applied
         as given — callers run ``validate_config`` after flag overrides."""
@@ -119,6 +133,8 @@ class Config:
             "template": template,
             "setup_hook": setup_hook,
             "caches": caches,
+            "resources": resources,
+            "explicit_resources": explicit_resources,
         }
         applied = {k: v for k, v in overrides.items() if v is not None}
         return replace(self, **applied)
@@ -220,6 +236,13 @@ def load_config(path: Path | None = None) -> Config:
             )
         caches.update({str(k): str(expand_user(str(v))) for k, v in data["caches"].items()})
 
+    resources: ResourceLimits | None = None
+    if "resources" in data:
+        try:
+            resources = from_mapping(data["resources"], source="[resources]")
+        except ResourceLimitError as exc:
+            raise ValueError(f"Invalid config {path}: {exc}") from exc
+
     cfg = cfg.with_overrides(
         isolation=_typed(data, "isolation", str, path),
         harness=_typed(data, "harness", str, path),
@@ -230,6 +253,7 @@ def load_config(path: Path | None = None) -> Config:
         template=_typed(data, "template", str, path),
         setup_hook=setup_hook,
         caches=caches,
+        resources=resources,
     )
     if "ports" in data:
         cfg = replace(cfg, ports=_port_range(data["ports"], path))

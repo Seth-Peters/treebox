@@ -16,6 +16,11 @@
     "cd __ROOT__/wts/golden-host-json && export TREEBOX_NAME=golden-host-json TREEBOX_ID=__HASH__ TREEBOX_PORT_BASE=20010 TREEBOX_PORT_COUNT=10 && exec claude --dangerously-skip-permissions"
   ],
   "created": true,
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  },
   "warnings": []
 }
 # --- stderr ---

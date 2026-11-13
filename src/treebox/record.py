@@ -3,8 +3,8 @@
 A sandboxed agent can write its worktree and the repo's git common dir (both
 are bind-mounted), so nothing it can reach may decide how its *next* session
 runs. The policy a worktree was created with - isolation, firewall, sandbox
-template, harness, base - therefore lives here, in a file outside every sandbox
-mount, beside the lock and the docker runner's config dir::
+template, harness, base, and the effective resource limits - therefore lives
+here, in a file outside every sandbox mount, beside the lock and the docker runner's config dir::
 
     <worktree parent>/.records/<worktree leaf>.json
 
@@ -49,13 +49,14 @@ import dataclasses
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .harnesses import VALID_HARNESSES
 from .lifecycle import SetupResult, setup_log_path
 from .models import PortBlock, is_valid_template_name, same_path
+from .resources import RESOURCE_NAMES, ResourceLimitError, ResourceLimits, from_mapping
 from .runners import VALID_ISOLATION
 
 SCHEMA_VERSION = 1
@@ -72,6 +73,8 @@ _KEYS = frozenset(
         "harness",
         "firewall",
         "template",
+        "resources",
+        "explicitResources",
         "setup",
         "ports",
     }
@@ -84,7 +87,11 @@ class WorktreeRecord:
 
     ``isolation`` and ``harness`` are registry names; ``template`` is a
     template identifier (``models.is_valid_template_name``); ``firewall`` is
-    always a real bool (``False`` for host worktrees). ``setup`` is not
+    always a real bool (``False`` for host worktrees). ``resources`` are the
+    limits the sandbox was created with (unset = no treebox cap; always unset
+    for a runner that applies none, such as host). ``explicit_resources``
+    names the limits an explicit ``create`` flag chose; every other limit came
+    from config or the template, so only those can drift. ``setup`` is not
     policy: it is the result of the last setup attempt (``lifecycle.py``). ``ports`` is
     not policy either: the copy of this worktree's ledger entry (``ports.py``),
     None until one is reserved."""
@@ -95,13 +102,25 @@ class WorktreeRecord:
     harness: str
     firewall: bool
     template: str
+    resources: ResourceLimits = field(default_factory=ResourceLimits)
+    explicit_resources: frozenset[str] = frozenset()
     setup: SetupResult = dataclasses.field(default_factory=SetupResult)
     ports: PortBlock | None = None
 
     def same_policy(self, other: WorktreeRecord) -> bool:
         """Whether ``other`` states the same creation policy (setup and port
-        block aside)."""
-        return dataclasses.replace(self, setup=other.setup, ports=other.ports) == other
+        block aside). The limits must match; whether a flag or a default gave
+        them does not change the sandbox, so ``explicit_resources`` is aside
+        too (the record keeps how they were first chosen)."""
+        return (
+            dataclasses.replace(
+                self,
+                setup=other.setup,
+                ports=other.ports,
+                explicit_resources=other.explicit_resources,
+            )
+            == other
+        )
 
 
 class RecordError(RuntimeError):
@@ -188,6 +207,21 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
     if not same_path(data["worktree"], worktree):
         raise _invalid(worktree, path, f"it is bound to worktree {data['worktree']!r}")
     try:
+        limits = from_mapping(data["resources"], source="resources")
+    except ResourceLimitError as exc:
+        raise _invalid(worktree, path, str(exc).rstrip(".")) from exc
+    explicit = data["explicitResources"]
+    if (
+        not isinstance(explicit, list)
+        or not all(isinstance(n, str) for n in explicit)
+        or len(set(explicit)) != len(explicit)
+    ):
+        raise _invalid(worktree, path, "explicitResources must be a list of distinct limit names")
+    # A flag always sets a value, so an explicit limit is a recorded one.
+    stray = sorted(set(explicit) - set(limits.names()))
+    if stray:
+        raise _invalid(worktree, path, f"explicitResources names unset limit(s) {', '.join(stray)}")
+    try:
         setup = SetupResult.from_json(data["setup"])
     except ValueError as exc:
         raise _invalid(worktree, path, str(exc)) from exc
@@ -199,6 +233,8 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         harness=data["harness"],
         firewall=data["firewall"],
         template=data["template"],
+        resources=limits,
+        explicit_resources=frozenset(explicit),
         setup=setup,
         ports=ports,
     )
@@ -235,6 +271,8 @@ def save(rec: WorktreeRecord) -> None:
         "harness": rec.harness,
         "firewall": rec.firewall,
         "template": rec.template,
+        "resources": rec.resources.to_json(),
+        "explicitResources": [n for n in RESOURCE_NAMES if n in rec.explicit_resources],
         "setup": rec.setup.to_json(),
         "ports": None if rec.ports is None else {"base": rec.ports.base, "count": rec.ports.count},
     }

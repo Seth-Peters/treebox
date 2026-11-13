@@ -104,6 +104,9 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
             "--firewall",
             "--no-firewall",
             "--template",
+            "--cpus",
+            "--memory",
+            "--pids-limit",
             "--dry-run",
             "-n",
             "--print",
@@ -113,7 +116,8 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
     "enter": (
         _COMMON_LIST
         | _VERBOSITY
-        | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"},
+        | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"}
+        | {"--cpus", "--memory", "--pids-limit"},
         ["ref", "args"],
     ),
     "list": (_COMMON_LIST, []),
@@ -202,8 +206,11 @@ CREATE_KEYS = {
     "base",
     "entry_command",
     "created",
+    "resources",
     "warnings",
 }
+# enter also says which limits config or template now give differently.
+ENTER_KEYS = CREATE_KEYS | {"resources_drift"}
 DRY_RUN_KEYS = {
     "schemaVersion",
     "dry_run",
@@ -211,6 +218,7 @@ DRY_RUN_KEYS = {
     "worktree_path",
     "branch",
     "commands",
+    "resources",
     "warnings",
 }
 LIST_ROW_KEYS = {
@@ -225,6 +233,7 @@ LIST_ROW_KEYS = {
     "base",
     "isolation",
     "harness",
+    "resources",
     "deps",
     "env",
     "health",
@@ -268,7 +277,7 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
     entered = json.loads(
         _run(["enter", "shape", "--repo", str(repo), "--root", root, "--json"]).stdout
     )
-    assert set(entered) == CREATE_KEYS
+    assert set(entered) == ENTER_KEYS
     assert entered["created"] is False
 
     # list

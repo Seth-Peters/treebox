@@ -99,7 +99,11 @@ Module map:
   setup via a baked-in `post-create.sh`, agent via `docker exec`; the worktree
   and its git common dir are bind-mounted at their host paths so in-container
   git just works). `runners/__init__.py` holds the `RUNNERS` registry;
-  `get_runner` and `VALID_ISOLATION` derive from it. Doctor-facing vocabulary
+  `get_runner` and `VALID_ISOLATION` derive from it. Each runner declares the
+  generic resource limits it can apply (`supported_resources`, from
+  `resources.py`'s `cpus` / `memory` / `pids`) and maps them itself; the CLI
+  resolves them (flag > `[resources]` config > template tier) before
+  provisioning and the record holds the effective values. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
   not in the run methods; teardown options (docker's `remove_volumes`) arrive
   at the runner's constructor, never through the protocol. Docker image and
@@ -160,7 +164,8 @@ Module map:
   effect and only real setup calls it. `detect` reads a checked-out tree,
   `detect_revision` reads a git revision (what a dry run plans against).
 - **`record.py`** is the host-owned worktree record: the authority for a
-  worktree's creation policy (isolation, firewall, template, harness, base),
+  worktree's creation policy (isolation, firewall, template, harness, base,
+  resource limits),
   at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
   One schema version (`schemaVersion`; unknown or missing keys, other
   versions, and unknown isolation/harness names are refused),
@@ -265,7 +270,8 @@ advice, credential staging, and sandbox mounts derive from the registry.
 **Adding a runner** (a new isolation backend):
 
 1. One `Runner` implementation (see the protocol in `runners/base.py` and
-   the contract below).
+   the contract below), including `supported_resources` and the mapping of
+   those generic limits to the backend's own flags.
 2. One entry in `runners/__init__.py`'s `RUNNERS` registry — the factory
    declares which generic options the adapter consumes.
 3. Add the isolation name to `config.py`'s hard-coded `Isolation` Literal

@@ -15,6 +15,11 @@
     "cp .env __ROOT__/wts/golden-host/.env",
     "sh -c 'echo ran >> setup.log'"
   ],
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  },
   "warnings": []
 }
 # --- stderr ---

@@ -31,6 +31,16 @@
     "--dangerously-skip-permissions"
   ],
   "created": false,
-  "warnings": []
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  },
+  "warnings": [],
+  "resources_drift": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  }
 }
 # --- stderr ---

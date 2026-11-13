@@ -301,7 +301,7 @@ def test_dangling_symlink_root_is_a_classified_usage_error(
 def test_create_existing_branch_is_branch_exists_conflict(repo: Path, root: str, hermetic_config):
     """create NAME promises a fresh branch off origin/<base>: a branch that
     already exists (locally or on origin) is a loud exit 5 pointing at
-    --checkout — never a silent reuse of old work."""
+    --checkout - never a silent reuse of old work."""
     subprocess.run(["git", "-C", str(repo), "branch", "taken"], check=True)
     res = _run(["create", "taken", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5, res.output  # EXIT_CONFLICT
@@ -3376,6 +3376,7 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             "worktree_path",
             "branch",
             "commands",
+            "resources",
             "warnings",
         }
     )

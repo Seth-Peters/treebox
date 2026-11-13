@@ -39,6 +39,7 @@ from . import (
     provision,
     record,
     resolve,
+    resources,
     status,
     system,
 )
@@ -63,6 +64,7 @@ from .models import (
     worktree_root,
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
+from .resources import ResourceLimitError, ResourceLimits
 from .runners import (
     VALID_ISOLATION,
     DockerRunner,
@@ -220,6 +222,9 @@ def _reconcile_with_record(
     - ``template``: the template decides the container's user and mounts, so
       the recorded choice wins over the config default; an explicit
       ``--template`` stays a legitimate per-session operator override.
+    - ``resources``: the recorded limits are what the sandbox has, so they
+      always win (``_check_entry_resources`` refuses a conflicting flag and
+      warns about a config or template change).
 
     ``record.load`` already refused unknown isolation and harness names, so
     the recorded ``str`` names are final here: callers resolve
@@ -236,7 +241,9 @@ def _reconcile_with_record(
             "down and re-create the worktree with the new one.",
             json_out=json_out,
         )
-    cfg = cfg.with_overrides(isolation=rec.isolation, firewall=rec.firewall)
+    cfg = cfg.with_overrides(
+        isolation=rec.isolation, firewall=rec.firewall, resources=rec.resources
+    )
     if harness is None:
         cfg = cfg.with_overrides(harness=rec.harness)
     if template is None:
@@ -252,6 +259,202 @@ def _record_hint(exc: record.RecordError) -> str:
         f"Tear it down and create it again: treebox teardown {exc.worktree.name}, "
         "then treebox create (add --checkout <branch> to keep its branch)."
     )
+
+
+# --- resource limits ---------------------------------------------------------
+
+_CPUS_HELP = (
+    "CPU limit for this worktree's sandbox, in CPUs (a decimal, at least 0.01, "
+    "at most the engine's CPU count), e.g. --cpus 2 or --cpus 1.5. Maps to "
+    "docker run --cpus. Overrides \\[resources] cpus in config and the template's "
+    "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
+    "--isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_MEMORY_HELP = (
+    "Memory limit for this worktree's sandbox, in Docker's memory syntax: a "
+    "number and a unit b, k, m, g, t or p (binary multiples; a bare number is "
+    "bytes; at least 6m), e.g. --memory 4g or --memory 512m. Maps to docker run "
+    "--memory. Overrides \\[resources] memory in config and the template's "
+    "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
+    "--isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_PIDS_HELP = (
+    "Process limit for this worktree's sandbox: the most processes and threads "
+    "it can run at once (a positive whole number), e.g. --pids-limit 512. Maps "
+    "to docker run --pids-limit. Overrides \\[resources] pids in config and the "
+    "template's resources. Unset: no treebox cap. Fixed when the sandbox is "
+    "created. --isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_ENTER_LIMIT_NOTE = (
+    " On enter: only restates the recorded limit; a different value is a "
+    "conflict (exit 5) with the re-create commands."
+)
+
+
+def _resource_flags(
+    reporter: Reporter,
+    *,
+    cpus: str | None,
+    memory: str | None,
+    pids_limit: str | None,
+    json_out: bool,
+) -> ResourceLimits:
+    """Validate the ``--cpus`` / ``--memory`` / ``--pids-limit`` flags before
+    anything is provisioned: a bad value is a usage error (exit 2)."""
+    try:
+        return resources.from_flags(cpus=cpus, memory=memory, pids=pids_limit)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="See the units and an example in `treebox create --help`.",
+            json_out=json_out,
+        ) from exc
+
+
+def _refuse_unsupported_limits(
+    reporter: Reporter, run: Runner, explicit: ResourceLimits, *, json_out: bool
+) -> None:
+    """An explicit limit the runner cannot apply is an error, never ignored."""
+    unsupported = [n for n in explicit.names() if n not in run.supported_resources]
+    if not unsupported:
+        return
+    flags = ", ".join(resources.FLAGS[n] for n in unsupported)
+    raise _die(
+        reporter,
+        f"The {run.name} runner cannot apply {flags}"
+        + (
+            ": it runs the agent on the host, with no sandbox to cap."
+            if run.name == "host"
+            else "."
+        ),
+        code=EXIT_USAGE,
+        error_code="RESOURCE_UNSUPPORTED",
+        hint=f"Drop {flags}, or use a sandbox: --isolation docker.",
+        json_out=json_out,
+    )
+
+
+def _creation_limits(
+    reporter: Reporter,
+    cfg: Config,
+    run: Runner,
+    explicit: ResourceLimits,
+    *,
+    json_out: bool,
+) -> tuple[ResourceLimits, list[str]]:
+    """The effective limits of a new sandbox, field by field: explicit flag,
+    then user config (``cfg.resources``), then the runner's template tier,
+    restricted to what the runner can apply. Also returns the config limits
+    this runner does not apply (shown as a note, never an error: one
+    ``[resources]`` table must not break every host worktree). Engine-refused
+    values fail here, before provisioning."""
+    _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
+    try:
+        wanted = explicit.over(cfg.resources).over(run.template_resources())
+        effective = wanted.only(run.supported_resources)
+        run.check_resources(effective)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="Pick a smaller value, or check the Docker engine's resources (docker info).",
+            json_out=json_out,
+        ) from exc
+    except _PROVISION_ERRORS as exc:
+        raise _handle(reporter, exc, json_out=json_out) from exc
+    ignored = [n for n in cfg.resources.names() if n not in run.supported_resources]
+    return effective, ignored
+
+
+def _note_ignored_limits(reporter: Reporter, run: Runner, ignored: list[str]) -> None:
+    if ignored:
+        reporter.note(
+            "limits",
+            f"[resources] {', '.join(ignored)} not applied: the {run.name} runner "
+            "sets no such limit",
+        )
+
+
+def _recreate_command(rec: record.WorktreeRecord, branch: str | None, flags: ResourceLimits) -> str:
+    """The exact commands that re-create a worktree's sandbox. ``flags`` are
+    the limits to choose by flag; every other limit comes from config and the
+    template again, as on any create (teardown keeps the branch, and its
+    commits, by default)."""
+    name = rec.worktree.name
+    create = ["treebox", "create", name]
+    if branch and branch != "detached":
+        create += ["--checkout", branch]
+    create += ["--isolation", rec.isolation]
+    if rec.firewall:
+        create.append("--firewall")
+    create += ["--template", rec.template, "-H", rec.harness, *flags.cli_flags()]
+    return f"treebox teardown {name} && {shlex.join(create)}"
+
+
+def _check_entry_resources(
+    reporter: Reporter,
+    run: Runner,
+    rec: record.WorktreeRecord,
+    *,
+    branch: str | None,
+    explicit: ResourceLimits,
+    config_limits: ResourceLimits,
+    json_out: bool,
+) -> ResourceLimits:
+    """The recorded limits are what an existing sandbox has, and a container's
+    limits cannot change in place. An explicit flag that differs is a
+    conflict (exit 5) with the re-create commands. A limit that config or the
+    template gave at create, and that they now give differently, is drift: a
+    warning with the same commands, never a silent no-op. Returns the drift
+    (the values config and template now give; unset = no drift).
+
+    A limit an explicit ``create`` flag chose (``rec.explicit_resources``)
+    never drifts: the operator picked it on purpose. Neither does one this
+    ``enter`` restates by flag."""
+    _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
+    recorded = rec.resources
+    chosen = recorded.only(rec.explicit_resources)
+    differs = [n for n in explicit.names() if getattr(explicit, n) != getattr(recorded, n)]
+    if differs:
+        flags = ", ".join(
+            f"{resources.FLAGS[n]} {resources.format_value(n, getattr(explicit, n))}"
+            for n in differs
+        )
+        raise _die(
+            reporter,
+            f"Worktree '{rec.worktree.name}' was created with limits "
+            f"{recorded.describe()}; {flags} cannot apply to its existing sandbox.",
+            code=EXIT_CONFLICT,
+            error_code="RESOURCE_MISMATCH",
+            hint="Drop the flag to keep the recorded limits, or commit your work and "
+            "re-create the sandbox: " + _recreate_command(rec, branch, explicit.over(chosen)),
+            path=str(record.record_path(rec.worktree)),
+            json_out=json_out,
+        )
+    try:
+        template = run.template_resources()
+    except _PROVISION_ERRORS:
+        template = ResourceLimits()  # enter tolerates a deleted or broken template
+    # Only a value the config or template sets counts: an unset default asks
+    # for nothing, so it never contradicts a limit chosen at create.
+    wanted = config_limits.over(template).only(run.supported_resources)
+    pinned = rec.explicit_resources | set(explicit.names())
+    drift = wanted.only(
+        n for n in wanted.names() if n not in pinned and getattr(wanted, n) != getattr(recorded, n)
+    )
+    if drift.names():
+        reporter.warn(
+            f"limits: this sandbox keeps its recorded limits ({recorded.describe()}); "
+            f"config and template now give {drift.describe()}. A limit change cannot "
+            "apply to an existing sandbox. To apply it, commit your work and "
+            f"re-create: {_recreate_command(rec, branch, chosen)}"
+        )
+    return drift
 
 
 def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
@@ -489,10 +692,19 @@ def _short_path(path: Path | str, repo: str) -> str:
 
 
 def _emit_result(
-    outcome: provision.Outcome, *, json_out: bool, print_only: bool, warnings: list[str]
+    outcome: provision.Outcome,
+    *,
+    json_out: bool,
+    print_only: bool,
+    warnings: list[str],
+    limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
     """Write the machine/script-facing result to stdout. ``warnings`` are the
-    run's warnings (an additive payload field: empty when nothing was skipped)."""
+    run's warnings (an additive payload field: empty when nothing was
+    skipped). ``drift`` (``enter`` only) is what config and template now give
+    for a limit the sandbox keeps: ``resources_drift``, every key present,
+    ``null`` = no drift."""
     block = outcome.worktree.ports
     if json_out:
         payload = {
@@ -506,8 +718,11 @@ def _emit_result(
             "base": outcome.worktree.base,
             "entry_command": outcome.entry_command,
             "created": outcome.created,
+            "resources": limits.to_json(),
             "warnings": warnings,
         }
+        if drift is not None:
+            payload["resources_drift"] = drift.to_json()
         _emit_json(payload)
     elif print_only:
         sys.stdout.write(" ".join(shlex.quote(p) for p in outcome.entry_command) + "\n")
@@ -525,6 +740,7 @@ def _dry_run(
     cold: bool,
     json_out: bool,
     checkout: str | None,
+    ignored_limits: list[str],
 ) -> None:
     """Render what ``create`` would do, executing nothing."""
     try:
@@ -551,6 +767,7 @@ def _dry_run(
                 "worktree_path": str(wt.path),
                 "branch": branch,
                 "commands": cmds,
+                "resources": cfg.resources.to_json(),
                 "warnings": reporter.warnings,
             }
         )
@@ -560,6 +777,9 @@ def _dry_run(
     reporter.summary("worktree", _short_path(wt.path, repo_path))
     reporter.summary("branch", branch)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if cfg.resources.names():
+        reporter.summary("limits", cfg.resources.describe())
+    _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
     for cmd in cmds:
         reporter.command(cmd)
@@ -620,6 +840,9 @@ def create(
         "Resolved from $TREEBOX_TEMPLATE_DIR or $TREEBOX_HOME/templates/<name> "
         "(default ~/.treebox/templates/<name>).",
     ),
+    cpus: str | None = typer.Option(None, "--cpus", help=_CPUS_HELP, metavar="CPUS"),
+    memory: str | None = typer.Option(None, "--memory", help=_MEMORY_HELP, metavar="SIZE"),
+    pids_limit: str | None = typer.Option(None, "--pids-limit", help=_PIDS_HELP, metavar="N"),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -690,6 +913,9 @@ def create(
         template=template,
         json_out=json_out,
     )
+    explicit_limits = _resource_flags(
+        reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
+    )
     if checkout is None and name is not None and name.startswith("-"):
         # Without --checkout, NAME is the branch, and a dash-led branch is
         # never valid (INVALID_BRANCH, as always). It usually means
@@ -741,6 +967,16 @@ def create(
         except (assets.TemplateNotFoundError, assets.TemplateInvalidError) as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
+    # Limits are final before anything is provisioned, and they are what the
+    # host-owned record will hold.
+    limits, ignored_limits = _creation_limits(
+        reporter, cfg, run, explicit_limits, json_out=json_out
+    )
+    cfg = cfg.with_overrides(
+        resources=limits, explicit_resources=frozenset(explicit_limits.names())
+    )
+    run = get_runner(cfg)
+
     if dry_run:
         _dry_run(
             reporter,
@@ -753,6 +989,7 @@ def create(
             cold=cold,
             json_out=json_out,
             checkout=checkout,
+            ignored_limits=ignored_limits,
         )
         return
 
@@ -766,8 +1003,11 @@ def create(
         reporter.summary("branch", f"{target_branch}  ·  placeholder — rename before push")
         reporter.summary("base", cfg.base)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if limits.names():
+        reporter.summary("limits", limits.describe())
     if cold:
         reporter.summary("cache", "cold (from source)")
+    _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
 
     # The boundary str was validated by _resolve_config; internal seams take
@@ -803,6 +1043,7 @@ def create(
         json_out=json_out,
         print_only=print_only,
         args=args or [],
+        limits=limits,
     )
 
 
@@ -830,6 +1071,15 @@ def enter(
         "(default ~/.treebox/templates/<name>).",
     ),
     cold: bool = typer.Option(False, "--cold", help="Bypass shared caches when re-syncing."),
+    cpus: str | None = typer.Option(
+        None, "--cpus", help=_CPUS_HELP + _ENTER_LIMIT_NOTE, metavar="CPUS"
+    ),
+    memory: str | None = typer.Option(
+        None, "--memory", help=_MEMORY_HELP + _ENTER_LIMIT_NOTE, metavar="SIZE"
+    ),
+    pids_limit: str | None = typer.Option(
+        None, "--pids-limit", help=_PIDS_HELP + _ENTER_LIMIT_NOTE, metavar="N"
+    ),
     print_only: bool = typer.Option(
         False, "--print", help="Prepare, then print the launch command (no launch)."
     ),
@@ -869,6 +1119,10 @@ def enter(
         template=template,
         json_out=json_out,
     )
+    explicit_limits = _resource_flags(
+        reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
+    )
+    config_limits = cfg.resources
     repo_path = _repo_root(reporter, repo, json_out=json_out)
     _check_root(reporter, repo_path, cfg.root, json_out=json_out)
     try:
@@ -908,6 +1162,17 @@ def enter(
     subtitle = cand.name if cand.branch in (None, cand.name) else f"{cand.name}  ·  {cand.branch}"
     reporter.heading("enter", subtitle)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if rec.resources.names():
+        reporter.summary("limits", rec.resources.describe())
+    drift = _check_entry_resources(
+        reporter,
+        run,
+        rec,
+        branch=cand.branch,
+        explicit=explicit_limits,
+        config_limits=config_limits,
+        json_out=json_out,
+    )
     reporter.blank()
 
     def _provision() -> provision.Outcome:
@@ -932,6 +1197,8 @@ def enter(
         json_out=json_out,
         print_only=print_only,
         args=args or [],
+        limits=rec.resources,
+        drift=drift,
     )
 
 
@@ -945,6 +1212,8 @@ def _run_session(
     json_out: bool,
     print_only: bool,
     args: list[str],
+    limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
     the lock on the worktree at ``path``, the provisioning step, one exception
@@ -983,7 +1252,14 @@ def _run_session(
         raise _handle(reporter, exc, json_out=json_out) from exc
 
     if not launching:
-        _emit_result(outcome, json_out=json_out, print_only=print_only, warnings=reporter.warnings)
+        _emit_result(
+            outcome,
+            json_out=json_out,
+            print_only=print_only,
+            warnings=reporter.warnings,
+            limits=limits,
+            drift=drift,
+        )
         return
     reporter.blank()
     # Style-A closing line: green "Ready", dim "in <total> — launching <harness>".
@@ -1133,6 +1409,7 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
                 base=policy.base if policy else "",
                 isolation=policy.isolation if policy else "",
                 harness=policy.harness if policy else "",
+                resources=policy.resources.to_json() if policy else None,
                 deps=deps,
                 env="present" if env_present else "absent",
                 health=health,

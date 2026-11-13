@@ -25,8 +25,8 @@ Provisioning (fetch → resolve branch → worktree add → copy submodules → 
 
 ## Command reference
 
-- `create [NAME] [-- AGENT_ARGS…]` - provision and launch; args after `--` go to the agent (they need a NAME), and with `--json`/`--print` they are part of `entry_command`. Flags: `--base <branch>` `--checkout <existing-branch>` `--isolation host|docker` `--harness claude|codex` `--template <name>` `--cold` `--no-fetch` `--firewall/--no-firewall` `--dry-run` `--print` `--json` `--repo <path>` `--root <dir>` `--quiet` `--verbose`.
-- `enter REF [-- AGENT_ARGS…]` — re-launch in an existing worktree; refreshes `.env`, reuses the isolation/firewall/harness/template from the worktree's host-owned record (never from files the agent can write), and re-syncs deps only if the lockfile changed (an interrupted setup is finished rather than skipped). Flags: `--isolation` `--harness` `--template <name>` `--cold` `--print` `--json` `--repo` `--root` `--quiet` `--verbose`.
+- `create [NAME] [-- AGENT_ARGS…]` - provision and launch; args after `--` go to the agent (they need a NAME), and with `--json`/`--print` they are part of `entry_command`. Flags: `--base <branch>` `--checkout <existing-branch>` `--isolation host|docker` `--harness claude|codex` `--template <name>` `--cold` `--no-fetch` `--firewall/--no-firewall` `--cpus <n>` `--memory <size>` `--pids-limit <n>` `--dry-run` `--print` `--json` `--repo <path>` `--root <dir>` `--quiet` `--verbose`.
+- `enter REF [-- AGENT_ARGS…]` - re-launch in an existing worktree; refreshes `.env`, reuses the isolation/firewall/harness/template from the worktree's host-owned record (never from files the agent can write), and re-syncs deps only if the lockfile changed (an interrupted setup is finished rather than skipped). Flags: `--isolation` `--harness` `--template <name>` `--cold` `--cpus` `--memory` `--pids-limit` (restate only: a value that differs from the recorded limit exits `5`) `--print` `--json` `--repo` `--root` `--quiet` `--verbose`.
 - `list` (alias `ls`) - table of worktrees (branch · recorded isolation · deps freshness · `.env` presence). For directory paths, read the [list output reference](https://seth-peters.github.io/treebox/usage/#list-what-exists-whats-stale). A worktree without a host-owned record is shown honestly as `unknown`. Flags: `--repo` `--root` `--json`.
 - `teardown [REF...]` (alias `rm`) - remove selected worktrees; caches are left intact. Flags: `--yes`/`-y` (confirm without a prompt; uncommitted changes still block) `--force` `--delete-branch` `--remove-volumes` `--skip-container` `--json` `--repo` `--root` `--quiet` `--verbose`.
 - `template init NAME` - scaffold an operator-owned sandbox template into `$TREEBOX_HOME/templates/<name>`. Flags: `--from <template>` `--force` `--json`. Then edit its `Dockerfile` and `container.json` and select with `--template <name>`. For copy and recovery rules, read the [`template` command reference](https://seth-peters.github.io/treebox/usage/#template-scaffold-and-inspect-sandbox-templates).
@@ -42,6 +42,7 @@ Provisioning (fetch → resolve branch → worktree add → copy submodules → 
 treebox create fix-auth --base dev          # new branch fix-auth from origin/dev, host isolation
 treebox create docs-fix --base dev --isolation docker
 treebox create hotfix-login --base main --cold  # ignore shared cache, from-source build
+treebox create big-build --isolation docker --cpus 2 --memory 4g --pids-limit 512  # capped sandbox
 treebox create fix-auth --harness codex        # Codex instead of Claude
 treebox create review-auth --checkout feature/auth  # exact existing branch
 treebox create fix-auth --repo /path/to/repo
@@ -58,7 +59,7 @@ Provision without launching the agent (for scripting / over SSH / when you only 
 ```bash
 treebox create fix-auth --dry-run  # print a stable side-effect-free plan of the git/setup commands; no launch
 treebox create fix-auth --print    # prints the launch command (self-contained: carries the worktree dir, runnable from anywhere), no launch
-treebox create fix-auth --json     # JSON {schemaVersion, name, worktree_path, branch, base, entry_command, created, warnings}
+treebox create fix-auth --json     # JSON {schemaVersion, name, worktree_path, branch, base, entry_command, created, resources, warnings}
 treebox list --json                     # JSON {schemaVersion, worktrees:[…]}
 treebox doctor --json                   # JSON health report; exits non-zero if a hard check fails
 ```
@@ -120,6 +121,7 @@ treebox teardown fix-login --yes --json        # exit 5 DIRTY_WORKTREE if work i
 - For worktree lock conflicts, read the [locking rules](https://seth-peters.github.io/treebox/how-it-works/#built-to-be-scripted). Wait before retrying.
 - **Dispatching several tasks at once is supported.** `create` (and `teardown`) calls for *different* names can be started in parallel against the same repo: they queue briefly on a repository lock for the git steps and then set up concurrently, so there is nothing to serialize yourself. A `create` that fails never leaves a branch behind - re-run the same command.
 - Output: a compact spinner + green checkmarks with right-aligned timings on stderr, degrading gracefully off-TTY and under `NO_COLOR` (no color/animation). `--verbose` streams raw command output; `--quiet` suppresses progress. `--json` success payloads and `--print` commands write to stdout; human `--dry-run` writes its plan to stderr, while `--dry-run --json` writes JSON to stdout.
+- **Resource limits** (docker isolation): a sandbox has no CPU, memory or process limit unless you set one. `--cpus N` (CPUs, decimal, e.g. `2` or `1.5`), `--memory SIZE` (Docker's memory syntax: number + unit `b`/`k`/`m`/`g`/`t`/`p`, e.g. `512m`, `4g`; at least `6m`), `--pids-limit N` (positive whole number of processes, e.g. `512`). Precedence per field: flag, then `[resources]` (`cpus`, `memory`, `pids`) in the user config, then the operator template's `resources` object; nothing comes from the target repo. A bad value exits `2` (`INVALID_RESOURCE`) before anything is provisioned. `--isolation host` refuses an explicit limit flag (exit `2`, `RESOURCE_UNSUPPORTED`); a `[resources]` config default is just not applied to host worktrees. Limits are fixed at create and recorded: `list --json` and `create --dry-run --json` show `resources` (`null` = no cap). If a limit that came from config or the template now has a different config or template value, `enter` warns (in `--json` mode: one entry in `warnings`, and the new values in `resources_drift`, `null` = no drift); a limit a `create` flag chose never warns. To change them, follow the `RESOURCE_MISMATCH` hint (teardown, then `create <name> --checkout <branch>` with the new flags); commit first.
 - For firewall options and Docker host access, read the [operator-template firewall rules](https://seth-peters.github.io/treebox/configuration/#the-containerjson-schema).
 
 ## Notes
