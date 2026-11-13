@@ -145,8 +145,10 @@ Module map:
   bound to the registered worktree path, written atomically by `create`
   under the worktree lock before any runner resource depends on it.
   API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
-  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. To
-  extend it, add a field to `WorktreeRecord` and bump `SCHEMA_VERSION`.
+  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. The
+  record format has never been released, so a new field is a new required
+  key of the one schema version: add it to `WorktreeRecord` without a
+  `SCHEMA_VERSION` bump and without an upgrade path.
   On `enter`, a missing or invalid record is a classified error
   (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to recreate
   the worktree (`teardown`, then `create`), never a fallback to config

@@ -25,10 +25,11 @@ Module API (what later features extend)::
     record.save(dataclasses.replace(rec, ...)) # atomic replace
     record.remove(path)                        # on teardown
 
-There is one schema version and no upgrade path. Extending it: add a field to
-``WorktreeRecord`` and bump ``SCHEMA_VERSION``. A record with another version
-or an unknown key is invalid, so a worktree made by another treebox version is
-torn down and created again, never reinterpreted.
+There is one schema version and no upgrade path. The record format has never
+been released, so a new field is a new required key of that one version: add
+it to ``WorktreeRecord`` and do not bump ``SCHEMA_VERSION``. A record with
+another version or an unknown key is invalid, so a worktree made by another
+treebox version is torn down and created again, never reinterpreted.
 """
 
 from __future__ import annotations
