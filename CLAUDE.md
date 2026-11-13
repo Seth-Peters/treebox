@@ -77,11 +77,15 @@ Module map:
 - **`harnesses.py`** is the one place agent-CLI wiring lives: each `Harness`
   hides its autonomous launch argv, host login dir, staged login files, the
   one login file among them (`login_file`), and login advice behind a small
-  method interface. It also decides what a real login is: `sandbox_login`
-  (the login file holds a JSON object - what a sandbox gets a copy of) and
-  `host_login` (that file, or on macOS the Keychain item the CLI keeps it in;
-  an attribute-only probe that never prompts). `VALID_HARNESSES` and the
-  doctor login rows derive from `HARNESSES`. Boundary values (CLI/TOML/state)
+  method interface. It also decides where the login lives on this machine:
+  `login()` (a non-empty JSON object, the one an agent on the host uses and
+  a sandbox gets a copy of) and `stage_credentials` share one private seam,
+  `_read`, with the one selection rule: the login file first; only when it is
+  absent, on `sys.platform == "darwin"`, and for a harness with a Keychain
+  service, this user's Keychain item (a time-limited read with no stdin; a
+  timeout or refusal is no login). No caller knows about the Keychain or the
+  platform. `VALID_HARNESSES` and the doctor login rows derive from
+  `HARNESSES`. Boundary values (CLI/TOML/state)
   stay `str` and are resolved to the object once, in `cli.py`.
 - **`runners/base.py`** defines the `Runner` protocol — the *only* thing that
   differs between modes — implemented by **`runners/host.py`** (setup + agent in

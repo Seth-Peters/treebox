@@ -934,7 +934,7 @@ def test_harness_credentials_are_scoped_copies(tmp_path: Path, monkeypatch: pyte
 
     claude = get_harness("claude")
     assert claude.credential_path() == live  # staging reads the login dir
-    assert claude.sandbox_login() == str(live / ".credentials.json")
+    assert claude.login() == str(live / ".credentials.json")
 
     staged = tmp_path / "staged" / "claude"
     claude.stage_credentials(staged)
@@ -955,7 +955,7 @@ def test_harness_credentials_are_scoped_copies(tmp_path: Path, monkeypatch: pyte
 
     # An absent login dir stages nothing and is reported as no login.
     codex = get_harness("codex")
-    assert codex.sandbox_login() is None
+    assert codex.login() is None
     codex.stage_credentials(tmp_path / "staged" / "codex")
     assert list((tmp_path / "staged" / "codex").iterdir()) == []
 

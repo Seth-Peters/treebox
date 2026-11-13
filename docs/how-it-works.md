@@ -237,6 +237,29 @@ isolation uses your live `~/.claude` / `~/.codex` login dirs; docker isolation
 never mounts those live dirs. Instead, each harness declares which login files
 to copy into a per-worktree credentials dir, refreshed on every `enter`.
 
+Where a login comes from has one rule: the login file first
+(`~/.claude/.credentials.json`, `~/.codex/auth.json`). Only when that file is
+absent, on macOS (`sys.platform == "darwin"`), and for a harness that keeps
+its login in the Keychain (Claude Code: your user's `Claude Code-credentials`
+item), treebox reads the Keychain item and stages it as the login file. The
+read has a time limit and no terminal input, so a macOS permission dialog
+nobody answers, or a denied one, is no login - never a wait. `doctor`, the
+unattended `LOGIN_MISSING` check, and the staged copy all use this one rule.
+The secret is written only to the owner-only staged file, which lives beside
+the worktree, never inside it; it is never in argv, output, logs, or the
+worktree record.
+
+**Token refresh.** The sandbox gets a copy, so the host and the sandbox each
+hold their own. What is known: every `create` and `enter` replaces the staged
+copy with the host's current login (or deletes it after a host logout), and a
+token the agent refreshes inside the sandbox is written only to the staged
+copy, never back to the host. What is not known: whether a refresh on one
+side makes the other side's copy stop working (if the provider rotates
+refresh tokens). treebox does not test this. If the sandbox copy goes stale,
+the agent in the sandbox reports that it is not logged in; leave the
+sandbox, make sure the agent on the host is logged in, and run
+`treebox enter` again: it restages the copy from the host.
+
 ## Built to be scripted
 
 treebox assumes the caller is often another program:

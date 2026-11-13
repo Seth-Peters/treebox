@@ -53,7 +53,7 @@
     }
   ],
   "advisories": [
-    "Install the claude CLI and log in (writes ~/.claude) before launching. A docker sandbox gets a copy of __ROOT__/home-empty/.claude/.credentials.json, so that file must hold the login."
+    "Install the claude CLI and log in (writes ~/.claude; on macOS the Keychain item 'Claude Code-credentials': allow access if asked) before launching."
   ]
 }
 # --- stderr ---

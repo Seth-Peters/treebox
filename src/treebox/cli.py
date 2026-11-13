@@ -991,22 +991,19 @@ def _agent_binary_check(run: Runner, harness: Harness) -> DoctorCheck:
     )
 
 
-def _agent_login_check(run: Runner, harness: Harness, *, required: bool = True) -> DoctorCheck:
-    """The harness's subscription login, as the agent will see it: the host
-    login on the host; in a sandbox, the login file it gets a copy of."""
+def _agent_login_check(harness: Harness, *, required: bool = True) -> DoctorCheck:
+    """The harness's subscription login: the one an agent on the host uses
+    and a sandbox gets a copy of."""
     name = f"login: {harness.name}"
-    sandboxed = run.facts().sandboxed
-    found = harness.sandbox_login() if sandboxed else harness.host_login()
+    found = harness.login()
     if found:
         return DoctorCheck(name, True, found, required=required)
-    advisory = harness.login_hint()
-    if sandboxed:
-        advisory += (
-            f" A {run.name} sandbox gets a copy of {harness.login_file()}, so that "
-            "file must hold the login."
-        )
     return DoctorCheck(
-        name, False, f"no login at {harness.login_file()}", advisory, required=required
+        name,
+        False,
+        f"no login at {harness.login_file()}",
+        harness.login_hint(),
+        required=required,
     )
 
 
@@ -1021,7 +1018,7 @@ def _require_agent(run: Runner, harness: Harness, *, login: bool) -> None:
             binary.detail + ".", error_code="HARNESS_MISSING", hint=binary.advisory
         )
     if login:
-        check = _agent_login_check(run, harness)
+        check = _agent_login_check(harness)
         if not check.ok:
             raise PreflightError(
                 f"No {harness.name} login for an unattended launch: {check.detail}.",
@@ -1974,7 +1971,7 @@ def doctor(
 
     checks.append(_agent_binary_check(run, selected))
     for h in HARNESSES:
-        checks.append(_agent_login_check(run, h, required=h is selected))
+        checks.append(_agent_login_check(h, required=h is selected))
 
     # Same resolver copy_env uses, so doctor reports the exact secrets source
     # provisioning will copy.
