@@ -86,7 +86,7 @@ treebox create fix-auth                    # branch fix-auth off fresh origin/ma
 treebox create fix-auth --isolation docker   # same provisioning, sandboxed
 ```
 
-Docker isolation needs exactly one extra thing: Docker — see
+For Docker isolation, see
 [what each isolation mode needs](install.md#what-each-isolation-mode-needs).
 
 ## What it is — and isn't

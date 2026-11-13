@@ -83,9 +83,9 @@ A full e2e run means every group.
 ## Phase 3 — docker (conditional)
 
 Run group H only if `tb doctor --isolation docker --json` reports `ok: true`
-(scenario A4). No daemon → mark all of H **SKIP (no docker daemon)** — skipped
-is not passed; the report must say docker went unexercised. H builds a real
-image; expect it to be the slowest phase.
+(scenario A4). Otherwise, mark all of H **SKIP** and record the failed check
+and its advisory. Skipped is not passed. The report must say Docker was not
+tested. H builds a real image; expect it to be the slowest phase.
 
 Name every group-H worktree with the `e2e-` prefix (e.g. `e2e-dockered`). Docker
 containers/images escape the sandbox dir into the global daemon namespace as

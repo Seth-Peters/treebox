@@ -36,6 +36,10 @@ def _create_link_checkout(repo: Path, tmp_path: Path, link_path: str, target: Pa
 
     git("read-tree", "main")
     git("update-index", "--force-remove", "sub")
+    # The branch declares the same submodules as the main checkout, so the
+    # copy (which follows the branch's own .gitmodules) reaches the link.
+    modules = git("hash-object", "-w", str(repo / ".gitmodules"))
+    git("update-index", "--add", "--cacheinfo", f"100644,{modules},.gitmodules")
     link = git("hash-object", "-w", "--stdin", data=str(target))
     git("update-index", "--add", "--cacheinfo", f"120000,{link},{link_path}")
     commit = git("commit-tree", git("write-tree"), "-p", "main", data="unsafe checkout\n")

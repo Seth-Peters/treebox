@@ -13,7 +13,8 @@ echo "== mypy =="
 uv run --extra dev mypy
 
 echo "== shell assets =="
-shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/pre-push scripts/*.sh)
+shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/container/treebox-fetch
+  src/treebox/assets/container/treebox-online src/treebox/assets/pre-push scripts/*.sh)
 for f in "${shell_files[@]}"; do bash -n "$f"; done
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "${shell_files[@]}"
