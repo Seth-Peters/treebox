@@ -154,17 +154,21 @@ Module map:
   double-allocates a block. The range and block size are user config only
   (`[ports]`, `config.PortRange`); a full range is `PORTS_EXHAUSTED` (exit 5)
   before anything is made.
-- **`lifecycle.py`** holds the two lifecycle models every command derives its
-  decisions from: the **setup model** (`SetupResult`: `pending` / `failed` /
+- **`lifecycle.py`** holds the **setup model** (`SetupResult`: `pending` / `failed` /
   `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,
   `resumable` whether a same-name `create` finishes it, `freshness` what
-  `list` reports) and the **cleanup model** (`Cleanup`: teardown steps run in
-  order - runner resources, worktree, ownership record - and the record and
-  the runner's resource manifest are removed only once nothing remains). A
-  failed setup step is a failed `create`/`enter` (`SETUP_FAILED`, exit 1,
-  output in `<parent>/.logs/<leaf>.setup.log`); an incomplete cleanup is a
-  failed `teardown` (`TEARDOWN_INCOMPLETE`, exit 1) that the same command
-  retries. Worktree health (`healthy`, `directory_missing`,
+  `list` reports). A failed setup step is a failed `create`/`enter`
+  (`SETUP_FAILED`, exit 1, output in `<parent>/.logs/<leaf>.setup.log`).
+- **`cleanup.py`** owns one worktree's cleanup through `cleanup_one`: runner
+  resources, then the worktree and git registration, then the ownership
+  record and port release.
+  A failed step keeps the resources and records a retry needs. Git refusal
+  never falls back to filesystem deletion. `CleanupResult` returns completed
+  effects and remaining resources. Incomplete cleanup fails with
+  `TEARDOWN_INCOMPLETE` (exit 1); the same command retries.
+  The CLI owns batch validation, locking,
+  confirmation and result rendering; runner adapters own their resources.
+  Worktree health (`healthy`, `directory_missing`,
   `invalid_linkage`, `unregistered`, `unreadable_state`) is classified once,
   in `provision.worktree_health`, and exposed as `health` in `list --json`.
 - **`models.py`** holds the `Worktree` value object and the path-as-identity
