@@ -48,7 +48,6 @@ from .models import (
     WorktreeRow,
     derive_name,
     expand_user,
-    flatten_branch,
     is_placeholder,
     is_valid_name,
     path_is_under,
@@ -281,6 +280,29 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
             hint="Run inside a git repo, or pass --repo <path>.",
             json_out=json_out,
         ) from exc
+
+
+def _check_root(reporter: Reporter, repo_path: str, root: str, *, json_out: bool = False) -> None:
+    """Refuse a worktree root that cannot hold worktrees: the root, or its
+    nearest existing ancestor, is not a directory (a regular file, a dangling
+    symlink). A root that does not exist yet is fine - create makes it."""
+    base = worktree_root(repo_path, root)
+    probe = base
+    while not os.path.lexists(probe) and probe != probe.parent:
+        probe = probe.parent
+    if probe.is_dir():
+        return
+    where = "" if probe == base else f" ({probe} is not a directory)"
+    raise _die(
+        reporter,
+        f"Worktree root {base} is not a directory{where}.",
+        code=EXIT_USAGE,
+        error_code="INVALID_ROOT",
+        hint="Point --root (or root in config.toml) at a directory, "
+        "or at a path that does not exist yet.",
+        path=str(base),
+        json_out=json_out,
+    )
 
 
 def _validate_branch(reporter: Reporter, branch: str, *, json_out: bool = False) -> None:
@@ -610,14 +632,15 @@ def create(
     if checkout is not None:
         _validate_branch(reporter, checkout, json_out=json_out)
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     if checkout is not None:
-        wt_name = flatten_branch(name) if name else derive_name(checkout)
+        wt_name = derive_name(name or checkout)
         target_branch = checkout
     elif name is not None:
         # An explicit name IS the branch: slashes stay in the branch, the
         # directory flattens them (feature/auth -> feature--auth).
-        wt_name = flatten_branch(name)
+        wt_name = derive_name(name)
         target_branch = name
         _validate_branch(reporter, target_branch, json_out=json_out)
     else:
@@ -752,6 +775,7 @@ def enter(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
@@ -939,6 +963,7 @@ def list_cmd(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     rows = _collect_rows(repo_path, cfg)
 
@@ -1231,6 +1256,7 @@ def teardown(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     targets: list[resolve.Candidate] = []
     # Which targets also lose their local branch, by path. The chooser fills this

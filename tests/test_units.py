@@ -11,7 +11,7 @@ import pytest
 
 from treebox import ecosystems
 from treebox.config import Config, load_config
-from treebox.models import Worktree, flatten_branch, worktree_path
+from treebox.models import Worktree, derive_name, worktree_path
 from treebox.runners.docker import DockerRunner
 
 
@@ -253,14 +253,29 @@ def test_golden_snapshot_gate_preserves_and_detects_trailing_spaces(tmp_path: Pa
     assert "+meaningful trailing spaces   " in compared.stdout
 
 
-def test_flatten_branch():
-    assert flatten_branch("feature/auth") == "feature--auth"
-    assert flatten_branch("bugfix/docs-outdated") == "bugfix--docs-outdated"
-    assert flatten_branch("simple") == "simple"
+@pytest.mark.parametrize(
+    ("branch", "name"),
+    [
+        ("simple", "simple"),
+        ("feature/auth", "feature--auth"),
+        ("bugfix/docs-outdated", "bugfix--docs-outdated"),
+        ("feature/x/y", "feature--x--y"),
+        ("treebox/fix-auth", "fix-auth"),
+        # A placeholder drops its prefix, then flattens like any branch: the
+        # name is one directory leaf, never a nested path.
+        ("treebox/a/b", "a--b"),
+        ("treebox/a/b/c", "a--b--c"),
+        # Only a leading prefix is a placeholder marker.
+        ("feature/treebox/x", "feature--treebox--x"),
+    ],
+)
+def test_derive_name_flattens_every_branch_shaped_input(branch: str, name: str):
+    assert derive_name(branch) == name
+    assert "/" not in derive_name(branch)
 
 
 def test_name_and_placeholder_helpers():
-    from treebox.models import derive_name, is_placeholder, is_slug, placeholder_branch
+    from treebox.models import is_placeholder, is_slug, placeholder_branch
 
     # NAME is one clean lowercase token — nothing else.
     assert is_slug("fix-auth") and is_slug("x2") and is_slug("brave-otter")
@@ -272,10 +287,6 @@ def test_name_and_placeholder_helpers():
     assert placeholder_branch("brave-otter") == "treebox/brave-otter"
     assert is_placeholder("treebox/brave-otter")
     assert not is_placeholder("feature/auth") and not is_placeholder(None)
-
-    # A placeholder implies its own slug; other branches flatten.
-    assert derive_name("treebox/fix-auth") == "fix-auth"
-    assert derive_name("feature/auth") == "feature--auth"
 
 
 def test_is_valid_name_accepts_slash_separated_slugs():
@@ -652,7 +663,7 @@ def fake_common_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def _boxed_worktree(tmp_path: Path, branch: str = "feature/x") -> Worktree:
-    name = flatten_branch(branch)
+    name = derive_name(branch)
     wt_path = tmp_path / "root" / name
     wt_path.mkdir(parents=True, exist_ok=True)
     return Worktree("/repo", name, branch, "main", wt_path)

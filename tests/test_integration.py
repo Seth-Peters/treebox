@@ -200,6 +200,97 @@ def test_create_slash_name_flattens_dir_and_keeps_branch(repo: Path, root: str, 
     assert git.branch_for_path(str(repo), str(wt)) == "feature/auth"
 
 
+def test_checkout_nested_placeholder_branch_gets_one_flat_name(
+    repo: Path, root: str, hermetic_config
+):
+    """--checkout treebox/a/b drops the placeholder prefix and flattens the
+    rest to a--b: one directory leaf that create, list, enter and teardown all
+    agree on - never a nested <root>/a/b that list shows as 'b' and that a
+    later `create b` makes ambiguous."""
+    assert _git(repo, "branch", "treebox/a/b").returncode == 0
+    base = ["--repo", str(repo), "--root", root]
+
+    created = _run(["create", "--checkout", "treebox/a/b", *base, "--json"])
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.stdout)
+    wt = Path(root) / "a--b"
+    assert payload["name"] == "a--b"
+    assert payload["branch"] == "treebox/a/b"
+    assert Path(payload["worktree_path"]) == wt
+    assert wt.is_dir()
+    assert not (Path(root) / "a").exists()  # nothing nested, no stray .locks
+
+    listed = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert [(row["name"], row["branch"]) for row in listed] == [("a--b", "treebox/a/b")]
+
+    # The leaf 'b' is free again: a second worktree named b never collides.
+    assert _run(["create", "b", *base, "--json"]).exit_code == 0
+    for ref in ("a--b", "treebox/a/b"):
+        entered = _run(["enter", ref, *base, "--json"])
+        assert entered.exit_code == 0, entered.output
+        assert json.loads(entered.stdout)["name"] == "a--b"
+    entered_b = _run(["enter", "b", *base, "--json"])
+    assert entered_b.exit_code == 0, entered_b.output
+    assert json.loads(entered_b.stdout)["name"] == "b"
+
+    removed = _run(["teardown", "a--b", *base, "--force", "--json"])
+    assert removed.exit_code == 0, removed.output
+    (record,) = json.loads(removed.stdout)["worktrees"]
+    assert record["name"] == "a--b" and record["removed"] is True
+    assert not wt.exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["create", "x", "--no-fetch", "--print"],
+        ["create", "x", "--no-fetch", "--dry-run"],
+        ["create", "--checkout", "main", "--no-fetch", "--print"],
+        ["enter", "x", "--print"],
+        ["list"],
+        ["teardown", "x", "--force"],
+        ["teardown"],
+    ],
+    ids=lambda c: " ".join(c),
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["file", "under-file"])
+@pytest.mark.parametrize("json_out", [False, True], ids=["human", "json"])
+def test_non_directory_root_is_a_classified_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config, command: list[str], nested: bool, json_out: bool
+):
+    """A --root that is a regular file (or lies under one) is exit 2 with
+    INVALID_ROOT on every command that takes --root - never a raw
+    NotADirectoryError traceback from the lock path."""
+    blocker = tmp_path / "root-file"
+    blocker.write_text("not a directory\n")
+    root = blocker / "wts" if nested else blocker
+    # A lingering local branch drives teardown's branch-without-worktree path.
+    assert _git(repo, "branch", "x").returncode == 0
+
+    res = _run([*command, "--repo", str(repo), "--root", str(root)] + (["--json"] * json_out))
+    assert res.exit_code == 2, res.output
+    assert res.stdout == ""
+    if json_out:
+        error = json.loads(res.stderr)["error"]
+        assert error["code"] == "INVALID_ROOT"
+        assert error["path"] == str(root)
+        assert "is not a directory" in error["message"]
+    else:
+        assert "is not a directory" in res.stderr
+        assert "Traceback" not in res.stderr
+    assert blocker.read_text() == "not a directory\n"
+
+
+def test_dangling_symlink_root_is_a_classified_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config
+):
+    root = tmp_path / "wts"
+    root.symlink_to(tmp_path / "gone")
+    res = _run(["create", "x", "--repo", str(repo), "--root", str(root), "--json"])
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_ROOT"
+
+
 def test_create_existing_branch_is_branch_exists_conflict(repo: Path, root: str, hermetic_config):
     """create NAME promises a fresh branch off origin/<base>: a branch that
     already exists (locally or on origin) is a loud exit 5 pointing at
