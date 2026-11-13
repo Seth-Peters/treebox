@@ -98,13 +98,43 @@ last tag, so it has no `[Unreleased]` section.
 
 ## Releasing
 
-1. Write the `CHANGELOG.md` entry for everything merged since the last tag:
-   list it with `git log --oneline <last-tag>..origin/main`, add a
-   `## [X.Y.Z] - YYYY-MM-DD` section with one item per user-facing change
-   (cite the pull request number from the squash-commit title), and merge it
-   to `main`.
-2. Tag that commit `vX.Y.Z` and push the tag. The `Release` workflow
-   (`.github/workflows/release.yml`) builds and publishes it.
+First write the `CHANGELOG.md` entry for everything merged since the last tag:
+list it with `git log --oneline <last-tag>..origin/main`, add a
+`## [X.Y.Z] - YYYY-MM-DD` section with one item per user-facing change
+(cite the pull request number from the squash-commit title), and merge it
+to `main`. Then release that commit as described below.
+
+The `Release` workflow (`.github/workflows/release.yml`) publishes treebox.
+It first runs the full CI validation (`ci.yml`: the test matrix and
+`./scripts/validate.sh`) on the exact commit it releases. It publishes only if
+all of that passes.
+
+- **Release to PyPI:** push a tag such as `v0.4.0` on the commit to release.
+  The workflow validates that commit, builds version `0.4.0`, publishes it to
+  PyPI, and then creates the GitHub Release.
+- **Dev build to TestPyPI:** in the Actions tab, open "Release", select "Run
+  workflow", select the branch in "Use workflow from", and keep "Package
+  index" at its default, `testpypi`. The workflow validates the head commit of
+  that branch, builds it as a dev version, and publishes it to TestPyPI only.
+  With the GitHub CLI: `gh workflow run release.yml --ref <branch>` (no `-f`
+  needed: the default is `testpypi`).
+- **Manual release to PyPI (on purpose only):** a manual run publishes to PyPI
+  only if you select it in that run. Select the `v*` tag in "Use workflow
+  from" and set "Package index" to `pypi`. The workflow validates the tagged
+  commit, publishes it to PyPI only (not to TestPyPI), and creates the GitHub
+  Release. With the GitHub CLI: `gh workflow run release.yml --ref v0.4.0 -f
+  index=pypi`. If you select `pypi` on a ref that is not a `v*` tag, the
+  `build` job fails and nothing is published. A version on PyPI cannot be
+  withdrawn or uploaded again, so make this choice with care (for example, to
+  retry a tag release whose tag push run did not publish).
+
+If the validation fails, nothing is published. Fix the problem, then tag the
+fixed commit.
+
+Every action in `.github/workflows/` is pinned to a full commit SHA, with its
+version in a trailing comment. Dependabot (`.github/dependabot.yml`) opens a
+pull request when a pinned action has a new version. Pin a new action the same
+way.
 
 ## Boundaries
 
