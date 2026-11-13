@@ -136,7 +136,8 @@ CFG="$ROOT/config.toml"
 printf 'setup_hook = ["echo ran >> setup.log"]\n' > "$CFG"
 
 # --- fixture repo: a working clone of a local bare origin --------------------
-git_q() { git -c init.defaultBranch=main "$@" >/dev/null; }
+# push.negotiate=false: hosts that set it globally warn on pushes to a local bare remote.
+git_q() { git -c init.defaultBranch=main -c push.negotiate=false "$@" >/dev/null; }
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@e
 git_q init --bare -b main "$ROOT/origin.git"
 git_q clone "$ROOT/origin.git" "$ROOT/repo" 2>/dev/null
@@ -170,8 +171,14 @@ export GD_UID GD_GID
 
 normalize() {
   perl -0pe '
-    s/\Q$ENV{GD_PRIVROOT}\E/__ROOT__/g;
-    s/\Q$ENV{GD_ROOT}\E/__ROOT__/g;
+    # Rich can wrap a long fixture root across terminal lines. Normalize
+    # that machine-specific wrapping along with the root itself, without
+    # changing the worktree suffix or other output.
+    for my $root ($ENV{GD_PRIVROOT}, $ENV{GD_ROOT}) {
+      my $wrapped = join q{(?:\n[ ]*)?}, map { quotemeta($_) } split //, $root;
+      s/$wrapped/__ROOT__/g;
+    }
+    s/^(    worktree +)\n(__ROOT__)/$1$2/gm;
     s/\Q$ENV{GD_GITVER_PARSED}\E/__GITVER__/g;
     s/\Q$ENV{GD_GITVER}\E/__GITVER__/g;
     s/\bUSER_UID=\Q$ENV{GD_UID}\E\b/USER_UID=__UID__/g;
@@ -249,6 +256,7 @@ run_case doctor-docker        "$HOME_FAKE" doctor "${R[@]}" --isolation docker
 run_case doctor-docker-json   "$HOME_FAKE" doctor "${R[@]}" --isolation docker --json
 run_case create-dryrun-docker      "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run
 run_case create-dryrun-docker-json "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run --json
+run_case create-dryrun-docker-limits "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --cpus 2 --memory 4g --pids-limit 512 --dry-run
 run_case create-docker-print  "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --print
 run_case create-docker-json   "$HOME_FAKE" create golden-docker-json "${RW[@]}" --isolation docker --json
 run_case enter-docker-print   "$HOME_FAKE" enter golden-docker "${RW[@]}" --print

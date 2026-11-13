@@ -1,16 +1,24 @@
-"""Per-worktree state, stored in the worktree's private git dir.
+"""Per-worktree observations, stored in the worktree's private git dir.
 
 The git dir for a linked worktree (``.git/worktrees/<id>``) is not part of the
 working tree, so state here never shows up in ``git status`` and is removed when
-the worktree is pruned. We record the lockfile hash (to detect dep changes on
-``enter``) plus the provisioning choices for ``list`` and for
-existing-worktree sessions to recover their created-time isolation, firewall,
-harness, and template defaults.
+the worktree is pruned. It holds only *observations* of what setup did: the
+lockfile hash (to detect dep changes on ``enter``) and whether setup completed.
+
+This file is sandbox-writable (the docker runner mounts the git common dir), so
+it never decides policy: a worktree's isolation, firewall, template, harness,
+and base live in the host-owned record (``record.py``). A forged observation
+can at most make ``enter`` re-run setup under the recorded policy. Reads and
+writes never follow a link a boxed agent planted at the state file: a symlink
+reads as no state, and a write replaces the link instead of its target.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -19,31 +27,17 @@ from . import git
 _STATE_FILE = "treebox-state.json"
 
 
-# Deliberately no branch here: the branch is a mutable attribute the agent is
-# expected to rename (git branch -m), so a recorded copy would go silently
-# stale. Anything branch-shaped is read live from git.
+# Deliberately no policy and no branch here: policy lives in the host-owned
+# record, and the branch is a mutable attribute the agent is expected to
+# rename (git branch -m), so anything branch-shaped is read live from git.
 @dataclass
 class WorktreeState:
-    base: str
-    isolation: str
-    harness: str
     lockfile_hash: str = ""
-    # Recorded False *before* setup runs (so the runner is known even if a docker
-    # build/run leaves a container behind on failure), flipped True once setup
-    # completes. `create` uses it to tell a half-built tree (finish it) from a
+    # Recorded False *before* setup runs, flipped True once setup completes.
+    # `create` uses it to tell a half-built tree (finish it) from a
     # fully-provisioned one (a slug conflict); `enter` uses it to finish an
     # interrupted setup even when the lockfile hash is unchanged.
     provisioned: bool = False
-    # The firewall choice this worktree was created with, so `enter` honors the
-    # created-time decision instead of re-resolving the config default (which
-    # would hard-error when `create --no-firewall` ran under a firewall=true
-    # config). `create` always records a real bool.
-    firewall: bool = False
-    # The sandbox template this worktree was created with, so `enter`/`teardown`
-    # render the same container (user, mounts, volume names) instead of drifting
-    # to the config default when `--template` is omitted. None means unrecorded —
-    # the caller falls back to the config default.
-    template: str | None = None
 
 
 def _state_path(worktree: str | Path) -> Path:
@@ -70,25 +64,43 @@ def load_registered(repo: str | Path, worktree: str | Path) -> WorktreeState | N
 
 
 def _read(path: Path) -> WorktreeState | None:
-    if not path.is_file():
-        return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None  # absent, a planted symlink (ELOOP), or unreadable
+    try:
+        with os.fdopen(fd, encoding="utf-8") as f:
+            data = json.loads(f.read())
+    except (ValueError, OSError):
         return None
+    if not isinstance(data, dict):
+        return None
+    lockfile_hash = data.get("lockfile_hash", "")
+    provisioned = data.get("provisioned", False)
     return WorktreeState(
-        base=data.get("base", ""),
-        isolation=data.get("isolation", ""),
-        harness=data.get("harness", ""),
-        lockfile_hash=data.get("lockfile_hash", ""),
-        provisioned=data.get("provisioned", False),
-        firewall=data.get("firewall", False),
-        # None means unrecorded, so enter/teardown fall back to the config default.
-        template=data.get("template"),
+        lockfile_hash=lockfile_hash if isinstance(lockfile_hash, str) else "",
+        provisioned=provisioned is True,
     )
 
 
 def save(worktree: str | Path, state: WorktreeState) -> None:
-    path = _state_path(worktree)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(state), indent=2) + "\n", encoding="utf-8")
+    """Publish ``state`` by rename, relative to a descriptor of the git dir
+    opened without following links: a symlink planted at the state file is
+    replaced, never written through."""
+    gitdir = Path(git.git_dir(worktree))
+    dir_fd = os.open(gitdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        tmp = f".{_STATE_FILE}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(asdict(state), indent=2) + "\n")
+            os.replace(tmp, _STATE_FILE, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=dir_fd)
+            raise
+    finally:
+        os.close(dir_fd)

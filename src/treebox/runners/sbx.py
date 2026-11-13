@@ -46,6 +46,7 @@ from .. import git, system
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter
+from ..resources import ResourceLimitError, ResourceLimits, format_value
 from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 from .docker import _CONFIG_ROOT
 
@@ -75,8 +76,22 @@ def _sbx(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["sbx", *args], capture_output=True, text=True)
 
 
+def _memory_arg(value: str) -> str:
+    """Map canonical shared memory to sbx's integer k/m/g/t size grammar."""
+    size = (
+        int(value[:-1]) * 1024 ** "bkmgtp".index(value[-1]) if value[-1].isalpha() else int(value)
+    )
+    if size < 512 * 1024 * 1024:
+        raise ResourceLimitError("memory", "sbx requires at least 512m of memory.")
+    for power in range(4, 0, -1):
+        if size % 1024**power == 0:
+            return f"{size // 1024**power}{'bkmgt'[power]}"
+    raise ResourceLimitError("memory", "sbx requires memory in whole kilobytes, e.g. 512m or 4g.")
+
+
 class SbxRunner:
     name = "sbx"
+    supported_resources: frozenset[str] = frozenset({"cpus", "memory"})
 
     def __init__(
         self,
@@ -90,6 +105,16 @@ class SbxRunner:
 
     def _cli(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         return (self._sbx_cli or _sbx)(args)
+
+    def template_resources(self) -> ResourceLimits:
+        # sbx manages its own image; no operator template tier applies.
+        return ResourceLimits()
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        if limits.cpus is not None and (limits.cpus < 1 or not float(limits.cpus).is_integer()):
+            raise ResourceLimitError("cpus", "sbx requires a positive whole number of CPUs.")
+        if limits.memory is not None:
+            _memory_arg(limits.memory)
 
     # --- identity & ownership ----------------------------------------------------
 
@@ -193,10 +218,10 @@ class SbxRunner:
 
     def _create_command(self, wt: Worktree) -> list[str]:
         argv = ["sbx", "create", "--name", self._slug(wt)]
-        if self.config.sbx_cpus is not None:
-            argv += ["--cpus", str(self.config.sbx_cpus)]
-        if self.config.sbx_memory is not None:
-            argv += ["--memory", self.config.sbx_memory]
+        if self.config.resources.cpus is not None:
+            argv += ["--cpus", format_value("cpus", self.config.resources.cpus)]
+        if self.config.resources.memory is not None:
+            argv += ["--memory", _memory_arg(self.config.resources.memory)]
         return [*argv, self.config.harness, *self._mounts(wt)]
 
     # --- setup -------------------------------------------------------------------
@@ -219,7 +244,7 @@ class SbxRunner:
         # sbx owns agent auth (its own managed login); nothing to stage.
         return
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
+    def dry_run_setup(self, wt: Worktree, *, cold: bool, source_ref: str | None) -> list[str]:
         return [shlex.join(self._create_command(wt))]
 
     # --- entry -------------------------------------------------------------------

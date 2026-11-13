@@ -19,6 +19,11 @@
     "claude",
     "--dangerously-skip-permissions"
   ],
-  "created": true
+  "created": true,
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  }
 }
 # --- stderr ---

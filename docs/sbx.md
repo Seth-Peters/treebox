@@ -37,20 +37,31 @@ treebox create fix-auth --isolation sbx
 ## Configuration
 
 ```toml
-isolation  = "sbx"
-sbx_cpus   = 8        # optional; passed to `sbx create --cpus`
-sbx_memory = "16g"    # optional; passed to `sbx create --memory`
+isolation = "sbx"
+
+[resources]
+cpus = 8
+memory = "16g"
 ```
 
-Both keys are user-level config only, like everything else in treebox. For a
-single run, pass `--sbx-cpus N` / `--sbx-memory SIZE` to `create`; a flag wins
-over the config value, and using either with another isolation mode is a usage
-error (exit `2`) rather than being silently ignored. The config keys themselves
-are inert for `host` and `docker`.
+The shared resource policy applies to Docker and sbx. A flag overrides the
+user-level `[resources]` value for that field. sbx requires a positive whole
+CPU count and at least `512m` of memory, in whole kilobytes. It does not support `--pids-limit`.
+An explicit process limit is a usage error. A process limit in the config is
+noted and ignored. No operator template tier applies to sbx.
 
 ```bash
-treebox create fix-auth --isolation sbx --sbx-cpus 8 --sbx-memory 16g
+treebox create fix-auth --isolation sbx --cpus 8 --memory 16g
 ```
+
+The effective limits are stored in the host-owned worktree record. `enter`
+keeps those limits, rejects a different explicit limit, and warns if config
+defaults have changed. `create --dry-run --json`, `create --json`,
+`enter --json`, and `list --json` report the shared `resources` fields.
+
+The former `sbx_cpus` / `sbx_memory` config keys and `--sbx-cpus` /
+`--sbx-memory` flags are removed. Use `[resources]`, `--cpus`, and `--memory`.
+This runner depends on the shared resource policy introduced in PR #84.
 
 ## How it works
 

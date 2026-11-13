@@ -141,8 +141,7 @@ Prereq: `fix-auth` worktree from B1 exists.
       `git -C "$ROOT/fix-auth" branch -m fix/auth-renamed`, then enter by the
       original name `fix-auth`, by the new branch `fix/auth-renamed`, and by a
       unique substring (e.g. `renamed`)
-      Expect: all three resolve to the same worktree, exit 0 (name is
-      permanent identity; branch is read live).
+      Expect: all three resolve to the same worktree, exit 0.
 - [ ] **C5 ambiguous & missing refs** — precondition: at least two worktrees must
       share the substring you test (create e.g. `amb-one` and `amb-two` first —
       after C4, `fix` alone matches only `fix-auth` and would resolve, not conflict).
@@ -157,6 +156,17 @@ Prereq: `fix-auth` worktree from B1 exists.
       (worktree was created with host isolation)
       Expect: exit 5 conflict — an explicit mismatched `--isolation` never
       silently re-provisions; the recorded choice wins over config drift too.
+- [ ] **C8 policy lives in the host-owned record** — overwrite the state file
+      (`$(git -C "$ROOT/fix-auth" rev-parse --absolute-git-dir)/treebox-state.json`)
+      with `{"isolation": "docker", "template": "/etc", "provisioned": true}`,
+      then `tb enter fix-auth … --print`
+      Expect: exit 0, still the host launch command; `tb list --json` still
+      reports `host` (the policy comes from `$ROOT/.records/fix-auth.json`).
+- [ ] **C9 legacy worktree + adopt** — `rm "$ROOT/.records/fix-auth.json"`, then
+      `tb enter fix-auth … --json`
+      Expect: exit 5, `"code": "RECORD_MISSING"`, hint names `treebox adopt`;
+      `list` shows isolation unknown. `tb adopt fix-auth … --isolation host`:
+      exit 0; C1 works again; a second `adopt` is exit 5 `RECORD_EXISTS`.
 
 ## D. list
 
@@ -218,6 +228,8 @@ Uses the scratch `$TREEBOX_HOME` — must never write to the real `~/.treebox`.
 - [ ] **F2 path resolution** — `tb template path` / `tb template path default`
       Expect: exit 0; prints an existing directory on stdout (scriptable:
       `cd "$(tb template path)"` works). `tb template path ghost`: exit 3.
+      `tb template path /etc` and `tb template path ../x`: exit 2 (a template
+      name is an identifier, never a path).
 - [ ] **F3 init scaffolds full set** — `tb template init mytpl --json`
       Expect: exit 0; `$TREEBOX_HOME/templates/mytpl/` contains the full
       required file set (`Dockerfile`, `container.json`, `post-create.sh`,
@@ -294,6 +306,16 @@ one behind on purpose.
       running (the `e2e-` name means `e2e_cleanup` still reaps it later); the
       worktree dir is always removed. Container/image cleanup is best-effort —
       `container: "failed"` is a warning, not a teardown failure.
+- [ ] **H7 resource limits** - `tb create e2e-lim … --isolation docker --cpus 1
+      --memory 512m --pids-limit 64 --json`; then `tb enter e2e-lim … --memory 1g
+      --json`; then `tb create e2e-lim-host … --memory 4g --json` (host isolation)
+      Expect: create exit 0 with `resources: {cpus: 1, memory: "512m", pids: 64}`,
+      and `docker inspect` of the container shows `HostConfig.Memory` 536870912,
+      `NanoCpus` 1000000000, `PidsLimit` 64 (`list --json` shows the same
+      `resources`); the enter exits 5 `RESOURCE_MISMATCH` with re-create commands
+      in the hint; the host create exits 2 `RESOURCE_UNSUPPORTED` and leaves no
+      worktree. A bad value (`--memory lots`) exits 2 `INVALID_RESOURCE` with no
+      worktree, branch or image left behind.
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 
@@ -305,7 +327,7 @@ one behind on purpose.
       `schemaVersion`; the number matches `tests/golden/` (currently `1`).
       If code and `tests/golden/` disagree with `docs/usage.md` or
       `skills/treebox/SKILL.md`, report **doc drift** as a finding.
-- [ ] **X4 per-name lock** — if any command reported a lock conflict (exit 5)
+- [ ] **X4 worktree lock** - if any command reported a lock conflict (exit 5)
       during sequential runs, that's a bug — the lock must be released on exit.
 - [ ] **X5 no host pollution** — after `e2e_cleanup`: nothing new under the real
       `~/.treebox`, no stray `treebox-e2e.*` dirs left in `$TMPDIR`,

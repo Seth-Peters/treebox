@@ -13,6 +13,11 @@
     "--name",
     "treebox-golden-sbx-__HASH__"
   ],
-  "created": false
+  "created": false,
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  }
 }
 # --- stderr ---

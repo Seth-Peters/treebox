@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 # Branches treebox generates carry this prefix. It marks the name as
 # machine-made: the pre-push guard refuses to push them, so a placeholder can
@@ -31,6 +31,18 @@ def is_valid_name(name: str) -> bool:
     return all(is_slug(part) for part in name.split("/"))
 
 
+# A sandbox template name is an identifier, never a path: one segment of a
+# conservative, filesystem-safe charset, so it can only select a directory
+# under the operator-owned templates root (see ``assets.template_dir``).
+TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_valid_template_name(name: str) -> bool:
+    """Whether ``name`` is a template identifier: no separators, no
+    traversal (``.`` / ``..``), and therefore no absolute path."""
+    return name not in (".", "..") and bool(TEMPLATE_NAME_RE.match(name))
+
+
 def placeholder_branch(name: str) -> str:
     return PLACEHOLDER_PREFIX + name
 
@@ -53,8 +65,7 @@ def flatten_branch(branch: str) -> str:
 
     ``feature/auth`` -> ``feature--auth``. Only used to *derive* a worktree
     name from a branch-shaped input (``create feature/auth``,
-    ``create --checkout <branch>``); the name — not the branch — is the
-    worktree's permanent identity from then on.
+    ``create --checkout <branch>``).
     """
     return branch.replace("/", "--")
 
@@ -108,6 +119,9 @@ class WorktreeRow(TypedDict):
     base: str
     isolation: str
     harness: str
+    # The recorded limits ({cpus, memory, pids}, null = no treebox cap);
+    # null when the worktree has no valid host-owned record.
+    resources: dict[str, Any] | None
     deps: DepsFreshness
     env: Literal["present", "absent"]
 
@@ -134,12 +148,16 @@ class TemplateRow(TypedDict):
 class Worktree:
     """A provisioned (or to-be-provisioned) worktree.
 
-    ``name`` is the permanent identity: the directory leaf, the lock key, and
-    what container names/labels derive from. It is never renamed — the docker
-    runner bind-mounts the absolute path and a live agent's CWD sits in it.
-    ``branch`` is a mutable attribute: the branch the worktree was materialized
-    on, expected to be renamed by the agent (``git branch -m``); always read it
-    live from git when it matters.
+    ``path`` is the identity: the registered directory every command acts on,
+    what the lock, the runner's resources, and the state lookup all derive
+    from. It is never renamed - the docker runner bind-mounts the absolute
+    path and a live agent's CWD sits in it. ``name`` is its directory leaf,
+    the handle users type; it is unique under one parent but two parents (a
+    nested root) can each hold the same name, so never rebuild a path from a
+    root and a name once a worktree exists - carry the path (``Worktree.at``).
+    ``branch`` is a mutable attribute: the branch the worktree was
+    materialized on, expected to be renamed by the agent (``git branch -m``);
+    always read it live from git when it matters.
     """
 
     repo: str
@@ -149,7 +167,15 @@ class Worktree:
     path: Path
 
     @classmethod
+    def at(cls, repo: str, path: Path, *, branch: str = "", base: str = "") -> Worktree:
+        """An *existing* worktree, identified by its registered path (the
+        route for ``enter``/``teardown``, which resolve a ref to a path)."""
+        return cls(repo=repo, name=path.name, branch=branch, base=base, path=path)
+
+    @classmethod
     def locate(cls, repo: str, root: str, name: str, branch: str = "", base: str = "") -> Worktree:
+        """A worktree *to be created* directly under ``root`` (the route for
+        ``create``, the only command that derives a path from root + name)."""
         return cls(
             repo=repo,
             name=name,

@@ -97,9 +97,9 @@ treebox create --checkout feature/auth       # exact existing branch (resume, PR
 treebox create auth-fixes --base feature/auth   # stack on any base branch
 ```
 
-The optional name is the worktree's permanent identity **and** its branch,
-created fresh from `origin/<base>` — slug tokens joined by slashes, with the
-slashes flattened to `--` in the directory. Omit the name and the branch
+The optional name sets the initial branch, created fresh from `origin/<base>`:
+slug tokens joined by slashes, with the slashes flattened to `--` in the
+directory. Omit the name and the branch
 starts as a `treebox/<petname>` placeholder — rename it conventionally
 (`git branch -m feature/user-auth`, `fix/login-race`, `chore/bump-deps`, …)
 when the work has a shape, then push. Every worktree carries a pre-push guard
@@ -127,8 +127,9 @@ treebox enter fix-auth --harness codex -- --resume   # args after -- go to the a
 
 **List.** See what exists, each worktree's recorded isolation, what it was
 last doing, and what has gone stale. Results are sorted by recency, with
-`treebox/*` placeholders flagged `⚠ unnamed`; the root footer plus each stable
-name identifies the directory without a wide path column:
+`treebox/*` placeholders flagged `⚠ unnamed`. See
+[list output](https://seth-peters.github.io/treebox/usage/#list-what-exists-whats-stale)
+for path details:
 
 ```bash
 treebox list
@@ -145,13 +146,24 @@ treebox teardown fix-auth brave-otter --delete-branch
 treebox teardown                        # pick interactively
 ```
 
+**Adopt.** Each worktree's creation policy (isolation, firewall, template,
+harness) lives in a host-owned record outside every sandbox mount, so a boxed
+agent can never pick its next sandbox. A worktree made by an older treebox has
+no record yet: `enter` and `teardown` refuse it with `RECORD_MISSING` until you
+state how it was created:
+
+```bash
+treebox adopt fix-auth --isolation docker --firewall
+```
+
 treebox is built to be scripted, including by agents: the worktree commands and
 `doctor` take `--json` (data to stdout, diagnostics to stderr, a schema that
-only gains fields within a version), `--dry-run` prints the exact commands
-without running them (and fails with the same errors a real run would, so it
+only gains fields within a version), `--dry-run` prints a stable command plan
+without side effects (and fails with the same errors a real run would, so it
 doubles as a preflight), and exit codes are stable (`0` ok · `1` runtime/doctor
 blocked · `2` usage · `3` not found · `4` auth · `5` conflict). Full
-reference in the [usage guide](https://seth-peters.github.io/treebox/usage/).
+reference, including [dry-run checks and limits](https://seth-peters.github.io/treebox/usage/#dry-run-checks),
+is in the [usage guide](https://seth-peters.github.io/treebox/usage/).
 
 ## Every agent ships its own cage
 

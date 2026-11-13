@@ -8,13 +8,16 @@ Resolution order, highest priority first:
 2. ``$TREEBOX_CONFIG`` if set, else ``$TREEBOX_HOME/config.toml`` (default
    ``~/.treebox/config.toml``).
 3. Built-in defaults below.
+
+The ``[resources]`` table (``cpus``, ``memory``, ``pids``) is a default for
+every new sandbox; see ``resources.py`` for the full precedence (the operator
+template's ``resources`` object sits below it).
 """
 
 from __future__ import annotations
 
 import difflib
 import os
-import re
 import tomllib
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -22,7 +25,8 @@ from typing import Any, Literal
 
 from .ecosystems import ECOSYSTEMS
 from .harnesses import VALID_HARNESSES
-from .models import expand_user
+from .models import expand_user, is_valid_template_name
+from .resources import ResourceLimitError, ResourceLimits, from_mapping
 
 # The closed vocabularies treebox understands, validated against the
 # registry-derived VALID_* tuples (harnesses.HARNESSES, runners.RUNNERS —
@@ -63,15 +67,16 @@ class Config:
     # Operator-owned container template to render the sandbox from. Resolved
     # by assets.template_dir() — never read from the target repo.
     template: str = DEFAULT_TEMPLATE
-    # sbx isolation only: sandbox resources, fixed at `sbx create` time.
-    sbx_cpus: int | None = None
-    sbx_memory: str | None = None
     # Setup hook override. When None, setup is auto-detected from manifests.
     # A list of shell command strings, each run in the worktree dir.
     setup_hook: list[str] | None = None
     # Host cache directories to share across worktrees and (for the docker
     # runner) bind-mount into the container. Keyed by ecosystem.
     caches: dict[str, str] = field(default_factory=dict)
+    # Sandbox CPU/memory/process limits ([resources]). Unset fields mean no
+    # treebox cap. For an existing worktree the CLI replaces this with the
+    # limits in its host-owned record (what the sandbox actually has).
+    resources: ResourceLimits = field(default_factory=ResourceLimits)
 
     def with_overrides(
         self,
@@ -83,10 +88,9 @@ class Config:
         env_file: str | None = None,
         firewall: bool | None = None,
         template: str | None = None,
-        sbx_cpus: int | None = None,
-        sbx_memory: str | None = None,
         setup_hook: list[str] | None = None,
         caches: dict[str, str] | None = None,
+        resources: ResourceLimits | None = None,
     ) -> Config:
         """Return a copy with non-None overrides applied. Values are applied
         as given — callers run ``validate_config`` after flag overrides."""
@@ -98,10 +102,9 @@ class Config:
             "env_file": env_file,
             "firewall": firewall,
             "template": template,
-            "sbx_cpus": sbx_cpus,
-            "sbx_memory": sbx_memory,
             "setup_hook": setup_hook,
             "caches": caches,
+            "resources": resources,
         }
         applied = {k: v for k, v in overrides.items() if v is not None}
         return replace(self, **applied)
@@ -203,6 +206,13 @@ def load_config(path: Path | None = None) -> Config:
             )
         caches.update({str(k): str(expand_user(str(v))) for k, v in data["caches"].items()})
 
+    resources: ResourceLimits | None = None
+    if "resources" in data:
+        try:
+            resources = from_mapping(data["resources"], source="[resources]")
+        except ResourceLimitError as exc:
+            raise ValueError(f"Invalid config {path}: {exc}") from exc
+
     cfg = cfg.with_overrides(
         isolation=_typed(data, "isolation", str, path),
         harness=_typed(data, "harness", str, path),
@@ -211,10 +221,9 @@ def load_config(path: Path | None = None) -> Config:
         env_file=_expand_user_path(_typed(data, "env_file", str, path)),
         firewall=_typed(data, "firewall", bool, path),
         template=_typed(data, "template", str, path),
-        sbx_cpus=_typed(data, "sbx_cpus", int, path),
-        sbx_memory=_typed(data, "sbx_memory", str, path),
         setup_hook=setup_hook,
         caches=caches,
+        resources=resources,
     )
     validate_config(cfg)
     return cfg
@@ -243,12 +252,6 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"Invalid isolation mode '{cfg.isolation}'. Use one of {VALID_ISOLATION}.")
     if cfg.harness not in VALID_HARNESSES:
         raise ValueError(f"Invalid harness '{cfg.harness}'. Use one of {VALID_HARNESSES}.")
-    if cfg.sbx_cpus is not None and cfg.sbx_cpus < 1:
-        raise ValueError(f"Invalid sbx_cpus {cfg.sbx_cpus}: must be a positive integer.")
-    if cfg.sbx_memory is not None and not re.fullmatch(
-        r"[1-9]\d*[kmgt]i?b?", cfg.sbx_memory, re.IGNORECASE
-    ):
-        raise ValueError(f"Invalid sbx_memory '{cfg.sbx_memory}': use a size like 512m or 8g.")
     if cfg.isolation == "sbx":
         if cfg.firewall:
             raise ValueError(
@@ -260,3 +263,10 @@ def validate_config(cfg: Config) -> None:
                 "--template does not apply to sbx isolation: sandbox templates are a "
                 "docker-runner feature."
             )
+    if not is_valid_template_name(cfg.template):
+        # A path or '..' here would let a name escape the operator-owned
+        # template locations (assets.template_dir).
+        raise ValueError(
+            f"Invalid template name '{cfg.template}'. A template name is one "
+            "identifier (letters, digits, '.', '_', '-'), never a path."
+        )

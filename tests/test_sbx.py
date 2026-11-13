@@ -14,6 +14,7 @@ from treebox import git
 from treebox.config import Config, load_config, validate_config
 from treebox.harnesses import get_harness
 from treebox.models import Worktree, flatten_branch
+from treebox.resources import ResourceLimits
 from treebox.runners import PreflightError, SbxRunner, get_runner
 from treebox.runners.sbx import _sanitize
 
@@ -106,7 +107,9 @@ def test_slug_is_valid_deterministic_and_collision_safe(tmp_path: Path):
 
 
 def test_create_argv_mounts_worktree_common_dir_and_readonly_hooks(tmp_path: Path, common: Path):
-    runner = SbxRunner(Config(isolation="sbx", sbx_cpus=4, sbx_memory="8g", harness="codex"))
+    runner = SbxRunner(
+        Config(isolation="sbx", resources=ResourceLimits(cpus=4, memory="8g"), harness="codex")
+    )
     wt = _wt(tmp_path)
     assert runner._create_command(wt) == [
         "sbx",
@@ -141,7 +144,7 @@ def test_colon_in_path_is_a_loud_error(tmp_path: Path, common: Path):
 def test_dry_run_setup_is_the_create_command(tmp_path: Path, common: Path):
     runner = SbxRunner(Config(isolation="sbx"))
     wt = _wt(tmp_path)
-    (cmd,) = runner.dry_run_setup(wt)
+    (cmd,) = runner.dry_run_setup(wt, cold=False, source_ref=None)
     assert cmd.startswith(f"sbx create --name {runner._slug(wt)} claude ")
 
 
@@ -356,40 +359,6 @@ def test_template_rejected_for_sbx():
         validate_config(Config(isolation="sbx", template="custom"))
 
 
-@pytest.mark.parametrize("memory", ["8g", "512m", "16GiB", "2G"])
-def test_sbx_memory_accepts_sizes(memory: str):
-    validate_config(Config(isolation="sbx", sbx_memory=memory))
-
-
-@pytest.mark.parametrize("memory", ["", "lots", "0g", "-1g", "8"])
-def test_sbx_memory_rejects_garbage(memory: str):
-    with pytest.raises(ValueError, match="sbx_memory"):
-        validate_config(Config(isolation="sbx", sbx_memory=memory))
-
-
-def test_sbx_cpus_must_be_positive():
-    with pytest.raises(ValueError, match="sbx_cpus"):
-        validate_config(Config(isolation="sbx", sbx_cpus=0))
-
-
-def test_load_config_reads_sbx_keys(tmp_path: Path):
-    cfg_file = tmp_path / "c.toml"
-    cfg_file.write_text('isolation = "sbx"\nsbx_cpus = 6\nsbx_memory = "12g"\n')
-    cfg = load_config(cfg_file)
-    assert (cfg.isolation, cfg.sbx_cpus, cfg.sbx_memory) == ("sbx", 6, "12g")
-
-
-@pytest.mark.parametrize("line", ['sbx_cpus = "4"', "sbx_cpus = true", "sbx_memory = 8"])
-def test_load_config_rejects_wrong_types(tmp_path: Path, line: str):
-    cfg_file = tmp_path / "c.toml"
-    cfg_file.write_text(line + "\n")
-    with pytest.raises(ValueError, match="must be"):
-        load_config(cfg_file)
-
-
-# --- --sbx-cpus / --sbx-memory (CLI) ---------------------------------------------
-
-
 @pytest.fixture
 def fake_sbx_cli(monkeypatch: pytest.MonkeyPatch) -> _FakeSbx:
     """A healthy sbx for CLI-level tests: no real binary or daemon needed."""
@@ -416,57 +385,203 @@ def _dry(repo: Path, tmp_path: Path, *extra: str):
 def test_flags_reach_the_sbx_create_command(
     repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
 ):
-    res = _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-cpus", "6", "--sbx-memory", "12g")
+    res = _dry(repo, tmp_path, "--isolation", "sbx", "--cpus", "6", "--memory", "12g", "--json")
     assert res.exit_code == 0, res.output
-    assert "--cpus 6 --memory 12g" in res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["resources"] == {"cpus": 6, "memory": "12g", "pids": None}
+    assert "--cpus 6 --memory 12g" in payload["commands"][-1]
+    assert not (tmp_path / "wts").exists()
 
 
-def test_flags_override_config_values(
-    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli, monkeypatch: pytest.MonkeyPatch
-):
-    cfg = tmp_path / "sbx.toml"
-    cfg.write_text('isolation = "sbx"\nsbx_cpus = 2\nsbx_memory = "4g"\n')
-    monkeypatch.setenv("TREEBOX_CONFIG", str(cfg))
-    # Config alone applies...
-    assert "--cpus 2 --memory 4g" in _dry(repo, tmp_path).stderr
-    # ...and a flag wins per key, leaving the other from config.
-    res = _dry(repo, tmp_path, "--sbx-cpus", "8")
-    assert "--cpus 8 --memory 4g" in res.stderr
-
-
-@pytest.mark.parametrize("isolation", [None, "host", "docker"])
-def test_flags_on_other_isolation_are_a_usage_error(
-    repo: Path, tmp_path: Path, hermetic_config, isolation: str | None
-):
-    extra = ["--isolation", isolation] if isolation else []
-    res = _dry(repo, tmp_path, *extra, "--sbx-cpus", "4")
-    assert res.exit_code == 2, res.output
-    assert "only apply to --isolation sbx" in res.stderr
-    assert not (tmp_path / "wts").exists()  # nothing was provisioned
-    res = _dry(repo, tmp_path, *extra, "--sbx-memory", "8g", "--json")
-    assert res.exit_code == 2
-    assert json.loads(res.stderr)["error"]["code"] == "INVALID_CONFIG"
-
-
-def test_invalid_flag_values_are_a_usage_error(
+def test_flags_override_shared_config_values(
     repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
 ):
-    assert _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-memory", "lots").exit_code == 2
-    assert _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-cpus", "0").exit_code == 2
-    assert _dry(repo, tmp_path, "--isolation", "sbx", "--sbx-cpus", "x").exit_code == 2
+    hermetic_config.write_text('isolation = "sbx"\n[resources]\ncpus = 2\nmemory = "4g"\n')
+    res = _dry(repo, tmp_path, "--cpus", "8", "--json")
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["resources"] == {"cpus": 8, "memory": "4g", "pids": None}
+    assert "--cpus 8 --memory 4g" in payload["commands"][-1]
 
 
-def test_sbx_config_keys_are_inert_for_other_runners(tmp_path: Path):
-    """A global sbx_cpus/sbx_memory in config must not affect (or break) host
-    or docker isolation: only an explicit flag is rejected there."""
-    from treebox.runners import DockerRunner, HostRunner
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--cpus", "1.5"],
+        ["--cpus", "0.5"],
+        ["--cpus", "0"],
+        ["--memory", "256m"],
+        ["--memory", "lots"],
+        ["--memory", "1073741825"],
+    ],
+)
+def test_invalid_sbx_limits_fail_before_provisioning(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli, flags: list[str]
+):
+    res = _dry(repo, tmp_path, "--isolation", "sbx", *flags, "--json")
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+    assert not (tmp_path / "wts").exists()
 
-    for iso, cls in (("host", HostRunner), ("docker", DockerRunner)):
-        cfg = Config(isolation=iso, sbx_cpus=4, sbx_memory="8g")
-        validate_config(cfg)
-        assert isinstance(get_runner(cfg), cls)
+
+def test_sbx_refuses_an_explicit_process_limit(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
+):
+    res = _dry(repo, tmp_path, "--isolation", "sbx", "--pids-limit", "512", "--json")
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "RESOURCE_UNSUPPORTED"
+    assert not (tmp_path / "wts").exists()
 
 
-def test_enter_has_no_sbx_resource_flags(repo: Path, tmp_path: Path, hermetic_config):
-    res = _cli(["enter", "x", "--repo", str(repo), "--sbx-cpus", "4"])
-    assert res.exit_code == 2
+def test_sbx_notes_unsupported_config_limits(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
+):
+    hermetic_config.write_text('isolation = "sbx"\n[resources]\npids = 512\n')
+    res = _dry(repo, tmp_path)
+    assert res.exit_code == 0, res.output
+    assert "pids not applied" in res.stderr
+    assert "--pids-limit" not in res.stderr
+
+
+@pytest.mark.parametrize("key", ["sbx_cpus = 4", 'sbx_memory = "8g"'])
+def test_old_sbx_config_keys_are_rejected(tmp_path: Path, key: str):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(key + "\n")
+    with pytest.raises(ValueError, match="unknown key"):
+        load_config(cfg)
+
+
+@pytest.fixture
+def sized_sandbox(repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli, monkeypatch):
+    # Real provisioning and record writes; only sandbox execution is replaced.
+    from treebox import record
+    from treebox.runners.sbx import SbxRunner
+
+    def setup(self, wt, *, cold, reporter):
+        fake_sbx_cli.sandboxes.append(_row(self, wt))
+
+    monkeypatch.setattr(SbxRunner, "setup", setup)
+    res = _cli(
+        [
+            "create",
+            "sized",
+            "--repo",
+            str(repo),
+            "--root",
+            str(tmp_path / "wts"),
+            "--isolation",
+            "sbx",
+            "--cpus",
+            "2",
+            "--memory",
+            "4g",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 0, res.output
+    wt = tmp_path / "wts" / "sized"
+    assert record.load(wt).resources == ResourceLimits(cpus=2, memory="4g")
+    return wt
+
+
+def test_sbx_entry_uses_recorded_resources(
+    repo: Path, tmp_path: Path, hermetic_config, sized_sandbox
+):
+    # Config changes cannot replace the policy of a sandbox already created.
+    hermetic_config.write_text('isolation = "host"\n[resources]\ncpus = 4\nmemory = "8g"\n')
+    res = _cli(
+        [
+            "enter",
+            "sized",
+            "--repo",
+            str(repo),
+            "--root",
+            str(tmp_path / "wts"),
+            "--memory",
+            "4096m",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["resources"] == {"cpus": 2, "memory": "4g", "pids": None}
+
+
+def test_sbx_entry_rejects_resource_changes(
+    repo: Path, tmp_path: Path, hermetic_config, sized_sandbox
+):
+    res = _cli(
+        [
+            "enter",
+            "sized",
+            "--repo",
+            str(repo),
+            "--root",
+            str(tmp_path / "wts"),
+            "--cpus",
+            "4",
+            "--json",
+        ]
+    )
+    assert res.exit_code == 5, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "RESOURCE_MISMATCH"
+
+
+def test_sbx_entry_warns_about_shared_config_drift(
+    repo: Path, tmp_path: Path, hermetic_config, sized_sandbox
+):
+    hermetic_config.write_text('isolation = "sbx"\n[resources]\ncpus = 4\n')
+    res = _cli(
+        [
+            "enter",
+            "sized",
+            "--repo",
+            str(repo),
+            "--root",
+            str(tmp_path / "wts"),
+            "--print",
+        ]
+    )
+    assert res.exit_code == 0, res.output
+    assert "keeps its recorded limits (cpus 2 · memory 4g)" in res.stderr
+    assert "--cpus 4" in res.stderr
+
+
+@pytest.mark.parametrize("flags", [["--cpus", "1.5"], ["--memory", "256m"]])
+def test_adopt_rejects_limits_the_sbx_adapter_cannot_apply(
+    repo: Path, tmp_path: Path, hermetic_config, flags: list[str]
+):
+    res = _cli(
+        [
+            "adopt",
+            "missing",
+            "--repo",
+            str(repo),
+            "--isolation",
+            "sbx",
+            *flags,
+            "--json",
+        ]
+    )
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+
+
+def test_sbx_rejects_fractional_cpu_config_before_provisioning(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli
+):
+    hermetic_config.write_text('isolation = "sbx"\n[resources]\ncpus = 1.5\n')
+    res = _dry(repo, tmp_path, "--json")
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+    assert not (tmp_path / "wts").exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("1.5g", "1536m"), ("1p", "1024t"), ("1073741824", "1g")]
+)
+def test_sbx_maps_shared_memory_to_its_integer_size_grammar(
+    repo: Path, tmp_path: Path, hermetic_config, fake_sbx_cli, value: str, expected: str
+):
+    res = _dry(repo, tmp_path, "--isolation", "sbx", "--memory", value, "--json")
+    assert res.exit_code == 0, res.output
+    assert f"--memory {expected}" in json.loads(res.stdout)["commands"][-1]

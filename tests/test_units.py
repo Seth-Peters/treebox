@@ -429,19 +429,17 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     monkeypatch.setattr(
         state,
         "load_registered",
-        lambda repo, path: state.WorktreeState(
-            base="main",
-            isolation="host",
-            harness="claude",
-            lockfile_hash="lock",
-            provisioned=True,
-        ),
+        lambda repo, path: state.WorktreeState(lockfile_hash="lock", provisioned=True),
     )
 
     alias_wt = alias_root / "feature-smoke"
     assert git.branch_for_path(repo, str(alias_wt)) == "treebox/feature-smoke"
     assert git.worktree_registered(repo, str(alias_wt))
-    assert resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke").path == str(wt)
+    # The candidate is the same directory, spelled under the caller's root:
+    # runner resource names were derived from that spelling at create.
+    resolved = resolve.resolve_ref(str(repo), str(alias_root), "feature-smoke")
+    assert resolved.path == str(alias_wt)
+    assert Path(resolved.path).resolve() == wt.resolve()
 
     rows = _collect_rows(str(repo), Config(root=str(alias_root)))
     assert [row["name"] for row in rows] == ["feature-smoke"]
@@ -507,6 +505,11 @@ def test_setup_steps_expand_tilde_cache_config(tmp_path: Path, monkeypatch: pyte
     uv = next(s for s in steps if s.name == "uv")
     assert uv.env["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
     assert ecosystems.cache_env(cfg.caches)["UV_CACHE_DIR"] == str(home / "tilde-uv-cache")
+    # Planning is pure (a dry run renders the same plan); only a real run
+    # creates the cache, through the one explicit effect.
+    assert uv.cache_dir == str(home / "tilde-uv-cache")
+    assert not (home / "tilde-uv-cache").exists()
+    ecosystems.ensure_cache_dirs(step.cache_dir for step in steps)
     assert (home / "tilde-uv-cache").is_dir()
 
 
@@ -1080,13 +1083,13 @@ def test_worktree_lock_is_exclusive(tmp_path: Path):
 
     repo = str(tmp_path)
     with (
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
         pytest.raises(locking.LockError),
-        locking.worktree_lock(repo, "wts", "feature-x"),
+        locking.worktree_lock(worktree_path(repo, "wts", "feature-x")),
     ):
         pass
     # Released after the first block: re-acquiring now succeeds.
-    with locking.worktree_lock(repo, "wts", "feature-x"):
+    with locking.worktree_lock(worktree_path(repo, "wts", "feature-x")):
         pass
 
 
@@ -1333,24 +1336,37 @@ def test_docker_setup_refuses_firewall_on_unfirewalled_container(tmp_path: Path,
         runner.setup(wt, cold=True, reporter=_RecordingReporter())
 
 
-def _reconcile(cfg, st, **kw):
-    """_reconcile_with_state with the reporter/flag boilerplate defaulted, so
+def _reconcile(cfg, rec, **kw):
+    """_reconcile_with_record with the reporter/flag boilerplate defaulted, so
     each policy assertion below reads as one line of the precedence table."""
-    from treebox.cli import _reconcile_with_state
+    from treebox.cli import _reconcile_with_record
     from treebox.output import Reporter
 
     kw.setdefault("isolation", None)
-    return _reconcile_with_state(Reporter(quiet=True), cfg, st, **kw)
+    return _reconcile_with_record(Reporter(quiet=True), cfg, rec, **kw)
+
+
+def _rec(**kw):
+    """A host-owned record with defaults for the fields a test does not pin."""
+    from treebox.record import WorktreeRecord
+
+    fields = {
+        "worktree": Path("/wts/x"),
+        "base": "main",
+        "isolation": "docker",
+        "harness": "claude",
+        "firewall": False,
+        "template": "default",
+    }
+    fields.update(kw)
+    return WorktreeRecord(**fields)
 
 
 def test_reconcile_honors_recorded_no_firewall_over_config_default(tmp_path: Path, fake_common_dir):
     """A worktree created with --no-firewall under a firewall=true config must
     reconnect cleanly: enter resolves the firewall from the recorded created-time
     choice, so setup against its unfirewalled container never hard-errors."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="claude", firewall=False)
-    cfg = _reconcile(Config(isolation="docker", firewall=True), st, honor_firewall=True)
+    cfg = _reconcile(Config(isolation="docker", firewall=True), _rec(firewall=False))
     assert cfg.firewall is False  # recorded created-time choice wins over the default
 
     wt = _boxed_worktree(tmp_path)
@@ -1362,17 +1378,10 @@ def test_reconcile_honors_recorded_no_firewall_over_config_default(tmp_path: Pat
     DockerRunner(cfg, docker=fake).setup(wt, cold=True, reporter=_RecordingReporter())
 
 
-def test_reconcile_firewall_uses_config_default_without_state():
-    """With no state to read (a worktree whose dir is gone), `enter` keeps the
-    config default instead of inventing a firewall choice — and teardown
-    (honor_firewall=False) always keeps the config default."""
-    from treebox.state import WorktreeState
-
-    assert _reconcile(Config(firewall=True), None, honor_firewall=True).firewall is True
-    assert _reconcile(Config(firewall=False), None, honor_firewall=True).firewall is False
-    # The teardown flow never reconciles the firewall, recorded or not.
-    recorded = WorktreeState(base="main", isolation="host", harness="claude", firewall=True)
-    assert _reconcile(Config(firewall=False), recorded).firewall is False
+def test_reconcile_recorded_firewall_beats_the_config_default_both_ways():
+    """The record is the authority for the firewall in either direction."""
+    assert _reconcile(Config(firewall=False), _rec(firewall=True)).firewall is True
+    assert _reconcile(Config(firewall=True), _rec(firewall=False)).firewall is False
 
 
 def test_reconcile_honors_recorded_template_over_config_default():
@@ -1380,24 +1389,11 @@ def test_reconcile_honors_recorded_template_over_config_default():
     same template even when the config default is `default` and no `--template`
     is passed: otherwise a deps-changing enter regenerates container.json from
     the wrong template (wrong user → unauthenticated agent)."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="claude", template="hardened")
+    rec = _rec(template="hardened")
     # No --template: the recorded created-time template wins over the default.
-    assert _reconcile(Config(template="default"), st).template == "hardened"
-    # An explicit --template stays a legitimate per-session override.
-    assert _reconcile(Config(template="default"), st, template="other").template == "default"
-
-
-def test_reconcile_template_uses_config_default_when_unrecorded():
-    """An unrecorded template (None) must not force a choice: enter falls back
-    to the config default."""
-    from treebox.state import WorktreeState
-
-    unrecorded = WorktreeState(base="main", isolation="docker", harness="claude")
-    assert unrecorded.template is None
-    assert _reconcile(Config(template="default"), unrecorded).template == "default"
-    assert _reconcile(Config(template="custom"), None).template == "custom"
+    assert _reconcile(Config(template="default"), rec).template == "hardened"
+    # An explicit --template stays a legitimate per-session operator override.
+    assert _reconcile(Config(template="other"), rec, template="other").template == "other"
 
 
 def test_reconcile_isolation_and_harness_policy():
@@ -1406,10 +1402,8 @@ def test_reconcile_isolation_and_harness_policy():
     contract and integration suites): recorded isolation wins over the config
     default; a matching explicit --isolation is fine; a known recorded harness
     wins unless -H overrides; an unknown recorded harness falls back."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="codex")
-    out = _reconcile(Config(isolation="host", harness="claude"), st)
+    rec = _rec(isolation="docker", harness="codex")
+    out = _reconcile(Config(isolation="host", harness="claude"), rec)
     assert out.isolation == "docker"  # recorded wins over the config default
     assert out.harness == "codex"  # recorded, known -> wins
 
@@ -1417,15 +1411,13 @@ def test_reconcile_isolation_and_harness_policy():
     # override. (In the real flow the explicit values are already folded into
     # cfg by _resolve_config; reconcile just declines to second-guess them.)
     out = _reconcile(
-        Config(isolation="docker", harness="claude"), st, isolation="docker", harness="claude"
+        Config(isolation="docker", harness="claude"), rec, isolation="docker", harness="claude"
     )
     assert out.isolation == "docker" and out.harness == "claude"
 
-    # Unknown recorded harness falls back to the config default; no state at
-    # all leaves the config untouched.
-    weird = WorktreeState(base="main", isolation="host", harness="aider")
+    # Unknown recorded harness falls back to the config default.
+    weird = _rec(isolation="host", harness="aider")
     assert _reconcile(Config(harness="claude"), weird).harness == "claude"
-    assert _reconcile(Config(isolation="host"), None).isolation == "host"
 
 
 def test_docker_setup_cold_reuse_warns_about_frozen_mounts(tmp_path: Path, fake_common_dir):
@@ -1458,18 +1450,54 @@ def test_docker_rejects_unknown_template_keys(
         runner._merged_config(_boxed_worktree(tmp_path), cold=True)
 
 
-def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir):
+@pytest.mark.parametrize("cold", [False, True])
+def test_docker_dry_run_is_side_effect_free(tmp_path: Path, fake_common_dir, cold: bool):
     """--dry-run must change nothing: rendering the plan may not create the
     configured cache directories (that happens in setup, before docker run)."""
     cache = tmp_path / "not-yet" / "uv"
-    runner = DockerRunner(Config(isolation="docker", caches={"uv": str(cache)}))
+    runner = DockerRunner(
+        Config(isolation="docker", caches={"uv": str(cache)}),
+        docker=_FakeDocker(),
+    )
     wt = _boxed_worktree(tmp_path)
 
-    cmds = runner.dry_run_setup(wt)
+    cmds = runner.dry_run_setup(wt, cold=cold, source_ref=None)
 
     assert not cache.exists()
     assert any(c.startswith("docker build") for c in cmds)
     assert any(c.startswith("docker run") for c in cmds)
+
+
+def test_docker_cold_dry_run_reports_orphaned_container_cache_mounts(
+    tmp_path: Path, fake_common_dir
+):
+    cfg = Config(isolation="docker")
+    wt = _boxed_worktree(tmp_path)
+    wt.path.rmdir()
+    fake = _FakeDocker(
+        ids="abc123\n",
+        name=DockerRunner(cfg)._slug(wt),
+        running=True,
+    )
+
+    cmds = DockerRunner(cfg, docker=fake).dry_run_setup(wt, cold=True, source_ref=None)
+
+    assert any("creation-time cache mounts" in command for command in cmds)
+    assert any("reuse existing container abc123" in command for command in cmds)
+    assert not any(command.startswith(("docker build", "docker run")) for command in cmds)
+
+
+def test_docker_cold_dry_run_without_daemon_plans_a_new_container(tmp_path: Path, fake_common_dir):
+    runner = DockerRunner(
+        Config(isolation="docker"),
+        docker=_FakeDocker(info_rc=1),
+    )
+
+    cmds = runner.dry_run_setup(_boxed_worktree(tmp_path), cold=True, source_ref=None)
+
+    assert not any("container state is unavailable" in command for command in cmds)
+    assert any(command.startswith("docker build") for command in cmds)
+    assert any(command.startswith("docker run") for command in cmds)
 
 
 def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_common_dir):
@@ -1754,11 +1782,12 @@ def test_docker_create_records_workspace_volumes_in_host_manifest(
     from treebox import git, provision, state
     from treebox.runners.docker import _sanitize
 
+    (tmp_path / "gitdir").mkdir()
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path / "gitdir"))
     runner = DockerRunner(Config(isolation="docker"))
     wt = _boxed_worktree(tmp_path)
 
-    provision._record_runner(wt, runner, "claude", False, "default")
+    provision._record_setup_started(wt, runner)
 
     manifest = json.loads(runner._resource_manifest_file(wt).read_text())
     assert manifest == {
@@ -1786,32 +1815,38 @@ def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, 
 
 def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     """teardown has no --template flag, so its runner must recover the created-time
-    template from state for the non-destructive runner configuration."""
-    from treebox import git, state
+    template from the host-owned record for the non-destructive runner
+    configuration."""
+    from treebox import record
     from treebox.cli import _teardown_runner
     from treebox.config import Config
     from treebox.output import Reporter
     from treebox.resolve import Candidate
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-    monkeypatch.setattr(git, "registered_gitdir", lambda repo, p: tmp_path)
-    state.save(
-        tmp_path,
-        state.WorktreeState(base="main", isolation="docker", harness="claude", template="hardened"),
+    work = tmp_path / "work"
+    work.mkdir()
+    record.save(
+        record.WorktreeRecord(
+            worktree=work,
+            base="main",
+            isolation="docker",
+            harness="claude",
+            firewall=False,
+            template="hardened",
+        )
     )
-    cand = Candidate(name="work", branch="treebox/work", path=str(tmp_path))
+    cand = Candidate(name="work", branch="treebox/work", path=str(work))
 
     run = _teardown_runner(
         Reporter(quiet=True),
         Config(isolation="docker", template="default"),
         cand,
-        str(tmp_path),
         explicit=None,
         remove_volumes=True,
         json_out=False,
     )
     assert run is not None
-    assert run.config.template == "hardened"  # recovered from state, not the config default
+    assert run.config.template == "hardened"  # recovered from the record, not the config default
 
 
 def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
@@ -1896,11 +1931,12 @@ def test_copy_env_does_not_follow_a_planted_symlink(tmp_path: Path):
     assert (worktree / ".env").read_text() == "SECRET=canonical\n"
 
 
-def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
+def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(tmp_path: Path):
     """``.gitmodules`` is untrusted: ``..``/absolute paths and symlinks must
     never make the copy read outside the repo or write outside the worktree."""
     from treebox.output import Reporter
-    from treebox.provision import copy_submodules
+    from treebox.provision import DestinationConflictError, copy_submodules
+    from treebox.submodule_copy import UnsafeDestinationError
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1925,10 +1961,20 @@ def test_copy_submodules_skips_escaping_gitmodules_paths(tmp_path: Path):
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
+    with pytest.raises(DestinationConflictError) as error:
+        copy_submodules(str(repo), worktree, Reporter())
+    assert isinstance(error.value.__cause__, UnsafeDestinationError)
+    assert error.value.path is not None
+    assert error.value.path == worktree / "pkg"
+    assert "retry create" in error.value.hint
+    assert (worktree / "pkg").is_symlink()
+    assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+    (worktree / "pkg").unlink()
     copied = copy_submodules(str(repo), worktree, Reporter())
 
-    # Only the honest submodule is copied; every escape vector is skipped.
-    assert copied == 1
+    assert copied == 2
+    assert (worktree / "pkg" / "inner").is_dir()
     assert (worktree / "sub" / "lib.txt").read_text() == "legit\n"
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.
@@ -1977,6 +2023,24 @@ def test_git_argv_uses_end_of_options_separator(monkeypatch: pytest.MonkeyPatch)
     assert delete[-2:] == ["--", "b"]
 
 
+def test_files_at_revision_excludes_trees_and_gitlinks(monkeypatch: pytest.MonkeyPatch):
+    from treebox import git
+
+    monkeypatch.setattr(
+        git,
+        "_run",
+        lambda args: (
+            "100644 blob 1111111111111111111111111111111111111111\tuv.lock\n"
+            "040000 tree 2222222222222222222222222222222222222222\tpackage-lock.json\n"
+            "160000 commit 3333333333333333333333333333333333333333\tCargo.lock\n"
+        ),
+    )
+
+    assert git.files_at_revision(
+        "/repo", "dev", ("uv.lock", "package-lock.json", "Cargo.lock")
+    ) == {"uv.lock"}
+
+
 def test_state_provisioned_roundtrips(tmp_path, monkeypatch):
     """The provisioned flag round-trips; a state file missing the key (corrupt or
     truncated) reads as not-provisioned rather than silently half-built."""
@@ -1986,69 +2050,183 @@ def test_state_provisioned_roundtrips(tmp_path, monkeypatch):
 
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
 
-    state.save(tmp_path, state.WorktreeState(base="main", isolation="docker", harness="claude"))
+    state.save(tmp_path, state.WorktreeState())
     assert state.load(tmp_path).provisioned is False  # our default for fresh objects
 
-    state.save(
-        tmp_path,
-        state.WorktreeState(base="main", isolation="docker", harness="claude", provisioned=True),
-    )
-    assert state.load(tmp_path).provisioned is True
+    state.save(tmp_path, state.WorktreeState(lockfile_hash="h", provisioned=True))
+    assert state.load(tmp_path) == state.WorktreeState(lockfile_hash="h", provisioned=True)
 
     # A file missing the "provisioned" key reads as not-provisioned.
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
+    (tmp_path / "treebox-state.json").write_text(json.dumps({"lockfile_hash": "h"}))
     assert state.load(tmp_path).provisioned is False
 
 
-def test_state_firewall_roundtrips(tmp_path, monkeypatch):
-    """The recorded firewall choice round-trips so `enter` honors the created-time
-    decision; fresh objects and a file missing the key both read as False."""
+def test_state_holds_observations_only_and_ignores_legacy_policy_keys(tmp_path, monkeypatch):
+    """Sandbox-writable state never carries policy: a legacy (or forged) file
+    with isolation/template/firewall keys reads as observations only, and the
+    next save drops those keys."""
     import json
 
     from treebox import git, state
 
     monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    forged = {
+        "base": "main",
+        "isolation": "host",
+        "harness": "claude",
+        "lockfile_hash": "h",
+        "provisioned": True,
+        "firewall": False,
+        "template": "/abs/evil",
+    }
+    (tmp_path / "treebox-state.json").write_text(json.dumps(forged))
+    assert state.load(tmp_path) == state.WorktreeState(lockfile_hash="h", provisioned=True)
+    state.save(tmp_path, state.load(tmp_path))
+    written = json.loads((tmp_path / "treebox-state.json").read_text())
+    assert set(written) == {"lockfile_hash", "provisioned"}
 
-    for choice in (True, False):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", firewall=choice),
-        )
-        assert state.load(tmp_path).firewall is choice
 
-    # Fresh objects and files missing the "firewall" key both read as False.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").firewall is False
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).firewall is False
-
-
-def test_state_template_roundtrips(tmp_path, monkeypatch):
-    """The recorded template round-trips so `enter`/`teardown` render the same
-    container; an unrecorded template (no key) reads as None so the caller falls
-    back to the config default rather than drifting to a wrong template."""
-    import json
-
+def test_state_never_follows_a_planted_symlink(tmp_path, monkeypatch):
+    """A boxed agent can replace the state file with a symlink to a host file.
+    Reading it is 'no state'; saving replaces the link and leaves its target
+    untouched (issue #57)."""
     from treebox import git, state
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    monkeypatch.setattr(git, "git_dir", lambda p: str(gitdir))
+    victim = tmp_path / "victim.txt"
+    victim.write_text('{"lockfile_hash": "secret", "provisioned": true}')
+    (gitdir / "treebox-state.json").symlink_to(victim)
 
-    for tpl in ("hardened", "default"):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", template=tpl),
-        )
-        assert state.load(tmp_path).template == tpl
+    assert state.load(gitdir) is None
+    state.save(gitdir, state.WorktreeState(lockfile_hash="h", provisioned=True))
 
-    # Fresh objects and files missing the "template" key both read as None.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").template is None
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).template is None
+    assert victim.read_text() == '{"lockfile_hash": "secret", "provisioned": true}'
+    assert not (gitdir / "treebox-state.json").is_symlink()
+    assert state.load(gitdir) == state.WorktreeState(lockfile_hash="h", provisioned=True)
+    assert [p.name for p in gitdir.iterdir()] == ["treebox-state.json"]  # no temp left
+
+
+def _record_for(path: Path, **kw):
+    from treebox import record
+
+    fields = {
+        "worktree": path,
+        "base": "main",
+        "isolation": "docker",
+        "harness": "claude",
+        "firewall": True,
+        "template": "hardened",
+    }
+    fields.update(kw)
+    return record.WorktreeRecord(**fields)
+
+
+def test_record_lives_outside_the_worktree_and_roundtrips(tmp_path):
+    """The record sits beside the worktree (outside every sandbox mount), is
+    versioned, and round-trips exactly."""
+    import json
+
+    from treebox import record
+
+    wt = tmp_path / "wts" / "feature--x"
+    wt.mkdir(parents=True)
+    rec = _record_for(wt)
+    record.save(rec)
+
+    path = record.record_path(wt)
+    assert path == tmp_path / "wts" / ".records" / "feature--x.json"
+    assert not path.is_relative_to(wt)
+    assert json.loads(path.read_text())["schemaVersion"] == record.SCHEMA_VERSION
+    assert record.load(wt) == rec
+    assert [p.name for p in path.parent.iterdir()] == ["feature--x.json"]  # no temp left
+
+    record.remove(wt)
+    record.remove(wt)  # idempotent
+    with pytest.raises(record.RecordMissingError):
+        record.load(wt)
+
+
+def test_record_save_is_atomic(tmp_path, monkeypatch):
+    """A failed write leaves the previous record intact and no temp file."""
+    from treebox import record
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(_record_for(wt))
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(record.os, "replace", boom)
+    with pytest.raises(OSError):
+        record.save(_record_for(wt, isolation="host"))
+    monkeypatch.undo()
+    assert record.load(wt).isolation == "docker"
+    assert [p.name for p in record.record_path(wt).parent.iterdir()] == ["w.json"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda d: d.update(schemaVersion=3), "schemaVersion"),
+        (lambda d: d.update(resources={"memory": "lots"}), "memory"),
+        (lambda d: d.update(resources={"swap": "1g"}), "unknown key"),
+        (lambda d: d.pop("resources"), "missing key"),
+        (lambda d: d.update(schemaVersion=True), "schemaVersion"),
+        (lambda d: d.update(worktree="/elsewhere/w"), "bound to worktree"),
+        (lambda d: d.update(template="/etc"), "not a template name"),
+        (lambda d: d.update(template="../x"), "not a template name"),
+        (lambda d: d.update(firewall="yes"), "firewall"),
+        (lambda d: d.update(limits={}), "unknown key"),
+        (lambda d: d.pop("isolation"), "missing key"),
+    ],
+)
+def test_record_invalid_contents_are_classified(tmp_path, mutate, reason):
+    """Anything the reader cannot trust is RecordInvalidError - never a silent
+    default. Unknown keys and versions are refused, so an older treebox never
+    drops a newer policy field."""
+    import json
+
+    from treebox import record
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(_record_for(wt))
+    path = record.record_path(wt)
+    data = json.loads(path.read_text())
+    mutate(data)
+    path.write_text(json.dumps(data))
+    with pytest.raises(record.RecordInvalidError, match=reason) as exc:
+        record.load(wt)
+    assert exc.value.path == path
+    path.write_text("{not json")
+    with pytest.raises(record.RecordInvalidError, match="invalid JSON"):
+        record.load(wt)
+
+
+@pytest.mark.parametrize("name", ["/etc", "../etc", "a/b", ".", "..", "", "x y"])
+def test_template_names_are_identifiers_never_paths(name, tmp_path, monkeypatch):
+    """A template name selects a directory under the operator-owned locations
+    only: paths and traversal are refused by the resolver and by config
+    validation alike (issue #57)."""
+    from treebox import assets
+    from treebox.config import validate_config
+
+    monkeypatch.setenv("TREEBOX_HOME", str(tmp_path))
+    with pytest.raises(assets.TemplateNameError):
+        assets.template_dir(name)
+    with pytest.raises(ValueError, match="Invalid template name"):
+        validate_config(Config(template=name))
+
+
+def test_template_dir_override_still_wins_for_any_valid_name(tmp_path, monkeypatch):
+    """$TREEBOX_TEMPLATE_DIR stays the operator's explicit override."""
+    from treebox import assets
+
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tmp_path))
+    assert assets.template_dir("anything") == tmp_path
 
 
 def test_host_git_pins_exec_shaped_config(monkeypatch: pytest.MonkeyPatch):
@@ -2597,7 +2775,8 @@ def test_status_compute_pr_overrides_squash_merge():
         has_upstream=True,
         ahead=2,
         merged_ancestor=False,
-        pr=PRStatus(state="merged", number=42),
+        pr=PRStatus(state="merged", number=42, head_oid="a" * 40),
+        current_oid="a" * 40,
     )
     assert s.safe and "merged" in s.label and "#42" in s.label
 
@@ -2785,6 +2964,21 @@ def test_registry_vocabularies_cannot_drift():
     assert tuple(h.name for h in HARNESSES) == VALID_HARNESSES
     assert set(VALID_ISOLATION) == set(get_args(config.Isolation))
     assert set(VALID_HARNESSES) == set(get_args(config.Harness))
+
+
+def test_runner_dry_run_setup_protocol_cannot_drift():
+    """Every runner must accept the cold choice as a required keyword."""
+    from inspect import Parameter, signature
+
+    from treebox.runners import DockerRunner, HostRunner, Runner
+
+    for owner in (Runner, HostRunner, DockerRunner):
+        params = signature(owner.dry_run_setup).parameters
+        assert tuple(params) == ("self", "wt", "cold", "source_ref")
+        assert params["cold"].kind is Parameter.KEYWORD_ONLY
+        assert params["cold"].default is Parameter.empty
+        assert params["source_ref"].kind is Parameter.KEYWORD_ONLY
+        assert params["source_ref"].default is Parameter.empty
 
 
 def test_runner_facts_pin_doctor_vocabulary():
@@ -3661,16 +3855,112 @@ def test_host_dry_run_setup_lists_ecosystem_commands(tmp_path: Path):
     repo.mkdir()
     (repo / "uv.lock").write_text("")
     wt = Worktree(str(repo), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    assert HostRunner(Config()).dry_run_setup(wt) == ["uv sync"]
+    assert HostRunner(Config()).dry_run_setup(wt, cold=False, source_ref=None) == ["uv sync"]
 
     empty = tmp_path / "bare"
     empty.mkdir()
     bare_wt = Worktree(str(empty), "wt", "treebox/wt", "main", tmp_path / "wts" / "wt")
-    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt)
+    (plan,) = HostRunner(Config()).dry_run_setup(bare_wt, cold=False, source_ref=None)
     assert plan.startswith("#") and "no-op" in plan
 
     hooked = HostRunner(Config(setup_hook=["echo hi"]))
-    assert hooked.dry_run_setup(wt) == ["sh -c 'echo hi'"]
+    assert hooked.dry_run_setup(wt, cold=False, source_ref=None) == ["sh -c 'echo hi'"]
+
+
+def test_host_dry_run_setup_uses_resumed_worktree_manifests(tmp_path: Path):
+    """A resumed create plans setup from its existing worktree, not the repo HEAD."""
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "uv.lock").write_text("")
+    wt_path = tmp_path / "wts" / "wt"
+    wt_path.mkdir(parents=True)
+    (wt_path / "Cargo.lock").write_text("")
+    wt = Worktree(str(repo), "wt", "wt", "main", wt_path)
+
+    commands = HostRunner(Config()).dry_run_setup(wt, cold=False, source_ref=None)
+
+    assert commands == ["cargo fetch"]
+
+
+def test_host_cold_dry_run_uses_stable_disposable_cache_without_creating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Cold planning shows its isolated store, stays stable, and writes nothing."""
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    shared = tmp_path / "shared" / "pnpm"
+    wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
+    runner = HostRunner(Config(caches={"pnpm": str(shared)}))
+    monkeypatch.setattr(
+        "treebox.runners.host.tempfile.gettempdir",
+        lambda: pytest.fail("dry-run probed the temporary directory"),
+    )
+
+    warm = runner.dry_run_setup(wt, cold=False, source_ref=None)
+    cold = runner.dry_run_setup(wt, cold=True, source_ref=None)
+
+    expected_cold = "<temporary-dir>/treebox-cold-XXXXXXXX/pnpm"
+    assert warm == [f"pnpm install --frozen-lockfile --store-dir {shared}"]
+    assert cold == [f"pnpm install --frozen-lockfile --store-dir '{expected_cold}'"]
+    assert cold == runner.dry_run_setup(wt, cold=True, source_ref=None)
+    assert not shared.exists()
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "command", "env_var", "cache_name"),
+    [
+        ("uv.lock", "uv sync", "UV_CACHE_DIR", "uv"),
+        ("package-lock.json", "npm ci", "npm_config_cache", "npm"),
+        ("go.sum", "go mod download", "GOMODCACHE", "go"),
+        ("Cargo.lock", "cargo fetch", "CARGO_HOME", "cargo"),
+    ],
+)
+def test_host_cold_dry_run_renders_environment_cache_routing(
+    tmp_path: Path,
+    lockfile: str,
+    command: str,
+    env_var: str,
+    cache_name: str,
+):
+    from treebox.runners.host import HostRunner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / lockfile).write_text("")
+    shared = tmp_path / "shared" / cache_name
+    wt = Worktree(str(repo), "wt", "wt", "main", tmp_path / "wts" / "wt")
+    runner = HostRunner(Config(caches={cache_name: str(shared)}))
+
+    assert runner.dry_run_setup(wt, cold=False, source_ref=None) == [command]
+    assert runner.dry_run_setup(wt, cold=True, source_ref=None) == [
+        f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{cache_name}' {command}"
+    ]
+    assert not shared.exists()
+
+
+def test_host_cold_dry_run_renders_setup_hook_cache_environment(tmp_path: Path):
+    from treebox.runners.host import HostRunner
+
+    shared = {name: str(tmp_path / "shared" / name) for name in ("uv", "npm", "go", "cargo")}
+    runner = HostRunner(Config(caches=shared, setup_hook=["echo hi"]))
+    wt = Worktree("/repo", "wt", "wt", "main", tmp_path / "wts" / "wt")
+
+    assert runner.dry_run_setup(wt, cold=False, source_ref=None) == ["sh -c 'echo hi'"]
+    (cold,) = runner.dry_run_setup(wt, cold=True, source_ref=None)
+    for name, env_var in (
+        ("uv", "UV_CACHE_DIR"),
+        ("npm", "npm_config_cache"),
+        ("go", "GOMODCACHE"),
+        ("cargo", "CARGO_HOME"),
+    ):
+        assert f"{env_var}='<temporary-dir>/treebox-cold-XXXXXXXX/{name}'" in cold
+    assert cold.endswith("sh -c 'echo hi'")
+    assert not (tmp_path / "shared").exists()
 
 
 def test_worktree_status_missing_row_never_shells_out():

@@ -57,6 +57,14 @@ survive a container restart, so every restart re-runs the (idempotent) init.
 Capabilities can't be added to an existing container, so asking for the
 firewall on a container created without it is a loud error, never a silent
 open-egress run.
+
+Resource limits: the generic ``cpus`` / ``memory`` / ``pids`` limits map to
+``docker run --cpus / --memory / --pids-limit``. They come from the host-owned
+record (``self.config.resources``), never from the rendered config. A raw
+``runArgs`` limit is the template's own value: ``template_resources`` folds it
+into the lowest-precedence tier when a worktree is created, and ``docker run``
+drops the raw flag for every limit treebox sets, so the recorded value is the
+one the container gets - never Docker's last-flag-wins.
 """
 
 from __future__ import annotations
@@ -78,12 +86,22 @@ from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
 from ..models import Worktree, expand_user
 from ..output import Reporter
+from ..resources import (
+    RESOURCE_NAMES,
+    ResourceLimitError,
+    ResourceLimits,
+    format_value,
+    from_mapping,
+    parse_cpus,
+    parse_memory,
+    parse_pids,
+)
 from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
     from ..config import Config
 
-# Sibling of the worktree root that holds each worktree's operator-owned
+# Host-side directory that holds each worktree's operator-owned
 # container config + build context. The config/build files themselves are NEVER
 # mounted into the container (only the worktree, its git common dir, and the
 # scoped credential copies below), so a boxed agent can't reach them.
@@ -124,6 +142,7 @@ class ContainerConfig(TypedDict, total=False):
     env: dict[str, str]
     runArgs: list[str]
     postCreate: str
+    resources: dict[str, Any]
 
 
 class ResourceManifest(TypedDict):
@@ -133,7 +152,16 @@ class ResourceManifest(TypedDict):
     volumes: list[str]
 
 
-_KNOWN_KEYS = frozenset({"build", "user", "mounts", "env", "runArgs", "postCreate"})
+_KNOWN_KEYS = frozenset({"build", "user", "mounts", "env", "runArgs", "postCreate", "resources"})
+
+# The docker run flag (and its spellings in raw runArgs) for each generic limit.
+_LIMIT_FLAGS: dict[str, str] = {"cpus": "--cpus", "memory": "--memory", "pids": "--pids-limit"}
+_LIMIT_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "cpus": ("--cpus",),
+    "memory": ("--memory", "-m"),
+    "pids": ("--pids-limit",),
+}
+_LIMIT_PARSERS = {"cpus": parse_cpus, "memory": parse_memory, "pids": parse_pids}
 
 # Keeps the detached sandbox container alive between execs. `docker run --init`
 # puts a real PID 1 above it so orphaned grandchildren get reaped.
@@ -203,6 +231,7 @@ _FACTS = RunnerFacts(preflight_detail="docker daemon ok", login_required=False)
 
 class DockerRunner:
     name = "docker"
+    supported_resources: frozenset[str] = frozenset(RESOURCE_NAMES)
 
     def __init__(
         self,
@@ -315,11 +344,70 @@ class DockerRunner:
     def facts(self) -> RunnerFacts:
         return _FACTS
 
+    # --- resource limits ---------------------------------------------------------
+
+    def template_resources(self) -> ResourceLimits:
+        """The template tier: the operator template's ``resources`` object
+        plus any raw ``runArgs`` limit (firewall overlay included when the
+        firewall is on). One template that sets a limit twice with different
+        values is invalid - there is no defined winner inside one template."""
+        config = self._overlaid_config()
+        name = self.config.template
+        try:
+            declared = from_mapping(config.get("resources", {}), source="resources")
+        except ResourceLimitError as exc:
+            raise assets.TemplateInvalidError(
+                name, f"Invalid {assets.CONFIG_FILE} of template '{name}': {exc}"
+            ) from exc
+        _, raw = _split_limit_args([str(a) for a in config.get("runArgs", [])])
+        values: dict[str, Any] = {}
+        for limit in RESOURCE_NAMES:
+            found = set()
+            if getattr(declared, limit) is not None:
+                found.add(getattr(declared, limit))
+            for value in raw[limit]:
+                try:
+                    found.add(_LIMIT_PARSERS[limit](value, source=f"runArgs {_LIMIT_FLAGS[limit]}"))
+                except ResourceLimitError as exc:
+                    raise assets.TemplateInvalidError(
+                        name, f"Invalid {assets.CONFIG_FILE} of template '{name}': {exc}"
+                    ) from exc
+            if len(found) > 1:
+                shown = ", ".join(sorted(format_value(limit, v) for v in found))
+                raise assets.TemplateInvalidError(
+                    name,
+                    f"Template '{name}' sets {limit} more than once with different values "
+                    f"({shown}) in resources / runArgs. Keep one value.",
+                )
+            if found:
+                values[limit] = found.pop()
+        return ResourceLimits(**values)
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        """Docker refuses ``--cpus`` above the engine's CPU count at ``docker
+        run``, after the image build: refuse it here instead. Skipped when the
+        engine cannot be asked (preflight reports that on a real run)."""
+        if limits.cpus is None:
+            return
+        proc = self._engine(["info", "--format", "{{.NCPU}}"])
+        try:
+            available = int(proc.stdout.strip()) if proc.returncode == 0 else 0
+        except ValueError:
+            available = 0
+        if available and limits.cpus > available:
+            raise ResourceLimitError(
+                "cpus",
+                f"Invalid --cpus {format_value('cpus', limits.cpus)}: the Docker engine "
+                f"has only {available} CPUs.",
+            )
+
     # --- locations & identity --------------------------------------------------
 
     def _config_dir(self, wt: Worktree) -> Path:
-        """Host-side dir holding this worktree's container config + build
-        context. A sibling of the worktree root, so it is never mounted in."""
+        """Keep container config and build files outside the worktree mount.
+
+        See the safety invariant at ``_CONFIG_ROOT``.
+        """
         return wt.path.parent / _CONFIG_ROOT / wt.name
 
     def _config_file(self, wt: Worktree) -> Path:
@@ -329,9 +417,11 @@ class DockerRunner:
         return self._config_dir(wt) / _RESOURCE_MANIFEST
 
     def _creds_dir(self, wt: Worktree) -> Path:
-        """Per-worktree dir of scoped login-file copies (one subdir per harness).
-        This — never the operator's live ``~/.claude`` / ``~/.codex`` — is what
-        gets bind-mounted into the container."""
+        """Host-owned parent of the staged credential directories.
+
+        Each harness's child directory is bind-mounted; this parent stays
+        outside all sandbox mounts, as ``Harness.stage_credentials`` requires.
+        """
         return self._config_dir(wt) / _CREDS_SUBDIR
 
     def _id_label(self, wt: Worktree) -> str:
@@ -621,7 +711,16 @@ class DockerRunner:
             "--label",
             self._id_label(wt),
         ]
-        argv += [str(a) for a in config.get("runArgs", [])]
+        # Treebox owns every limit it sets: the raw runArgs spelling of that
+        # limit is dropped (it was folded into the record at create), so the
+        # recorded value is the one the container gets.
+        limits = self.config.resources
+        run_args, _ = _split_limit_args(
+            [str(a) for a in config.get("runArgs", [])], drop=limits.names()
+        )
+        argv += run_args
+        for limit in limits.names():
+            argv += [_LIMIT_FLAGS[limit], format_value(limit, getattr(limits, limit))]
         for key, value in config.get("env", {}).items():
             argv += ["-e", f"{key}={value}"]
         for mount in config.get("mounts", []):
@@ -648,36 +747,41 @@ class DockerRunner:
 
     # --- setup -------------------------------------------------------------------
 
+    def _existing_container(self, wt: Worktree) -> tuple[str, ContainerState] | None:
+        ids = self._container_ids(wt)
+        if not ids:
+            return None
+        container_id = ids[0]
+        state = self._container_state(container_id)
+        self._require_own_container(wt, state.name)
+        if self.config.firewall and not state.firewall:
+            raise RuntimeError(
+                "The firewall was requested, but this worktree's container "
+                "was created without it. Re-create the sandbox: "
+                f"treebox teardown {wt.name} && "
+                f"treebox create {wt.name} --isolation {self.name} --firewall"
+            )
+        return container_id, state
+
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
         with reporter.task("sandbox files", "templates written (outside worktree)"):
             config = self._write_config(wt, cold=cold)
         with reporter.task("credentials", "scoped copies staged (outside worktree)"):
             self._refresh_credentials(wt)
 
-        existing = self._container_ids(wt)
+        existing = self._existing_container(wt)
         if existing:
-            name, running, firewall = self._container_state(existing[0])
-            self._require_own_container(wt, name)
-            # Capabilities can't be added to an existing container: a firewall
-            # request the container can't honor must fail loudly, or workspace
-            # setup would run with open egress while claiming lockdown.
-            if self.config.firewall and not firewall:
-                raise RuntimeError(
-                    "The firewall was requested, but this worktree's container "
-                    "was created without it. Re-create the sandbox: "
-                    f"treebox teardown {wt.name} && "
-                    f"treebox create {wt.name} --isolation {self.name} --firewall"
-                )
+            container_id, (_, running, firewall) = existing
             if cold:
                 reporter.warn(
                     "existing container keeps its creation-time cache mounts; "
                     "teardown and re-create for a fully cold sandbox"
                 )
             if running:
-                reporter.note("container", f"reusing {existing[0]}")
+                reporter.note("container", f"reusing {container_id}")
             else:
                 with reporter.task("container", "started (existing)"):
-                    self._engine_check(["start", existing[0]])
+                    self._engine_check(["start", container_id])
         else:
             firewall = self.config.firewall
             if not cold:
@@ -718,17 +822,45 @@ class DockerRunner:
 
     # --- launch / teardown ---------------------------------------------------
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
-        config = self._merged_config(wt, cold=False)
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
+        config = self._merged_config(wt, cold=cold)
         cmds = [
             f"# render {self.config.template} template into {self._config_dir(wt)} "
             "(operator-owned, outside the worktree)",
             f"# stage scoped login-file copies into {self._creds_dir(wt)} "
             "(the live ~/.claude / ~/.codex are never mounted)",
-            shlex.join(self._build_command(wt, config)),
-            shlex.join(self._run_command(wt, config)),
         ]
-        if self.config.firewall:
+        # Real setup reuses a container that already exists for this worktree
+        # (an interrupted create left one behind), warm or cold; the plan
+        # says so whenever the engine can be asked. A read-only query.
+        existing = self._existing_container(wt) if self._available() else None
+
+        firewall = self.config.firewall
+        if existing:
+            container_id, (_, running, firewall) = existing
+            if cold:
+                cmds.append(
+                    "# existing container keeps its creation-time cache mounts; "
+                    "teardown and re-create for a fully cold sandbox"
+                )
+            if running:
+                cmds.append(f"# reuse existing container {container_id}")
+            else:
+                cmds.append(shlex.join(["docker", "start", container_id]))
+        else:
+            cmds.extend(
+                [
+                    shlex.join(self._build_command(wt, config)),
+                    shlex.join(self._run_command(wt, config)),
+                ]
+            )
+        if firewall:
             cmds.append(shlex.join(self._firewall_command(wt)))
         post_create = config.get("postCreate")
         if post_create:
@@ -897,6 +1029,44 @@ def _require_known_keys(config: dict[str, Any], source: str) -> ContainerConfig:
             f"Supported keys: {', '.join(sorted(_KNOWN_KEYS))}."
         )
     return cast(ContainerConfig, config)
+
+
+def _split_limit_args(
+    run_args: list[str], *, drop: list[str] | None = None
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Find the raw resource-limit flags in ``runArgs`` (``--memory=4g``,
+    ``--memory 4g``, ``-m 4g``, ``-m4g``, and the same for ``--cpus`` /
+    ``--pids-limit``). Returns the args with the limits in ``drop`` removed,
+    and every raw value found, per generic limit name."""
+    remove = set(drop or [])
+    kept: list[str] = []
+    found: dict[str, list[str]] = {n: [] for n in RESOURCE_NAMES}
+    i = 0
+    while i < len(run_args):
+        arg = run_args[i]
+        hit: tuple[str, str, int] | None = None
+        for limit, spellings in _LIMIT_SPELLINGS.items():
+            for flag in spellings:
+                if arg == flag and i + 1 < len(run_args):
+                    hit = (limit, run_args[i + 1], 2)
+                elif arg.startswith(flag + "="):
+                    hit = (limit, arg[len(flag) + 1 :], 1)
+                elif flag == "-m" and arg.startswith("-m") and len(arg) > 2:
+                    hit = (limit, arg[2:], 1)
+                if hit:
+                    break
+            if hit:
+                break
+        if hit is None:
+            kept.append(arg)
+            i += 1
+            continue
+        limit, value, width = hit
+        found[limit].append(value)
+        if limit not in remove:
+            kept.extend(run_args[i : i + width])
+        i += width
+    return kept, found
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:

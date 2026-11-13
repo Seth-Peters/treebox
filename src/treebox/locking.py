@@ -1,10 +1,14 @@
-"""Cross-process advisory locking on a worktree name.
+"""Cross-process advisory locking on one worktree directory.
 
-Two ``create``/``enter`` calls for the same worktree must not race on its dir
-or the shared caches it writes through. We take a POSIX ``flock`` on a small
-lock file keyed by the worktree name (the permanent identity — branches are
-mutable), held for the duration of provisioning. Non-blocking with a clear
-error so a second caller fails fast instead of corrupting a half-built tree.
+``create``, ``enter``, and ``teardown`` of the same worktree must not race on
+its directory, its container, or the shared caches it writes through. The lock
+is keyed by the worktree's *path* - the identity every command agrees on - so
+callers pass the directory they are about to touch and never need to know
+where the lock file lives. Two worktrees with the same leaf name under
+different parents (a nested root) therefore take different locks.
+
+A non-blocking POSIX ``flock`` makes a second caller fail fast (``LockError``)
+instead of corrupting a half-built tree or deleting one that is in use.
 """
 
 from __future__ import annotations
@@ -12,8 +16,7 @@ from __future__ import annotations
 import errno
 from collections.abc import Iterator
 from contextlib import contextmanager
-
-from .models import worktree_root
+from pathlib import Path
 
 
 class LockError(RuntimeError):
@@ -21,15 +24,21 @@ class LockError(RuntimeError):
 
 
 @contextmanager
-def worktree_lock(repo: str, root: str, name: str) -> Iterator[None]:
-    """Hold an exclusive lock for the worktree ``name`` while provisioning it."""
+def worktree_lock(path: Path) -> Iterator[None]:
+    """Hold the exclusive lock for the worktree at ``path`` for the block.
+
+    ``path`` need not exist yet (``create`` locks before ``git worktree add``).
+    The lock file lives beside the worktree, in ``<parent>/.locks/<leaf>.lock``,
+    outside every sandbox mount.
+    """
+    name = path.name
     try:
         import fcntl
     except ImportError:  # non-POSIX: locking unsupported, proceed unguarded
         yield
         return
 
-    lock_dir = worktree_root(repo, root) / ".locks"
+    lock_dir = path.parent / ".locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{name}.lock"
     # Deliberately not a `with`: the descriptor must stay open (holding the

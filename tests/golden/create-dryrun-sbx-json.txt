@@ -13,6 +13,11 @@
     "# install pre-push guard: per-worktree core.hooksPath -> <private git dir>/treebox-hooks (treebox/* refs are un-pushable)",
     "cp .env __ROOT__/wts/golden-sbx/.env",
     "sbx create --name treebox-golden-sbx-__HASH__ claude __ROOT__/wts/golden-sbx __ROOT__/repo/.git __ROOT__/repo/.git/hooks:ro"
-  ]
+  ],
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  }
 }
 # --- stderr ---

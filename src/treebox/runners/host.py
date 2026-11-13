@@ -18,6 +18,7 @@ from .. import ecosystems
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter, StepError
+from ..resources import ResourceLimitError, ResourceLimits
 from ..system import have
 from .base import RunnerFacts, RunnerTeardownResult
 
@@ -29,10 +30,18 @@ if TYPE_CHECKING:
 # globally) and the agent CLI (verified at launch) there is nothing
 # container-specific to check.
 _FACTS = RunnerFacts(preflight_detail="no container dependencies", login_required=True)
+_DRY_RUN_COLD_ROOT = "<temporary-dir>/treebox-cold-XXXXXXXX"
+
+
+def _render_cache_env(command: str, env: dict[str, str]) -> str:
+    assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    return f"{assignments} {command}" if assignments else command
 
 
 class HostRunner:
     name = "host"
+    # No sandbox, so no cgroup to cap: the agent runs as the operator.
+    supported_resources: frozenset[str] = frozenset()
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -43,6 +52,17 @@ class HostRunner:
 
     def facts(self) -> RunnerFacts:
         return _FACTS
+
+    def template_resources(self) -> ResourceLimits:
+        return ResourceLimits()
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        # The CLI refuses explicit limits for this runner first; this keeps a
+        # direct caller from silently running uncapped.
+        if limits.names():
+            raise ResourceLimitError(
+                limits.names()[0], "The host runner cannot apply resource limits."
+            )
 
     def initialize(self, wt: Worktree) -> None:
         # The host runner owns no per-worktree resources outside the worktree.
@@ -70,6 +90,7 @@ class HostRunner:
             reporter.note("setup", "no package manifests")
             return
         steps = ecosystems.setup_steps(ecos, self.config.caches, cold_cache_root=cold_root)
+        ecosystems.ensure_cache_dirs(step.cache_dir for step in steps)
         for step in steps:
             if not have(step.argv[0]):
                 reporter.note(f"setup · {step.name}", f"{step.argv[0]} not found; skipped")
@@ -85,8 +106,10 @@ class HostRunner:
                 reporter.warn(f"{step.name} setup failed; continuing")
 
     def _run_override(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
+        cache_env = ecosystems.cache_env(self.config.caches, cold_cache_root=cold_root)
+        ecosystems.ensure_cache_dirs(cache_env.values())
         env = dict(os.environ)
-        env.update(ecosystems.cache_env(self.config.caches, cold_cache_root=cold_root))
+        env.update(cache_env)
         for i, command in enumerate(self.config.setup_hook or []):
             try:
                 reporter.step(
@@ -99,15 +122,37 @@ class HostRunner:
             except StepError:
                 reporter.warn(f"setup hook step {i + 1} failed; continuing")
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
         if self.config.setup_hook is not None:
-            return [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
-        # The worktree doesn't exist yet; detect from the source repo's manifests.
-        ecos = ecosystems.detect(wt.repo)
+            commands = [f"sh -c {shlex.quote(c)}" for c in self.config.setup_hook]
+            if not cold:
+                return commands
+            env = ecosystems.cache_env(self.config.caches, cold_cache_root=_DRY_RUN_COLD_ROOT)
+            return [_render_cache_env(command, env) for command in commands]
+        # A new worktree may come from a different --base/--checkout revision
+        # than the current repo checkout. A resumed worktree already has the
+        # exact tree that real setup will inspect.
+        if source_ref is not None:
+            ecos = ecosystems.detect_revision(wt.repo, source_ref)
+        else:
+            source = wt.path if wt.path.exists() else wt.repo
+            ecos = ecosystems.detect(source)
         if not ecos:
             return ["# no package manifests — setup is a no-op"]
-        steps = ecosystems.setup_steps(ecos, self.config.caches, cold_cache_root=None)
-        return [" ".join(s.argv) for s in steps]
+        steps = ecosystems.setup_steps(
+            ecos,
+            self.config.caches,
+            cold_cache_root=_DRY_RUN_COLD_ROOT if cold else None,
+        )
+        if not cold:
+            return [" ".join(step.argv) for step in steps]
+        return [_render_cache_env(shlex.join(step.argv), step.env) for step in steps]
 
     def prepare_entry(self, wt: Worktree) -> None:
         # Nothing to make ready: the agent runs directly on the host, so an

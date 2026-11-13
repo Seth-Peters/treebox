@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from . import ecosystems, git, state
+from . import ecosystems, git, record, state
 from .config import Config
 from .harnesses import Harness
 from .models import Worktree, expand_user, is_placeholder, same_path, worktree_root
 from .output import Reporter
 from .runners.base import Runner
+from .submodule_copy import SubmoduleCopyError, UnsafeDestinationError, copy_submodule
 
 
 class ProvisionError(RuntimeError):
@@ -31,6 +33,34 @@ class ProvisionError(RuntimeError):
     CLI error / in the --json error object."""
 
     hint: str | None = None
+    # Set by path-specific failures; surfaced as ``error.path`` under --json.
+    path: Path | None = None
+
+
+class DestinationConflictError(ProvisionError):
+    """A host-side copy into the worktree was refused because of what already
+    sits at its destination. Nothing is ever removed to make room: the worktree
+    tree is untrusted, and the entry may be the user's (or the branch's) own
+    content. A submodule copy surfaces this as exit 5, DESTINATION_CONFLICT;
+    the managed-file copies (``.env``, ``.gitmodules``) catch it and skip."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.hint = (
+            "Inspect this path and move any conflicting entry aside, then retry create. "
+            "Treebox does not remove conflicting directories."
+        )
+
+
+class SubmoduleCopyFailedError(ProvisionError):
+    """An I/O or permission failure stopped a submodule copy (exit 1,
+    SUBMODULE_COPY_FAILED)."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+        self.hint = "Check permissions and free space at this path, then retry create."
 
 
 class NotFoundError(ProvisionError):
@@ -70,6 +100,40 @@ class BranchConflictError(ProvisionError):
     def __init__(self, branch: str, where: str) -> None:
         super().__init__(f"Branch '{branch}' already exists {where}.")
         self.hint = f"Resume it with `treebox create --checkout {branch}`, or pick another name."
+
+
+class RecordConflictError(ProvisionError):
+    """A resumed ``create`` asked for a different policy than the host-owned
+    record of the half-built worktree holds (exit 5, RECORD_CONFLICT)."""
+
+    def __init__(self, name: str, prior: record.WorktreeRecord) -> None:
+        super().__init__(
+            f"Worktree '{name}' was created with different settings: isolation "
+            f"{prior.isolation}, firewall {'on' if prior.firewall else 'off'}, template "
+            f"{prior.template}, harness {prior.harness}, base {prior.base}, limits "
+            f"{prior.resources.describe()}."
+        )
+        self.path = record.record_path(prior.worktree)
+        firewall = "--firewall" if prior.firewall else "--no-firewall"
+        limits = "".join(f" {a}" for a in prior.resources.cli_flags())
+        self.hint = (
+            f"Finish it with the recorded settings: treebox create {name} "
+            f"--isolation {prior.isolation} {firewall} --template {prior.template} "
+            f"-H {prior.harness} --base {prior.base}{limits} - or tear it down "
+            f"(treebox teardown {name}) and create it again."
+        )
+
+
+class RecordExistsError(ProvisionError):
+    """``adopt`` found a record already in place (exit 5, RECORD_EXISTS)."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"Worktree '{path.name}' already has a host-owned record.")
+        self.path = record.record_path(path)
+        self.hint = (
+            "Nothing to adopt. To replace the record on purpose, add --force "
+            "(the settings you pass become the worktree's policy)."
+        )
 
 
 @dataclass
@@ -137,13 +201,14 @@ def dry_run_plan(
     branch: str,
     base: str,
     fetch: bool,
+    cold: bool,
     existing_branch: bool = False,
 ) -> tuple[Worktree, list[str]]:
-    """The exact git/runner commands ``create`` would run, without side effects.
+    """A stable git/runner command plan for ``create``, without side effects.
 
-    Enforces the same read-only preconditions as a real ``create`` - raising the
-    same conflict/not-found errors rather than returning a plan a real run would
-    refuse - judged against locally available refs (a dry run never fetches).
+    Checks use locally available refs because this plan must not fetch or write.
+    See ``docs/usage.md#dry-run-checks`` for the preflight contract. Runners
+    represent disposable paths with stable placeholders.
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
     resuming = False
@@ -151,11 +216,13 @@ def dry_run_plan(
         resuming = _is_resumable_unprovisioned_worktree(repo, wt, branch)
         if not resuming:
             raise _slug_conflict_for_existing_path(repo, wt)
+        _check_resume_policy(wt, _creation_record(config, runner, wt, config.harness))
     else:
         _check_requested_branch(repo, branch=branch, existing_branch=existing_branch)
         _check_checkout_branch_in_use(repo, wt, branch=branch, existing_branch=existing_branch)
         _check_base_exists(repo, base=base, existing_branch=existing_branch)
     cmds: list[str] = []
+    source_ref: str | None = None
     if resuming:
         cmds.append(f"# resume existing unprovisioned worktree at {wt.path}")
     else:
@@ -164,8 +231,10 @@ def dry_run_plan(
         plan = git.resolve_branch(repo, branch, base)
         if plan.kind == "local":
             cmds.append(f"git -C {repo} worktree add {wt.path} {plan.name}")
+            source_ref = plan.name
         else:
             cmds.append(f"git -C {repo} worktree add -b {plan.name} {wt.path} {plan.start_point}")
+            source_ref = plan.start_point
     cmds.append(
         "# install pre-push guard: per-worktree core.hooksPath -> "
         f"<private git dir>/{_GUARD_DIR} ({_guard_detail(branch)})"
@@ -173,7 +242,7 @@ def dry_run_plan(
     if git.has_gitmodules(repo):
         cmds.append(f"# copy submodule trees from {repo} into {wt.path}")
     cmds.append(f"cp {config.env_file} {wt.path}/.env")
-    cmds.extend(runner.dry_run_setup(wt))
+    cmds.extend(runner.dry_run_setup(wt, cold=cold, source_ref=source_ref))
     return wt, cmds
 
 
@@ -186,15 +255,57 @@ def _copyfile_no_follow(src: Path, dest: Path) -> None:
     ``dest`` lives inside a freshly checked-out worktree whose tree is untrusted
     (a malicious branch can commit a symlink there, or a boxed agent can plant
     one). ``shutil.copyfile`` would follow such a symlink and write through it to
-    an arbitrary host path. Remove any existing entry first, then create the
-    destination with ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the
-    meantime makes the open fail instead of redirecting the write.
+    an arbitrary host path. Remove any existing file or symlink first (an
+    unlink never writes through), then create the destination with
+    ``O_NOFOLLOW | O_EXCL`` so a symlink re-planted in the meantime makes the
+    open fail instead of redirecting the write.
+
+    A *directory* at ``dest`` is never removed - it may be the branch's own
+    tracked content - and raises ``DestinationConflictError`` instead, whether
+    it was there all along or swapped in mid-copy. Callers decide what a
+    refused copy means for them (``_copy_managed_file`` skips it).
     """
-    if dest.is_symlink() or dest.exists():
-        dest.unlink()
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        dest.unlink(missing_ok=True)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        # unlink() on a directory fails with IsADirectoryError on Linux and
+        # PermissionError on macOS; ask the filesystem rather than the errno.
+        if _is_directory_no_follow(dest):
+            raise DestinationConflictError(
+                dest, f"Cannot replace directory with file: {dest}"
+            ) from exc
+        raise
     with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
         shutil.copyfileobj(fsrc, fdst)
+
+
+def _is_directory_no_follow(path: Path) -> bool:
+    """True only when ``path`` itself is a directory (a symlink to one is not)."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _copy_managed_file(src: Path, dest: Path, reporter: Reporter) -> bool:
+    """Copy a file treebox manages (``.env``, ``.gitmodules``) into the
+    worktree; False when the worktree keeps a directory at that name.
+
+    A branch can commit ``.env/`` or ``.gitmodules/`` as a directory, and a
+    boxed agent can create one. That must neither crash provisioning nor cost
+    the branch its content, so the copy is skipped with a warning and the
+    worktree stays usable: the directory is left exactly as it is.
+    """
+    try:
+        _copyfile_no_follow(src, dest)
+    except DestinationConflictError:
+        reporter.warn(
+            f"{dest.name} not copied: {dest} is a directory in this worktree "
+            "(left untouched). Rename or remove it on the branch to get the copy."
+        )
+        return False
+    return True
 
 
 def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:
@@ -261,24 +372,23 @@ def copy_env(repo: str, worktree: Path, env_file: str, reporter: Reporter) -> bo
     if not src.is_file():
         reporter.note("secrets", f"none at {src}")
         return False
-    dest = worktree / ".env"
-    _copyfile_no_follow(src, dest)
+    if not _copy_managed_file(src, worktree / ".env", reporter):
+        reporter.note("secrets", "not copied · .env is a directory here")
+        return False
     _ensure_env_ignored(worktree)
     reporter.ok("secrets", "copied")
     return True
 
 
-def _resolve_submodule_copy(
-    repo: Path, worktree: Path, rel: str, reporter: Reporter
-) -> tuple[Path, Path] | None:
-    """Validate an untrusted ``.gitmodules`` path; ``(src, dest)`` or None to skip.
+def _safe_submodule_path(repo: Path, rel: str, reporter: Reporter) -> Path | None:
+    """Validate an untrusted ``.gitmodules`` path; the repo-relative path to
+    copy, or None to skip.
 
     ``.gitmodules`` is target-repo content, so ``rel`` is attacker-controlled and
     treebox's own parsing bypasses git's submodule-path hardening. Reject
     absolute and ``..``-escaping values, never follow a source that is itself a
-    symlink, and require both endpoints to resolve inside their roots — else a
-    malicious repo can pull host trees into the agent mount (``vendor -> /home``)
-    or copy outside the worktree entirely.
+    symlink, and require the source to resolve inside its root - else a
+    malicious repo can pull host trees into the agent mount (``vendor -> /home``).
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts:
@@ -290,81 +400,92 @@ def _resolve_submodule_copy(
         return None
     if not src.is_dir():
         return None  # not checked out in the source repo; nothing to copy
-    dest = worktree / p
-    if not src.resolve().is_relative_to(repo.resolve()) or not dest.resolve().is_relative_to(
-        worktree.resolve()
-    ):
+    if not src.resolve().is_relative_to(repo.resolve()):
         reporter.warn(f"skipping submodule escaping the repo: {rel!r}")
         return None
-    return src, dest
+    return p
 
 
 def copy_submodules(repo: str, worktree: Path, reporter: Reporter) -> int:
     """Copy submodule working trees from the source repo (copy only, no linkage)."""
     if not git.has_gitmodules(repo):
         return 0
-    _copyfile_no_follow(Path(repo) / ".gitmodules", worktree / ".gitmodules")
+    _copy_managed_file(Path(repo) / ".gitmodules", worktree / ".gitmodules", reporter)
     copied = 0
     for rel in git.submodule_paths(repo):
-        resolved = _resolve_submodule_copy(Path(repo), worktree, rel, reporter)
-        if resolved is None:
+        relative = _safe_submodule_path(Path(repo), rel, reporter)
+        if relative is None:
             continue
-        src, dest = resolved
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # Exclude .git pointers/dirs: a copied pointer's relative gitdir path
-        # breaks every git command in the linked worktree (issue #16).
-        shutil.copytree(
-            src,
-            dest,
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git"),
-        )
+        # The source side is validated above; ``copy_submodule`` owns the
+        # destination side (the worktree tree is untrusted) and skips ``.git``
+        # pointers, whose relative gitdir would break git in the linked
+        # worktree (issue #16).
+        try:
+            copy_submodule(Path(repo), worktree, relative)
+        except UnsafeDestinationError as exc:
+            raise DestinationConflictError(exc.path, str(exc)) from exc
+        except SubmoduleCopyError as exc:
+            raise SubmoduleCopyFailedError(exc.path, str(exc)) from exc
         copied += 1
     reporter.ok("submodules", f"copied {copied}")
     return copied
 
 
-def _record_runner(
-    worktree: Worktree, runner: Runner, harness: str, firewall: bool, template: str
-) -> None:
-    """Persist the runner *before* setup runs. Setup is what builds a docker
-    image and starts its container, so if it fails we'd otherwise be left with a
-    container and no record of which runner owns it — an un-tearable orphan.
-    Runner-owned metadata is initialized first so destructive host cleanup
-    never needs to trust the sandbox-writable worktree state."""
-    runner.initialize(worktree)
-    state.save(
-        worktree.path,
-        state.WorktreeState(
-            base=worktree.base,
-            isolation=runner.name,
-            harness=harness,
-            lockfile_hash="",
-            provisioned=False,
-            firewall=firewall,
-            template=template,
-        ),
+def _creation_record(
+    config: Config, runner: Runner, wt: Worktree, harness: str
+) -> record.WorktreeRecord:
+    """The policy a ``create`` with this config records for ``wt``."""
+    return record.WorktreeRecord(
+        worktree=wt.path,
+        base=wt.base,
+        isolation=runner.name,
+        harness=harness,
+        firewall=config.firewall,
+        template=config.template,
+        resources=config.resources,
     )
 
 
-def _record_hash(
-    worktree: Worktree,
-    runner: Runner,
-    harness: str,
-    firewall: bool,
-    template: str,
-) -> None:
+def _check_resume_policy(wt: Worktree, policy: record.WorktreeRecord) -> bool:
+    """Whether ``wt`` already has a record; raise unless it equals ``policy``.
+
+    A resumed create (an earlier run died before setup finished) must restate
+    the recorded policy: the sandbox-writable ``provisioned`` flag decides
+    whether create resumes, so a resume must never be a way to change the
+    policy of an existing worktree. An unreadable record is not overwritten
+    either (``adopt --force`` is the explicit way to replace one). Read-only,
+    so ``--dry-run`` fails exactly like a real run."""
+    try:
+        prior = record.load(wt.path)
+    except record.RecordMissingError:
+        return False
+    if prior != policy:
+        raise RecordConflictError(wt.name, prior)
+    return True
+
+
+def _record_policy(wt: Worktree, policy: record.WorktreeRecord) -> None:
+    """Persist the host-owned record *before* any runner resource depends on
+    it. Setup is what builds a docker image and starts its container, so if it
+    fails we'd otherwise be left with a container and no record of which runner
+    owns it - an un-tearable orphan."""
+    if not _check_resume_policy(wt, policy):
+        record.save(policy)
+
+
+def _record_setup_started(wt: Worktree, runner: Runner) -> None:
+    """Initialize runner-owned metadata (so destructive host cleanup never
+    needs to trust sandbox-writable state), then observe that setup has not
+    completed yet."""
+    runner.initialize(wt)
+    state.save(wt.path, state.WorktreeState(lockfile_hash="", provisioned=False))
+
+
+def _record_hash(worktree: Worktree) -> None:
     state.save(
         worktree.path,
         state.WorktreeState(
-            base=worktree.base,
-            isolation=runner.name,
-            harness=harness,
-            lockfile_hash=ecosystems.lockfile_hash(worktree.path),
-            provisioned=True,
-            firewall=firewall,
-            template=template,
+            lockfile_hash=ecosystems.lockfile_hash(worktree.path), provisioned=True
         ),
     )
 
@@ -378,17 +499,19 @@ def _finish_setup(
     cold: bool,
     reporter: Reporter,
 ) -> Outcome:
-    """The shared tail of every create path: guard, submodules, .env, setup."""
+    """The shared tail of every create path: record, guard, submodules, .env,
+    setup."""
+    # The creation policy is on disk, outside every sandbox mount, before
+    # anything depends on it: `enter`/`teardown` read it back instead of the
+    # config default or the sandbox-writable state.
+    _record_policy(wt, _creation_record(config, runner, wt, harness.name))
     ensure_root_ignored(wt.repo, config.root)
     install_push_guard(wt, reporter)
     copy_submodules(wt.repo, wt.path, reporter)
     copy_env(wt.repo, wt.path, config.env_file, reporter)
-    # runner on disk before setup can leave a container; firewall + template
-    # persisted so `enter`/`teardown` honor the created-time choices instead of
-    # the config default.
-    _record_runner(wt, runner, harness.name, config.firewall, config.template)
+    _record_setup_started(wt, runner)
     runner.setup(wt, cold=cold, reporter=reporter)
-    _record_hash(wt, runner, harness.name, config.firewall, config.template)
+    _record_hash(wt)
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=[]), created=True)
 
 
@@ -412,16 +535,29 @@ def links_to_worktree_gitdir(repo: str, path: Path) -> bool:
 
 
 def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictError:
+    """The conflict for an occupied worktree path, with a recovery hint that
+    matches what is actually there (``teardown`` only sees registered
+    worktrees, so it is never promised for a directory git does not know)."""
     conflict = SlugConflictError(wt.name, wt.path)
-    linked = links_to_worktree_gitdir(repo, wt.path)
-    actual = git.branch_for_path(repo, str(wt.path)) or ""
-    if not linked or (not actual and not git.worktree_registered(repo, str(wt.path))):
+    registered = git.worktree_registered(repo, str(wt.path))
+    healthy = links_to_worktree_gitdir(repo, wt.path) and (
+        registered or bool(git.branch_for_path(repo, str(wt.path)))
+    )
+    if healthy:
+        return conflict  # the default hint (enter / teardown / pick another name) applies
+    if registered:
         conflict.hint = (
             "The directory is not a healthy registered worktree (likely leftover "
             f"from an interrupted teardown). Recover with `treebox teardown {wt.name}` "
             "— it clears both the directory and git's stale registration — then "
             f"re-run. By hand: rm -rf {wt.path} && git -C {repo} worktree prune "
             "(a bare rm -rf leaves the registration behind and re-create fails)."
+        )
+    else:
+        conflict.hint = (
+            "The directory is not a registered worktree (a stray directory git "
+            "does not know about), so `treebox teardown` cannot see it. Remove "
+            f"it by hand: rm -rf {wt.path} — then re-run."
         )
     return conflict
 
@@ -516,8 +652,7 @@ def create(
     """
     wt = Worktree.locate(repo, config.root, name, branch, base)
 
-    # The name is the identity, so an existing directory is a conflict — loud,
-    # with the ways out — EXCEPT the crash-recovery case: a prior run created
+    # An existing target directory is a conflict except when a prior run created
     # the dir on this exact branch but died before setup finished (state is
     # recorded only after runner.setup completes). Launching into that
     # half-built tree would be the "said Ready, then failed" bug; finish it.
@@ -609,7 +744,8 @@ def enter(
     runner: Runner,
     *,
     repo: str,
-    name: str,
+    path: Path,
+    base: str,
     harness: Harness,
     cold: bool,
     args: list[str],
@@ -617,9 +753,13 @@ def enter(
 ) -> Outcome:
     """Re-prepare an existing worktree: refresh .env, re-run setup if the
     lockfile changed since last setup or a prior setup never completed
-    (recorded provisioned=False). The branch is read live — the agent may
-    have renamed it since create."""
-    wt = Worktree.locate(repo, config.root, name)
+    (observed provisioned=False). The branch is read live - the agent may
+    have renamed it since create. ``config`` is already reconciled with the
+    host-owned record (``cli._reconcile_with_record``) and ``base`` is the
+    recorded base; nothing here reads policy from sandbox-writable state."""
+    # ``path`` is the exact registered path the ref resolved to (possibly a
+    # descendant of the configured root), never a root/name reconstruction.
+    wt = Worktree.at(repo, path)
     if not wt.path.is_dir():
         raise NotFoundError(f"Worktree not found: {wt.path}")
 
@@ -632,9 +772,7 @@ def enter(
 
     prior = state.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
-    wt = Worktree(
-        repo=repo, name=name, branch=branch, base=prior.base if prior else "", path=wt.path
-    )
+    wt = Worktree.at(repo, path, branch=branch, base=base)
 
     copy_env(repo, wt.path, config.env_file, reporter)
     # Always-run, like the .env copy: the docker runner re-stages its credential
@@ -651,18 +789,23 @@ def enter(
         else:
             reporter.info("dependencies changed since last setup — re-syncing")
         runner.setup(wt, cold=cold, reporter=reporter)
-        # Preserve the recorded harness: ``harness`` is this session's launch
-        # choice (possibly an explicit one-off -H override), and a dep re-sync
-        # must not let it overwrite what the worktree was provisioned with.
-        # ``config.firewall`` is safe to re-record as-is: the CLI already
-        # reconciled it to the created-time choice (cli._reconcile_with_state).
-        # The template is preserved the same way as the harness: a recorded
-        # value wins over a config-default ``--template``, so a dep re-sync can
-        # never overwrite the created-time template with the config default.
-        recorded = prior.harness if prior and prior.harness else harness.name
-        recorded_template = prior.template if prior and prior.template else config.template
-        _record_hash(wt, runner, recorded, config.firewall, recorded_template)
+        _record_hash(wt)
     else:
         reporter.note("deps", "unchanged · skipping setup")
 
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=args), created=False)
+
+
+def adopt(repo: str, path: Path, policy: record.WorktreeRecord, *, force: bool) -> None:
+    """Write the host-owned record for an existing worktree that has none (a
+    legacy worktree from before records existed) or, with ``force``, replace
+    an existing one. This is the operator's explicit migration step: the
+    policy comes only from what the operator states, never from the
+    worktree's sandbox-writable state. Callers hold the worktree lock."""
+    if not path.is_dir():
+        raise NotFoundError(f"Worktree not found: {path}")
+    if not links_to_worktree_gitdir(repo, path):
+        raise _slug_conflict_for_existing_path(repo, Worktree.at(repo, path))
+    if record.exists(path) and not force:
+        raise RecordExistsError(path)
+    record.save(policy)

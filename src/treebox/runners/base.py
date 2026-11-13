@@ -32,6 +32,7 @@ from typing import Literal, Protocol, runtime_checkable
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter
+from ..resources import ResourceLimits
 
 
 class PreflightError(RuntimeError):
@@ -97,6 +98,11 @@ class RunnerFacts:
 @runtime_checkable
 class Runner(Protocol):
     name: str
+    # The generic limits (``resources.RESOURCE_NAMES``) this runner can apply
+    # to its sandbox; it maps each one to its own engine. An explicit flag for
+    # a limit outside this set is refused; a config or template default for
+    # one is not applied. The host runner applies none.
+    supported_resources: frozenset[str]
 
     def preflight(self, reporter: Reporter) -> None:
         """Verify this runner's host dependencies before provisioning (also
@@ -113,6 +119,19 @@ class Runner(Protocol):
         outside every sandbox-writable mount; host runners may no-op."""
         ...
 
+    def template_resources(self) -> ResourceLimits:
+        """The limits this runner's sandbox definition sets by itself (the
+        docker runner: the operator template's ``resources`` object and raw
+        ``runArgs`` limits) - the lowest-precedence tier, used only when a new
+        sandbox is created. Runners without a template return no limits."""
+        ...
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        """Refuse, before provisioning, limits the engine would refuse at
+        sandbox creation (the docker runner: more CPUs than the engine has).
+        Raises ``resources.ResourceLimitError``."""
+        ...
+
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
         """Ensure dependencies are installed (cache-backed unless ``cold``)."""
         ...
@@ -123,11 +142,20 @@ class Runner(Protocol):
         lockfile-hash skip that gates ``setup`` — auth is not a cache."""
         ...
 
-    def dry_run_setup(self, wt: Worktree) -> list[str]:
+    def dry_run_setup(
+        self,
+        wt: Worktree,
+        *,
+        cold: bool,
+        source_ref: str | None,
+    ) -> list[str]:
         """The setup commands this runner *would* run, for ``--dry-run``.
 
         ``wt`` may not exist on disk yet (``create --dry-run``); runners that
-        need repository context read ``wt.repo``."""
+        need repository context read ``wt.repo``. ``source_ref`` is the Git
+        revision a new worktree will use; ``None`` means a resumed worktree at
+        ``wt.path``. ``cold`` must select the same cache isolation as ``setup``
+        without creating its disposable cache."""
         ...
 
     def prepare_entry(self, wt: Worktree) -> None:

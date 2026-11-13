@@ -47,11 +47,16 @@ treebox stages no credentials and rejects `--firewall`; the sandbox name is
 recorded in a host-side manifest outside every mount, and `hooks/` is
 mounted read-only inside the writable git dir.
 
-## Names are identity; branches are mutable
+## Worktree paths are identity; branches are mutable { #names-are-identity-branches-are-mutable }
 
-The worktree **name** (the directory leaf) is the permanent identity: the
-docker sandbox bind-mounts the absolute path and a live agent's CWD sits in
-it, so the directory is never renamed. The **branch** is just an attribute.
+The full registered **path** identifies a worktree. Its **name** is the fixed
+directory leaf; different parent directories can contain the same name.
+After selection, `enter` and `teardown` keep that full path for provisioning,
+state access, runner operations, and reporting. See
+[worktree selection](usage.md#enter-come-back-to-a-worktree) for ref matching.
+The Docker sandbox mounts the absolute path and a live agent's working
+directory is there, so the worktree directory is never renamed. The
+**branch** is a mutable attribute.
 An explicit `create NAME` starts on the branch `NAME` itself (slashes kept in
 the branch, flattened to `--` in the directory); a nameless `create` starts
 on a `treebox/<petname>` placeholder expected to be renamed (`git branch -m`)
@@ -83,27 +88,75 @@ dependencies only when they actually changed — and `list` show `fresh` /
 `stale` at a glance. It also records whether setup ever completed: `enter`
 finishes an interrupted setup instead of skipping it as unchanged.
 
-The same private state records the worktree's creation-time choices. For an
-existing worktree, `enter` and `teardown` recover the recorded isolation and
-template instead of drifting to today's config defaults; `enter` also reuses the
-recorded firewall, and it reuses the recorded harness unless a per-session
-harness override is passed. That state is sandbox-writable because the Docker
-runner mounts the git common directory, so it never authorizes destructive
-host cleanup. Before first Docker setup, the runner writes exact per-workspace
-image and volume ownership to
-`<worktree-root>/.containers/<worktree>/treebox-resources.json`, outside every
+That private state holds only *observations* (the lockfile hash and whether
+setup completed). It is sandbox-writable, because the Docker runner mounts the
+git common directory, so it never decides policy and never authorizes
+destructive host cleanup. treebox reads and writes it without following links:
+a symlink planted at the state file reads as "no state", and a write replaces
+the link instead of writing through it. A forged observation can at most make
+`enter` re-run setup under the recorded policy.
+
+### The host-owned record
+
+The worktree's **creation policy** - isolation, firewall, sandbox template,
+harness, base, and the effective
+[resource limits](configuration.md#resource-limits) - lives in a host-owned
+record outside every sandbox mount:
+
+```text
+<worktree-parent>/.records/<name>.json
+```
+
+Here, `<worktree-parent>` is the selected worktree's immediate parent, which
+can be below the configured discovery root (the same parent that holds
+`.locks/` and `.containers/`). `create` writes the record atomically, under the
+worktree lock, before any runner resource depends on it. The record is
+versioned (`schemaVersion`) and bound to the registered worktree path it
+describes (version `2` added `resources`; a version-`1` record still loads
+and means no treebox cap). `enter` and `teardown` read the policy only from this record:
+`enter` reuses the recorded isolation, firewall, and template, and the
+recorded harness unless a per-session `--harness` is passed; a per-session
+`--template` is the operator's override for one session. An explicit
+`--isolation` that disagrees with the recorded mode is a conflict, not an
+override. `teardown` removes the record with the worktree.
+
+A sandboxed agent therefore cannot choose host execution, drop its firewall, or
+point its next sandbox at a template it wrote: none of that is in files it can
+reach. A resumed `create` (an earlier run died before setup finished) must
+restate the recorded policy, so a forged "setup not finished" flag cannot turn a
+plain `create NAME` into a policy change (`RECORD_CONFLICT`).
+
+A missing or invalid record is a classified error with a recovery path
+(`RECORD_MISSING` / `RECORD_INVALID`, exit `5`), never a fallback to the config
+default or to the sandbox-writable state:
+
+- **Legacy worktrees** (created before records existed) have no record. Run
+  `treebox adopt <name> --isolation <host|docker>` (plus `--firewall`,
+  `--template`, `-H`, `--base` as needed) to state how the worktree was
+  created. treebox never promotes the worktree's own state to policy; the
+  operator states it. `teardown <name> --isolation <mode>` also works without a
+  record, and `--skip-container` remains the escape hatch.
+- **Invalid records** (unreadable, an unsupported `schemaVersion`, or bound to
+  another path, for example after the worktree root was moved) are replaced
+  only on purpose, with `treebox adopt <name> --force --isolation <mode>`.
+
+**Host-isolation worktrees** get the same record. They have no sandbox, so the
+agent can reach the record like any other host file; the record is not a
+boundary against a host-run agent, which already has your full user
+privileges. It gives both modes one code path, so the mode of a worktree is
+never read from its git state and a host worktree is never silently treated
+as anything else.
+
+Before first Docker setup, the runner also writes exact per-workspace image
+and volume ownership to
+`<worktree-parent>/.containers/<name>/treebox-resources.json`, outside every
 sandbox mount. `teardown --remove-volumes` validates and trusts only that
 manifest, so it can still remove volumes when the container and user template
 are both gone.
-`teardown` reads that record through the repo's own worktree registration
-rather than the worktree's `.git` pointer, so the recorded choices survive
-even a corrupt worktree whose pointer file is gone.
-An explicit `--isolation` that disagrees with the recorded mode is a conflict,
-not an override.
 
 Older worktrees without a resource manifest remain tear-downable, but volume
 removal is skipped with a warning. The same safe behavior applies if an
-operator manually deletes the `.containers/<worktree>` directory: treebox
+operator manually deletes the rendered config directory: treebox
 does not guess ownership from volume names, current templates, container
 mounts, or sandbox-writable state.
 
@@ -126,6 +179,12 @@ edit the config that defines its own sandbox.**
 - The container template (Dockerfile, `container.json`, firewall setup) is
   **operator-owned** — bundled with treebox or copied to your
   `~/.treebox/templates/`, never read from the target repo.
+- A template **name** is an identifier (letters, digits, `.`, `_`, `-`), never
+  a path: an absolute path or `..` is refused, so a name can only select a
+  directory under the operator-owned locations (`$TREEBOX_TEMPLATE_DIR`, then
+  `~/.treebox/templates/<name>`, then the bundled `default`).
+- The choice of template is in the [host-owned record](#the-host-owned-record),
+  not in sandbox-writable state.
 - It is rendered into a directory *beside* the worktree, outside the container
   mount. Inside the box, the agent simply cannot reach it.
 - The target repo's own container config, treebox config, and setup hooks are
@@ -159,6 +218,6 @@ treebox assumes the caller is often another program:
   entry-ready: a stopped docker sandbox is restarted (firewall re-applied)
   before the command is printed, never dead on replay.
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
-  so racing operations on one name — two `create fix-auth` calls, or a
-  `teardown fix-auth` against a concurrent provision — conflict cleanly (`5`)
-  instead of corrupting or half-removing a worktree.
+  so concurrent operations on the same worktree conflict (exit `5`). Separate
+  worktrees with the same name have separate locks. Explicit batch teardown
+  acquires all target locks before removal; a lock conflict removes nothing.
