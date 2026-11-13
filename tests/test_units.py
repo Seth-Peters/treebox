@@ -1334,7 +1334,7 @@ def test_host_prepare_entry_is_a_noop(tmp_path: Path):
 
 def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir):
     """A labeled container this runner didn't create is an explicit error
-    pointing at teardown — not silently adopted with the wrong
+    pointing at teardown — not silently reused with the wrong
     name/mounts/user."""
     fake = _FakeDocker(ids="abc123\n", name="funny_wozniak")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
@@ -1422,8 +1422,8 @@ def test_reconcile_isolation_and_harness_policy():
     """The remaining rows of the precedence table, at the unit level (the CLI
     paths — conflict exit codes, recorded-harness launches — are pinned by the
     contract and integration suites): recorded isolation wins over the config
-    default; a matching explicit --isolation is fine; a known recorded harness
-    wins unless -H overrides; an unknown recorded harness falls back."""
+    default; a matching explicit --isolation is fine; the recorded harness
+    wins unless -H overrides (an unknown one never parses: RECORD_INVALID)."""
     rec = _rec(isolation="docker", harness="codex")
     out = _reconcile(Config(isolation="host", harness="claude"), rec)
     assert out.isolation == "docker"  # recorded wins over the config default
@@ -1436,10 +1436,6 @@ def test_reconcile_isolation_and_harness_policy():
         Config(isolation="docker", harness="claude"), rec, isolation="docker", harness="claude"
     )
     assert out.isolation == "docker" and out.harness == "claude"
-
-    # Unknown recorded harness falls back to the config default.
-    weird = _rec(isolation="host", harness="aider")
-    assert _reconcile(Config(harness="claude"), weird).harness == "claude"
 
 
 def test_docker_setup_cold_reuse_warns_about_frozen_mounts(tmp_path: Path, fake_common_dir):
@@ -1535,7 +1531,7 @@ def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_co
 
 
 def test_config_rejects_unknown_isolation(tmp_path: Path):
-    """No legacy isolation aliases: a config.toml naming an isolation mode that
+    """No isolation aliases: a config.toml naming an isolation mode that
     doesn't exist fails loudly instead of being silently mapped to another."""
     cfg_file = tmp_path / "config.toml"
     cfg_file.write_text('isolation = "bogus"\n')
@@ -1673,11 +1669,13 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     assert (cfg_dir / "treebox-resources.json").is_file()
 
 
-@pytest.mark.parametrize("config_dir_exists", [True, False], ids=["legacy", "manually-deleted"])
+@pytest.mark.parametrize(
+    "config_dir_exists", [True, False], ids=["config-dir-left", "config-dir-deleted"]
+)
 def test_docker_teardown_without_manifest_never_guesses_volumes(
     tmp_path: Path, config_dir_exists: bool
 ):
-    """A legacy worktree or manually deleted metadata dir is cleaned safely:
+    """A missing manifest (with or without its config dir) is cleaned safely:
     no volume lookup/removal guess, a warning, and any config dir is removed."""
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
@@ -1849,40 +1847,42 @@ def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, 
     assert runner._resource_manifest_file(wt).read_text() == before
 
 
-def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
-    """teardown has no --template flag, so its runner must recover the created-time
-    template from the host-owned record for the non-destructive runner
-    configuration."""
+@pytest.mark.parametrize(
+    ("record_state", "manifest", "want"),
+    [
+        ("docker", False, "docker"),  # the record decides when it is valid
+        ("host", True, "host"),
+        ("missing", True, "docker"),  # no record: the resource manifest decides
+        ("missing", False, "host"),
+        ("invalid", True, "docker"),
+        ("invalid", False, "host"),
+    ],
+)
+def test_teardown_runner_reads_only_host_owned_files(tmp_path, record_state, manifest, want):
+    """teardown is the recovery for a missing or invalid record, so it picks
+    the runner without one: from the record when valid, else from the docker
+    runner's host-owned resource manifest. Never the config default."""
     from treebox import record
     from treebox.cli import _teardown_runner
     from treebox.config import Config
-    from treebox.output import Reporter
     from treebox.resolve import Candidate
 
     work = tmp_path / "work"
     work.mkdir()
-    record.save(
-        record.WorktreeRecord(
-            worktree=work,
-            base="main",
-            isolation="docker",
-            harness="claude",
-            firewall=False,
-            template="hardened",
-        )
-    )
-    cand = Candidate(name="work", branch="treebox/work", path=str(work))
+    if record_state in ("docker", "host"):
+        record.save(_record_for(work, isolation=record_state))
+    elif record_state == "invalid":
+        record.record_path(work).parent.mkdir(parents=True)
+        record.record_path(work).write_text('{"schemaVersion": 2}')
+    if manifest:
+        path = tmp_path / ".containers" / "work" / "treebox-resources.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    cand = Candidate(name="work", branch="work", path=str(work))
 
-    run = _teardown_runner(
-        Reporter(quiet=True),
-        Config(isolation="docker", template="default"),
-        cand,
-        explicit=None,
-        remove_volumes=True,
-        json_out=False,
-    )
-    assert run is not None
-    assert run.config.template == "hardened"  # recovered from the record, not the config default
+    config_default = "host" if want == "docker" else "docker"
+    run = _teardown_runner(Config(isolation=config_default), cand, remove_volumes=True)
+    assert run.name == want
 
 
 def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
@@ -2077,12 +2077,10 @@ def test_files_at_revision_excludes_trees_and_gitlinks(monkeypatch: pytest.Monke
     ) == {"uv.lock"}
 
 
-def test_record_setup_result_roundtrips_and_v1_records_upgrade_to_pending(tmp_path):
-    """The setup result lives in the host-owned record. A version-1 record
-    (policy only) upgrades on read with setup pending - never done - so the
-    next enter runs setup instead of trusting anything else."""
-    import json
-
+def test_record_setup_result_roundtrips(tmp_path):
+    """The setup result lives in the host-owned record, as a required key of
+    its one schema version (a record without it is invalid, see
+    test_record_invalid_contents_are_classified)."""
     from treebox import lifecycle, record
 
     wt = tmp_path / "wts" / "w"
@@ -2095,47 +2093,30 @@ def test_record_setup_result_roundtrips_and_v1_records_upgrade_to_pending(tmp_pa
     ):
         record.save(_record_for(wt, setup=setup))
         assert record.load(wt).setup == setup
-
-    path = record.record_path(wt)
-    data = json.loads(path.read_text())
-    del data["setup"], data["ports"]
-    data["schemaVersion"] = 1
-    path.write_text(json.dumps(data))
-    upgraded = record.load(wt)
-    assert upgraded.setup == lifecycle.SetupResult()  # pending
-    assert upgraded.same_policy(_record_for(wt))
+        assert record.load(wt).same_policy(_record_for(wt))
 
 
-def test_record_port_block_roundtrips_and_v2_records_upgrade_without_one(tmp_path):
-    """Version 3 keeps the copy of the worktree's port block; a version-2
-    record upgrades with none (the next enter reserves one). The block is not
-    policy: a resumed create never conflicts over it."""
+def test_record_port_block_roundtrips(tmp_path):
+    """The record keeps the copy of the worktree's port block, as a required
+    key of its one schema version (null or a base and count; a record without
+    it is invalid, see test_record_invalid_contents_are_classified). The block
+    is not policy: a resumed create never conflicts over it."""
     import dataclasses
-    import json
 
-    from treebox import lifecycle, record
+    from treebox import record
     from treebox.models import PortBlock
 
     wt = tmp_path / "wts" / "w"
     wt.mkdir(parents=True)
-    rec = dataclasses.replace(_record_for(wt), ports=PortBlock(20010, 10))
-    record.save(rec)
-    assert record.load(wt) == rec
-    assert rec.same_policy(_record_for(wt))
-
-    path = record.record_path(wt)
-    data = json.loads(path.read_text())
-    del data["ports"]
-    data["schemaVersion"] = 2
-    data["setup"] = lifecycle.SetupResult.done("h").to_json()
-    path.write_text(json.dumps(data))
-    upgraded = record.load(wt)
-    assert upgraded.ports is None
-    assert upgraded.setup == lifecycle.SetupResult.done("h")
+    for block in (PortBlock(20010, 10), None):
+        rec = dataclasses.replace(_record_for(wt), ports=block)
+        record.save(rec)
+        assert record.load(wt) == rec
+        assert rec.same_policy(_record_for(wt))
 
 
 def test_sandbox_written_state_file_is_never_read(tmp_path, monkeypatch):
-    """The legacy treebox-state.json in the sandbox-writable git dir is inert:
+    """A treebox-state.json in the sandbox-writable git dir is inert:
     a forged "provisioned: true" with a matching hash can make neither list
     report fresh nor enter skip setup - only the host-owned record can."""
     from treebox import lifecycle
@@ -2216,10 +2197,10 @@ def test_record_save_is_atomic(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     [
-        (lambda d: d.update(schemaVersion=4), "schemaVersion"),
+        (lambda d: d.update(schemaVersion=2), "schemaVersion"),
+        (lambda d: d.update(schemaVersion=0), "schemaVersion"),
         (lambda d: d.update(schemaVersion=True), "schemaVersion"),
-        (lambda d: d.update(schemaVersion=1), "unknown key"),  # v1 has no setup
-        (lambda d: d.update(schemaVersion=2), "unknown key"),  # v2 has no ports
+        (lambda d: d.pop("ports"), "missing key"),
         (lambda d: d.update(ports={"base": 20000}), "ports"),
         (lambda d: d.update(ports={"base": "1", "count": 10}), "ports"),
         (lambda d: d.pop("setup"), "missing key"),
@@ -2231,14 +2212,16 @@ def test_record_save_is_atomic(tmp_path, monkeypatch):
         (lambda d: d.update(template="/etc"), "not a template name"),
         (lambda d: d.update(template="../x"), "not a template name"),
         (lambda d: d.update(firewall="yes"), "firewall"),
+        (lambda d: d.update(isolation="bogus"), "unknown isolation mode"),
+        (lambda d: d.update(harness="aider"), "unknown harness"),
         (lambda d: d.update(limits={}), "unknown key"),
         (lambda d: d.pop("isolation"), "missing key"),
     ],
 )
 def test_record_invalid_contents_are_classified(tmp_path, mutate, reason):
     """Anything the reader cannot trust is RecordInvalidError - never a silent
-    default. Unknown keys and versions are refused, so an older treebox never
-    drops a newer policy field."""
+    default. Unknown or missing keys (``setup`` included) and any other
+    schemaVersion are refused: there is one version."""
     import json
 
     from treebox import record

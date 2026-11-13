@@ -175,11 +175,13 @@ Prereq: `fix-auth` worktree from B1 exists.
       Expect: exit 5, `"code": "INVALID_LINKAGE"`; `list --json` shows
       `health: "invalid_linkage"`, `missing: true`; `tb teardown c10 … --force`
       removes the directory and the registration.
-- [ ] **C9 legacy worktree + adopt** — `rm "$ROOT/.records/fix-auth.json"`, then
-      `tb enter fix-auth … --json`
-      Expect: exit 5, `"code": "RECORD_MISSING"`, hint names `treebox adopt`;
-      `list` shows isolation unknown. `tb adopt fix-auth … --isolation host`:
-      exit 0; C1 works again; a second `adopt` is exit 5 `RECORD_EXISTS`.
+- [ ] **C9 no record: recreate** - `tb create e2e-norec … --print`, then
+      `rm "$ROOT/.records/e2e-norec.json"` and `tb enter e2e-norec … --json`
+      Expect: exit 5, `"code": "RECORD_MISSING"`, hint names
+      `treebox teardown e2e-norec` and `treebox create`; nothing launches;
+      `list` shows isolation unknown and `health: "unreadable_state"`.
+      `tb teardown e2e-norec … --force --json` (no extra flag): exit 0, the
+      worktree and its record are gone.
 
 ## D. list
 

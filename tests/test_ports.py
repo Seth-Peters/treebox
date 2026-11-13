@@ -293,26 +293,46 @@ def test_range_exhaustion_is_classified_before_anything_is_provisioned(
     assert len(_ledger(isolated_treebox_home)) == 1
 
 
-def test_enter_reserves_a_block_for_an_older_record_and_keeps_it(
-    repo: Path, tmp_path: Path, hermetic_config: Path, isolated_treebox_home: Path
+@pytest.mark.parametrize(
+    ("damage", "code"),
+    [
+        (lambda path: path.unlink(), "RECORD_MISSING"),
+        # A record without the required ports key does not parse: there is
+        # one schema version and no upgrade.
+        (
+            lambda path: path.write_text(
+                json.dumps({k: v for k, v in json.loads(path.read_text()).items() if k != "ports"})
+            ),
+            "RECORD_INVALID",
+        ),
+    ],
+    ids=["missing", "without-ports"],
+)
+def test_teardown_without_a_usable_record_releases_the_block(
+    repo: Path,
+    tmp_path: Path,
+    hermetic_config: Path,
+    isolated_treebox_home: Path,
+    damage,
+    code: str,
 ) -> None:
-    """A version-2 record (an older treebox) has no block: enter reserves one
-    and records it; every later enter gets the same values."""
+    """A worktree without a usable record cannot be entered, and a plain
+    teardown removes it and releases the block the ledger holds for its path
+    (the ledger, not the record, says which blocks are taken)."""
     root = str(tmp_path / "wts")
-    assert _create(repo, root, "old").exit_code == 0
-    wt = Path(root) / "old"
-    path = record.record_path(wt)
-    data = json.loads(path.read_text())
-    del data["ports"]
-    data["schemaVersion"] = 2
-    path.write_text(json.dumps(data))
-    (isolated_treebox_home / "ports.json").unlink()
+    made = json.loads(_create(repo, root, "gone").stdout)
+    other = json.loads(_create(repo, root, "kept").stdout)
+    damage(record.record_path(Path(root) / "gone"))
 
-    first = json.loads(_run(["enter", "old", "--repo", str(repo), "--root", root, "--json"]).stdout)
-    again = json.loads(_run(["enter", "old", "--repo", str(repo), "--root", root, "--json"]).stdout)
-    assert first["port_base"] == again["port_base"] == 20000
-    assert record.load(wt).ports == PortBlock(20000, 10)
-    assert json.loads(path.read_text())["schemaVersion"] == record.SCHEMA_VERSION
+    entered = _run(["enter", "gone", "--repo", str(repo), "--root", root, "--json"])
+    assert entered.exit_code == EXIT_CONFLICT
+    assert json.loads(entered.stderr)["error"]["code"] == code
+
+    torn = _run(["teardown", "gone", "--repo", str(repo), "--root", root, "--force", "--json"])
+    assert torn.exit_code == 0, torn.stderr
+    assert not (Path(root) / "gone").exists()
+    assert [e["base"] for e in _ledger(isolated_treebox_home)] == [other["port_base"]]
+    assert made["port_base"] != other["port_base"]
 
 
 def test_a_lost_ledger_heals_from_the_record_copy(

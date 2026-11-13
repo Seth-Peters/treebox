@@ -89,8 +89,6 @@ The setup result is host-owned on purpose. The worktree's private git dir
 the git common directory; a sandboxed agent that could write "setup done" there
 could make treebox skip its setup forever or report stale dependencies as
 fresh. treebox therefore reads nothing from that directory for any decision.
-The `treebox-state.json` file older versions wrote there is ignored, and is
-pruned with the worktree as before.
 
 ## Lifecycle: setup and cleanup
 
@@ -102,14 +100,14 @@ decisions from it.
 
 | State | Meaning | Recovery |
 | ----- | ------- | -------- |
-| `pending` | Setup started and did not finish (interrupted), or no result was recorded (a version 1 record, or an adopted worktree). | `enter`, or the same `create`, runs setup again. |
+| `pending` | Setup has not finished: not started yet, or interrupted. | `enter`, or the same `create`, runs setup again. |
 | `failed` | A setup step exited non-zero. The record keeps the step and its exit status; its output is in `<worktree-parent>/.logs/<name>.setup.log`. | `enter`, or the same `create`, runs setup again. |
 | `done` | Setup finished, against the recorded lockfile hash. | `enter` runs setup again only when the lockfile hash changed. |
 
 Transitions: `create` writes `pending` before the worktree exists, then `done`
 or `failed`. `enter` moves `pending` or `failed` (or `done` with a changed
 lockfile hash) to `pending`, runs setup, then records `done` or `failed`.
-`adopt` records `pending`. A failed setup is a failed command (`SETUP_FAILED`,
+A failed setup is a failed command (`SETUP_FAILED`,
 exit `1`); an interrupted one stays `pending`. `list` reports `deps: fresh` or
 `stale` only from `done`.
 
@@ -151,12 +149,13 @@ can be below the configured discovery root (the same parent that holds
 `.locks/` and `.containers/`). `create` writes the record atomically, under the
 worktree lock, before any runner resource depends on it. The record is
 versioned (`schemaVersion`) and bound to the registered worktree path it
-describes. `enter` and `teardown` read the policy only from this record:
-`enter` reuses the recorded isolation, firewall, and template, and the
-recorded harness unless a per-session `--harness` is passed; a per-session
-`--template` is the operator's override for one session. An explicit
-`--isolation` that disagrees with the recorded mode is a conflict, not an
-override. `teardown` removes the record with the worktree.
+describes. `enter` reads the policy only from this record: it reuses the
+recorded isolation, firewall, and template, and the recorded harness unless a
+per-session `--harness` is passed; a per-session `--template` is the
+operator's override for one session. An explicit `--isolation` that disagrees
+with the recorded mode is a conflict, not an override. `teardown` takes the
+isolation mode from the record and removes the record only after the
+worktree and its runner resources are gone.
 The record also keeps a copy of the worktree's [port block](#port-blocks);
 the machine-wide ledger stays the one source of truth for which blocks are
 taken.
@@ -167,19 +166,19 @@ reach. A resumed `create` (an earlier setup did not finish) must restate the
 recorded policy, so a resume can never turn a plain `create NAME` into a policy
 change (`RECORD_CONFLICT`).
 
-A missing or invalid record is a classified error with a recovery path
-(`RECORD_MISSING` / `RECORD_INVALID`, exit `5`), never a fallback to the config
-default or to the sandbox-writable state:
-
-- **Legacy worktrees** (created before records existed) have no record. Run
-  `treebox adopt <name> --isolation <host|docker>` (plus `--firewall`,
-  `--template`, `-H`, `--base` as needed) to state how the worktree was
-  created. treebox never promotes the worktree's own state to policy; the
-  operator states it. `teardown <name> --isolation <mode>` also works without a
-  record, and `--skip-container` remains the escape hatch.
-- **Invalid records** (unreadable, an unsupported `schemaVersion`, or bound to
-  another path, for example after the worktree root was moved) are replaced
-  only on purpose, with `treebox adopt <name> --force --isolation <mode>`.
+**A worktree without a usable record is recreated.** A worktree made by an
+older treebox has no record, and a record that does not parse (another
+`schemaVersion`, an unknown isolation mode or harness, or bound to another
+path, for example after the worktree root was moved) is invalid. `enter`
+refuses both with `RECORD_MISSING` / `RECORD_INVALID` (exit `5`) and launches
+nothing; it never falls back to the config default or to the sandbox-writable
+state. `list` still shows the worktree, with an
+unknown isolation. Fix it with `treebox teardown <name>`, then
+`treebox create` again (`--checkout <branch>` keeps its branch). Teardown
+needs no record: without one, a worktree that has the runner-owned resource
+manifest below is torn down as a docker worktree, and any other as a host
+worktree. The manifest is kept until every docker resource is gone, so an
+incomplete teardown of such a worktree is retried the same way.
 
 **Host-isolation worktrees** get the same record. They have no sandbox, so the
 agent can reach the record like any other host file; the record is not a
@@ -195,11 +194,11 @@ sandbox mount. `teardown --remove-volumes` validates and trusts only that
 manifest, so it can still remove volumes when the container and user template
 are both gone.
 
-Older worktrees without a resource manifest remain tear-downable, but volume
-removal is skipped with a warning. The same safe behavior applies if an
-operator manually deletes the rendered config directory: treebox
-does not guess ownership from volume names, current templates, container
-mounts, or sandbox-writable state.
+If an operator manually deletes the rendered config directory (and with it the
+manifest) of a docker worktree that still has its record, the worktree stays
+tear-downable, but image and volume removal are skipped with a warning:
+treebox does not guess ownership from volume names, current templates,
+container mounts, or sandbox-writable state.
 
 ### Port blocks
 
@@ -217,7 +216,7 @@ $TREEBOX_HOME/ports.lock   the ledger lock
 
 **One source of truth.** Only the ledger says which blocks are taken. Each
 entry names its owner by registered worktree path (and its repo). The record
-(schema version 3) keeps a copy of the worktree's own block, so `list` and
+keeps a copy of the worktree's own block, so `list` and
 the entry commands read it without the lock, but a record never makes a block
 taken: every allocation reads only the ledger, under its lock, and writes it
 atomically (a complete temporary file, `fsync`, then a rename) before the

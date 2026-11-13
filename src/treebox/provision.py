@@ -106,7 +106,7 @@ class BranchInUseError(ProvisionError):
 class BranchConflictError(ProvisionError):
     """The branch an explicit ``create NAME`` would create already exists
     (exit 5, BRANCH_EXISTS). ``create`` promises a fresh branch off
-    origin/<base>; silently adopting an existing one would be a stale-code
+    origin/<base>; silently reusing an existing one would be a stale-code
     hazard — resuming existing work is ``--checkout``'s job."""
 
     def __init__(self, branch: str, where: str) -> None:
@@ -167,18 +167,6 @@ class InvalidLinkageError(ProvisionError):
             "git's stale registration), then create it again."
             if health == "invalid_linkage"
             else f"Remove the stray directory by hand: rm -rf {path}"
-        )
-
-
-class RecordExistsError(ProvisionError):
-    """``adopt`` found a record already in place (exit 5, RECORD_EXISTS)."""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__(f"Worktree '{path.name}' already has a host-owned record.")
-        self.path = record.record_path(path)
-        self.hint = (
-            "Nothing to adopt. To replace the record on purpose, add --force "
-            "(the settings you pass become the worktree's policy)."
         )
 
 
@@ -511,9 +499,9 @@ def _check_resume_policy(
 
     A resumed create (an earlier run did not finish setup) must restate the
     recorded policy, so a resume is never a way to change the policy of an
-    existing worktree. An unreadable record is not overwritten either
-    (``adopt --force`` is the explicit way to replace one). Read-only, so
-    ``--dry-run`` fails exactly like a real run."""
+    existing worktree. An invalid record is not overwritten either (it is
+    RECORD_INVALID: tear the worktree down and create it again). Read-only,
+    so ``--dry-run`` fails exactly like a real run."""
     try:
         prior = record.load(wt.path)
     except record.RecordMissingError:
@@ -664,10 +652,9 @@ def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictErr
         return conflict  # the default hint (enter / teardown / pick another name) applies
     if health == "unreadable_state":
         conflict.hint = (
-            f"It has no usable host-owned record (a worktree from an older treebox?). "
-            f"Restate how it was created: treebox adopt {wt.name} --isolation "
-            f"<host|docker> - then enter it - or tear it down: treebox teardown "
-            f"{wt.name} --isolation <host|docker>."
+            "It has no usable host-owned record (missing or invalid). Tear it down "
+            f"and create it again: treebox teardown {wt.name}, then treebox create "
+            "(add --checkout <branch> to keep its branch)."
         )
     elif health == "invalid_linkage":
         conflict.hint = (
@@ -912,8 +899,9 @@ def enter(
     rec = record.load(wt.path)
     branch = git.branch_for_path(repo, str(wt.path)) or ""
     wt = Worktree.at(repo, path, branch=branch, base=base)
-    # The ledger entry first, then the record copy (a record from an older
-    # treebox has none: this reserves its first block).
+    # The ledger entry first, then the record copy. The ledger normally has
+    # the recorded block; if it lost the entry, this takes the block back (or
+    # a free one when another worktree holds it now).
     wt, _ = _reserve_ports(config, wt, rec.ports, reporter)
     if rec.ports != wt.ports:
         rec = dataclasses.replace(rec, ports=wt.ports)
@@ -933,20 +921,6 @@ def enter(
         reporter.note("deps", "unchanged · skipping setup")
 
     return Outcome(wt, runner.entry_command(wt, harness=harness, args=args), created=False)
-
-
-def adopt(repo: str, path: Path, policy: record.WorktreeRecord, *, force: bool) -> None:
-    """Write the host-owned record for an existing worktree that has none (a
-    legacy worktree from before records existed) or, with ``force``, replace
-    an existing one. This is the operator's explicit migration step: the
-    policy comes only from what the operator states, never from the
-    worktree's sandbox-writable state. The setup result starts pending, so
-    the next ``enter`` runs setup under the adopted policy. Callers hold the
-    worktree lock."""
-    _require_usable(repo, path)
-    if record.exists(path) and not force:
-        raise RecordExistsError(path)
-    record.save(dataclasses.replace(policy, setup=lifecycle.SetupResult()))
 
 
 def _require_usable(repo: str, path: Path) -> None:

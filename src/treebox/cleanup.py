@@ -53,8 +53,8 @@ def cleanup_one(
 ) -> CleanupResult:
     """Remove resources, the worktree, then its record. Return what remains.
 
-    A missing runner means its cleanup was explicitly skipped or no recorded
-    isolation mode survives. A runner failure keeps the worktree and record.
+    A missing runner means its cleanup was explicitly skipped
+    (``--skip-container``). A runner failure keeps the worktree and record.
     Git refusal never falls back to filesystem deletion. Branch deletion is
     best effort after cleanup, as it is not part of resource ownership.
     """
