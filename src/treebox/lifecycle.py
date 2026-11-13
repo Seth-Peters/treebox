@@ -5,8 +5,8 @@ record (``record.py``), outside every sandbox mount, so a sandboxed agent can
 never mark its own setup done or its dependencies fresh::
 
     state     meaning                                  recovery
-    pending   setup started and did not finish         enter / repeated create
-              (interrupted, or no result recorded)     runs setup again
+    pending   setup has not finished                   enter / repeated create
+              (not started yet, or interrupted)        runs setup again
     failed    a setup step exited non-zero             enter / repeated create
               (step, exit status kept)                 runs setup again
     done      setup finished against lockfileHash      enter re-runs setup only
@@ -15,7 +15,6 @@ never mark its own setup done or its dependencies fresh::
     create:  (no record) -> pending -> done | failed
     enter:   pending | failed -> pending -> done | failed
              done (hash changed) -> pending -> done | failed
-    adopt:   any -> pending   (an adopted worktree gets setup on next enter)
 
 ``list`` reports ``fresh`` / ``stale`` only from a ``done`` result: a matching
 hash alone never makes a worktree fresh.

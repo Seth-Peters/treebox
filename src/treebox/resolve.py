@@ -1,6 +1,6 @@
 """Resolve a user-supplied ``<ref>`` to a worktree.
 
-``enter``, ``adopt`` and ``teardown`` accept a worktree name, a branch, a
+``enter`` and ``teardown`` accept a worktree name, a branch, a
 unique substring of either, or an absolute worktree path - resolved live
 from ``git worktree list --porcelain`` (the branch is a mutable attribute;
 only git knows the current one).

@@ -77,7 +77,7 @@ for resuming work or reviewing a PR. The worktree's name derives from the
 branch (`feature/auth` → `feature--auth`) unless you pass `NAME` too. It is
 also the deliberate way to resume a branch you own: `create NAME` for a branch
 that already exists (locally or on origin) is a loud `BRANCH_EXISTS` conflict,
-never a silent adoption of old work.
+never a silent reuse of old work.
 
 Sandbox any of these by picking docker isolation:
 
@@ -293,7 +293,7 @@ $ treebox list
 Sorted by recency — the worktree you want is almost always the one that just
 committed. The **name** is the stable handle; the **branch** is read live.
 A worktree's **isolation** is read from its host-owned record;
-legacy worktrees (no record yet - see [`adopt`](#adopt-record-a-legacy-worktree))
+worktrees without a record (for example made by an older treebox)
 or worktrees with an invalid record show `unknown`
 instead of being mislabeled with the current config default. The muted
 **Root** footer shows the discovery root. It does not show the intermediate
@@ -430,46 +430,30 @@ dirty worktrees either way.) The chooser is interactive-only: under `--json`,
 `teardown` is also the recovery path for a **corrupt** worktree - a registered
 directory whose `.git` pointer file is gone (say, after an interrupted removal
 by hand). Git commands inside such a directory silently answer for the *main*
-checkout, so `create` and `enter` both refuse it loudly (exit `5`,
-`error.code: "SLUG_CONFLICT"`) with a hint pointing here rather than running
+checkout, so `create` and `enter` both refuse it loudly (exit `5`;
+`error.code` is `"SLUG_CONFLICT"` for `create` and `"INVALID_LINKAGE"` for
+`enter`) with a hint pointing here rather than running
 setup or an agent against your real checkout. `teardown` instead verifies the
 worktree's git linkage before asking whether it is dirty: a corrupt worktree is never blocked as "dirty" just because your
 main checkout has uncommitted changes. It takes the normal confirmation path
 instead (the interactive prompt, or `--yes` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
 touching the main checkout's files. Container cleanup survives the corruption
-too: teardown reads the worktree's isolation and template from its host-owned
+too: teardown reads the worktree's isolation mode from its host-owned
 record, which lives beside the worktree and does not depend on the `.git`
 pointer, so a corrupt docker worktree is still torn down with the runner it was
 created with. Volume ownership comes separately from the host-owned resource
 manifest and is never read from sandbox-writable state. Teardown removes the
-record with the worktree.
+record only after the worktree and its runner resources are gone.
 
-If a worktree's recorded isolation mode is unknown, or the worktree has no
-usable record (`RECORD_MISSING` / `RECORD_INVALID`), teardown refuses it as a
-conflict rather than guessing how to drive its container - the same stance
-`enter` takes. Pass `--isolation <mode>` to name the mode yourself, or
-`--skip-container` to remove the tree and its branch anyway and clear any
-leftover container yourself.
-
-## `adopt` - record a legacy worktree
-
-```bash
-treebox adopt brave-otter --isolation docker --firewall --template node
-treebox adopt brave-otter --isolation host -H codex
-treebox adopt moved-tree --isolation docker --force   # replace an invalid record
-```
-
-Worktrees created by an older treebox have no
-[host-owned record](how-it-works.md#the-host-owned-record), so `enter` and
-`teardown` refuse them with `RECORD_MISSING` (exit `5`). `adopt` is the
-migration step: you state how the worktree was created, and treebox writes the
-record (atomically, under the worktree lock). `--isolation` is required; the
-other options default to your config, exactly as for `create`. treebox never
-reads the policy from the worktree's own state, because a sandboxed agent can
-write that state. A worktree that already has a record is `RECORD_EXISTS`;
-`--force` replaces it (also the recovery for `RECORD_INVALID`, for example after
-the worktree root was moved). `--json` prints the recorded policy.
+`teardown` is also the recovery for a worktree without a usable record
+(`RECORD_MISSING` / `RECORD_INVALID` on `enter`, for example one made by an
+older treebox): it needs no extra flag. Without a record, a worktree that has
+the runner-owned resource manifest is torn down as a docker worktree (its
+container, image and manifest go too), and any other as a host worktree. Then
+`treebox create` it again. The dirty-worktree and confirmation rules above
+apply as usual, and so does `TEARDOWN_INCOMPLETE`: the manifest is kept until
+every docker resource is gone, so the same plain `teardown` retries.
 
 ## `doctor` — is this host ready?
 
@@ -578,7 +562,6 @@ Current success payloads:
 | `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands`, `warnings` |
 | `list --json` | `schemaVersion`, `worktrees` |
 | `teardown --json` | `schemaVersion`, `worktrees`, `warnings` |
-| `adopt --json` | `schemaVersion`, `name`, `worktree_path`, `record`, `warnings` |
 | `doctor --json` | `schemaVersion`, `ok`, `isolation`, `checks`, `advisories` |
 
 `warnings` is a list of strings: every warning the run printed (or, under
@@ -670,18 +653,16 @@ you want it live.
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
-| `INVALID_LINKAGE` | `5` | `enter` / `adopt` target's `.git` pointer is missing or does not lead to its git registration (`health: invalid_linkage`) - recover with `treebox teardown <name>`. |
+| `INVALID_LINKAGE` | `5` | `enter` target's `.git` pointer is missing or does not lead to its git registration (`health: invalid_linkage`) - recover with `treebox teardown <name>`. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes (checked before the prompt and again right before removal). |
 | `WORKTREE_LOCKED` | `5` | Teardown target is locked with `git worktree lock`; treebox never removes it (also with `--force`). Unlock it first. |
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. Also raised, rarely, when the repository lock that parallel `create` / `teardown` calls queue on has been held for over five minutes: another operation is stuck, not merely busy. |
-| `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (a record from another treebox version, or hand-edited). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
-| `RECORD_MISSING` | `5` | The worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (created by an older treebox, or the record was deleted) - `treebox adopt <name> --isolation <mode>`, or `teardown <name> --isolation <mode>`. |
-| `RECORD_INVALID` | `5` | The host-owned record cannot be trusted (unreadable, unsupported `schemaVersion`, or bound to another path) - `treebox adopt <name> --force --isolation <mode>`. |
+| `RECORD_MISSING` | `5` | `enter`: the worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (made by an older treebox, or the record was deleted) - `treebox teardown <name>`, then `treebox create` again. |
+| `RECORD_INVALID` | `5` | `enter` / resumed `create`: the host-owned record does not parse (another `schemaVersion`, an unknown isolation mode or harness, or bound to another path) - `treebox teardown <name>`, then `treebox create` again. |
 | `RECORD_CONFLICT` | `5` | A resumed `create` of a half-built worktree asks for different settings than its record holds - re-run with the recorded settings from the hint, or tear it down. |
-| `RECORD_EXISTS` | `5` | `adopt` found a record already in place - pass `--force` to replace it. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |

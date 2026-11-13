@@ -40,7 +40,7 @@ client, no daemon and no queue.
   leave the worker by the agent pushing from inside its sandbox, as on a
   laptop; the coordinator never needs the files. (The alternative, the
   coordinator fetching results over SSH, is not pursued.)
-- Adopt a transport seam only when a concrete requirement needs the
+- Add a transport seam only when a concrete requirement needs the
   provisioning to happen where the agent does not run.
 
 **Consequences.** Treebox owns worktree and runner isolation. The repository
@@ -49,7 +49,7 @@ connection, obtaining the repository on the worker, and keeping a request
 alive when the connection drops. treebox adds only what this contract cannot
 be met without:
 
-- an **absolute worktree path as an exact ref** for `enter`, `adopt` and
+- an **absolute worktree path as an exact ref** for `enter` and
   `teardown`, so a retried request can never act on another task (a name ref
   falls back to a substring match, see [below](#requests-and-results));
 - a docker launch whose sandbox **stopped or restarted while the agent ran**
