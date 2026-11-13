@@ -853,8 +853,20 @@ class DockerRunner:
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
 
+        started = self._run_started(slug)
         code, cancelled = run_agent(argv, stop=stop)
         if cancelled is None:
+            if code != 0 and self._run_started(slug) != started:
+                # `docker exec` ends when its container stops or restarts (an
+                # engine restart, `docker restart`, a worker shutdown) with a
+                # status the agent never returned. Passing it on as the
+                # agent's exit would make a lost sandbox look like a finished
+                # task, so it is a treebox failure.
+                raise RuntimeError(
+                    f"The sandbox of '{wt.name}' stopped or restarted while the agent "
+                    f"ran (docker exec exited {code}): the agent's result is unknown. "
+                    f"Start the agent again: treebox enter {wt.name}"
+                )
             self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
             return code
         # The local docker CLI can end before the agent in the container does
@@ -892,6 +904,16 @@ class DockerRunner:
                 signal_name(signum).removeprefix("SIG"),
             ]
         )
+
+    def _run_started(self, slug: str) -> str | None:
+        """When the container's current run started (``State.StartedAt``), or
+        None when it is not running or the engine is unreachable. A different
+        value after an agent session means the session's container is gone."""
+        out = self._engine(
+            ["inspect", slug, "--format", "{{if .State.Running}}{{.State.StartedAt}}{{end}}"]
+        )
+        started = out.stdout.strip() if out.returncode == 0 else ""
+        return started or None
 
     def _agent_alive(self, user: str, slug: str, pidfile: str) -> bool:
         return (

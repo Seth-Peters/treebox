@@ -104,6 +104,7 @@ Module map:
   resolver, so customizing a docker sandbox never needs a `python -c` reach
   into the package. `enter`/`teardown` resolve a ref as
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
+  An absolute path is an exact ref (only the worktree registered there).
   `create` and `enter` share `_run_session` for runner preflight, the
   worktree lock (see `locking.py`), provision error classification, and the final
   `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
@@ -111,7 +112,8 @@ Module map:
   The launch fork is the unattended contract: `_require_agent` fails a launch
   before provisioning (`HARNESS_MISSING`; `LOGIN_MISSING` when unattended),
   the agent's exit code passes through and a non-zero one is named in one
-  final stderr line (`AGENT_EXIT_PREFIX`), and a cancel signal is
+  final stderr line (`AGENT_EXIT_PREFIX`) - except when the docker sandbox
+  stopped or restarted under the agent, which is a runtime error, and a cancel signal is
   `CANCELLED` (`128 + signal`). Runners launch through `system.run_agent`,
   which passes SIGINT / SIGTERM / SIGHUP on to the agent (the docker runner
   signals the agent's process group inside the container) and kills it after
@@ -276,7 +278,10 @@ Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud
 backends — anywhere the agent's filesystem ≠ the host's — would first need a
 filesystem-transport seam that deliberately does not exist yet (no adapter
-needs path translation today, so building it would be indirection).
+needs path translation today, so building it would be indirection). Remote
+machines are served the other way: the whole lifecycle runs on the worker,
+driven over SSH by an external coordinator (`docs/remote-workers.md`, the
+architecture decision).
 
 ## Invariants to preserve
 
