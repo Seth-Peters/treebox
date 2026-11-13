@@ -97,7 +97,7 @@ Module map:
   `.containers/<worktree>/treebox-resources.json` manifest outside the
   sandbox mount, never in sandbox-writable worktree state.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
-  adopt <ref> / list / teardown <ref>... / template <init|list|path> / doctor / version`
+  list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of
   `template list`). The `template` sub-app
   scaffolds and inspects operator-owned sandbox templates via `assets.py`'s
@@ -149,21 +149,23 @@ Module map:
 - **`record.py`** is the host-owned worktree record: the authority for a
   worktree's creation policy (isolation, firewall, template, harness, base),
   at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
-  Versioned (`schemaVersion`; unknown keys and versions are refused), bound to
-  the registered worktree path, written atomically and only under the
-  worktree lock - by `create` before any runner resource depends on it, and
-  by `adopt` (the operator's explicit migration step for legacy worktrees).
+  One schema version (`schemaVersion`; unknown or missing keys, other
+  versions, and unknown isolation/harness names are refused),
+  bound to the registered worktree path, written atomically by `create`
+  under the worktree lock before any runner resource depends on it.
   API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
-  `save(record)`, `remove(path)`, `record_path(path)`. To extend it, add a
-  field to `WorktreeRecord`, bump `SCHEMA_VERSION`, and teach `_parse` to
-  upgrade older versions. A missing or invalid record is a classified error
-  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) with an `adopt` recovery
-  path, never a fallback to config defaults. Besides the policy it holds the
-  host-observed `setup` result (version 2; a version 1 record upgrades with
-  setup `pending`): a sandbox that could mark its own setup done could make
-  treebox skip setup forever or report stale deps fresh, so nothing in the
-  sandbox-writable git dir is read for any decision (the legacy
-  `treebox-state.json` there is ignored).
+  `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. To
+  extend it, add a field to `WorktreeRecord` as a required key of the one
+  schema version. On `enter`, a missing or invalid record is a classified
+  error (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to
+  recreate the worktree (`teardown`, then `create`), never a fallback to
+  config defaults. `teardown` needs no record: without one it picks the
+  docker runner when the runner-owned resource manifest exists
+  (`runners.docker.has_resource_manifest`), else the host runner. Besides the
+  policy the record holds the host-observed `setup` result (a required key):
+  a sandbox that could mark its own setup done could make treebox skip setup
+  forever or report stale deps fresh, so nothing in the sandbox-writable git
+  dir is read for any decision.
 - **`lifecycle.py`** holds the **setup model** (`SetupResult`: `pending` / `failed` /
   `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,
   `resumable` whether a same-name `create` finishes it, `freshness` what
@@ -171,11 +173,12 @@ Module map:
   (`SETUP_FAILED`, exit 1, output in `<parent>/.logs/<leaf>.setup.log`).
 - **`cleanup.py`** owns one worktree's cleanup through `cleanup_one`: runner
   resources, then the worktree and git registration, then the ownership record.
-  A failed step keeps the resources and records a retry needs. Git refusal
-  never falls back to filesystem deletion. `CleanupResult` returns completed
-  effects and remaining resources. Incomplete cleanup fails with
-  `TEARDOWN_INCOMPLETE` (exit 1); the same command retries.
-  The CLI owns batch validation, locking,
+  A failed step keeps the resources and records a retry needs (the record,
+  and the docker resource manifest that picks the runner when the record is
+  missing or invalid). Git refusal never falls back to filesystem deletion.
+  `CleanupResult` returns completed effects and remaining resources.
+  Incomplete cleanup fails with `TEARDOWN_INCOMPLETE` (exit 1); the same
+  command retries. The CLI owns batch validation, locking,
   confirmation and result rendering; runner adapters own their resources.
   Worktree health (`healthy`, `directory_missing`,
   `invalid_linkage`, `unregistered`, `unreadable_state`) is classified once,

@@ -59,10 +59,11 @@ command-line flag  >  config.toml  >  built-in default
 For an existing worktree, `enter` and `teardown` also read the worktree's
 [host-owned record](how-it-works.md#the-host-owned-record) of its creation
 policy. Recorded isolation wins over the config default, and a conflicting
-explicit `--isolation` exits `5`; `enter` always reuses the recorded firewall,
-while recorded harness and template beat config defaults unless `--harness` or
-`--template` is passed. A worktree without a usable record is an error with a
-recovery path (`treebox adopt`), never a fallback to the config default. For
+explicit `enter --isolation` exits `5`; `enter` always reuses the recorded
+firewall, while recorded harness and template beat config defaults unless
+`--harness` or `--template` is passed. `enter` refuses a worktree without a
+usable record (tear it down and create it again), never falling back to the
+config default. For
 Docker teardown ownership and missing-manifest behavior, see the
 [runner-owned resource manifest](how-it-works.md#the-host-owned-record).
 
