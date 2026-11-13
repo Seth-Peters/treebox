@@ -80,7 +80,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from .. import assets, git, system
 from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
-from ..models import Worktree, derive_name, expand_user
+from ..models import Worktree, derive_name, expand_user, is_valid_name
 from ..output import Reporter, StepError
 from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
 
@@ -740,15 +740,14 @@ class DockerRunner:
             branch = git.branch_for_path(wt.repo, str(wt.path))
         except git.GitError:
             branch = None
-        if branch:
+        if branch and (derive_name(branch) == wt.name or is_valid_name(wt.name)):
             location = ["--repo", wt.repo, "--root", str(wt.path.parent)]
-            teardown = shlex.join(["treebox", "teardown", wt.name, *location])
-            name_args = [] if derive_name(branch) == wt.name else [wt.name]
+            teardown = shlex.join(["treebox", "teardown", *location, "--", wt.name])
+            name_args = [] if derive_name(branch) == wt.name else ["--", wt.name]
             create = shlex.join(
                 [
                     "treebox",
                     "create",
-                    *name_args,
                     "--checkout",
                     branch,
                     *location,
@@ -759,9 +758,15 @@ class DockerRunner:
                     "--firewall" if self.config.firewall else "--no-firewall",
                     "--harness",
                     self.config.harness,
+                    *name_args,
                 ]
             )
             hint += f"Then re-create: {teardown} && {create}"
+        elif branch:
+            hint += (
+                "Keep the worktree and its data intact. The CLI cannot re-create "
+                f"'{wt.path}' on branch '{branch}'. Repair the sandbox manually."
+            )
         else:
             hint += "Save current work on a branch before you re-create the sandbox."
         return FirewallError(

@@ -1327,7 +1327,7 @@ def test_docker_prepare_entry_firewall_failure_is_classified(
     # Fail-closed rules block the allowlist fetch, so another entry cannot
     # recover: the hint points at a fresh container.
     assert raised.value.hint is not None
-    assert f"treebox teardown {wt.name}" in raised.value.hint
+    assert "treebox teardown" in raised.value.hint
 
 
 def test_docker_setup_firewall_failure_is_classified(

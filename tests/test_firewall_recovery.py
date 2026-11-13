@@ -85,13 +85,15 @@ def _git(path: Path, *args: str) -> str:
 
 @pytest.mark.parametrize("firewall", [False, True])
 @pytest.mark.parametrize(
-    ("create_args", "branch", "renamed"),
+    ("create_args", "branch", "renamed", "recoverable"),
     [
-        (["fix-auth"], "fix-auth", None),
-        (["feature/auth"], "feature/auth", None),
-        (["feature/auth"], "feature/auth", "fix/renamed'auth"),
-        (["--checkout", "Feature/Auth"], "Feature/Auth", None),
-        (["custom-name", "--checkout", "Feature/Auth"], "Feature/Auth", None),
+        (["fix-auth"], "fix-auth", None, True),
+        (["feature/auth"], "feature/auth", None, True),
+        (["feature/auth"], "feature/auth", "fix/renamed'auth", True),
+        (["--checkout", "Feature/Auth"], "Feature/Auth", None, True),
+        (["custom-name", "--checkout", "Feature/Auth"], "Feature/Auth", None, True),
+        (["--checkout", "Feature/Auth"], "Feature/Auth", "feature/auth", False),
+        (["--checkout", "treebox/-auth"], "treebox/-auth", "feature/auth", True),
     ],
 )
 def test_firewall_recovery_restores_existing_work_and_choices(
@@ -104,6 +106,7 @@ def test_firewall_recovery_restores_existing_work_and_choices(
     create_args: list[str],
     branch: str,
     renamed: str | None,
+    recoverable: bool,
 ):
     home = tmp_path / "home"
     template = home / "templates" / "locked"
@@ -142,29 +145,51 @@ def test_firewall_recovery_restores_existing_work_and_choices(
     _git(wt, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-m", "existing work")
     commit = _git(wt, "rev-parse", "HEAD")
     if renamed:
+        _git(wt, "branch", "-m", "temporary-recovery")
         _git(wt, "branch", "-m", renamed)
     expected_branch = renamed or branch
+    if not recoverable:
+        (wt / "uncommitted.txt").write_text("uncommitted work must survive\n")
     hermetic_config.write_text(
         f'firewall = {"false" if firewall else "true"}\ntemplate = "default"\nharness = "claude"\n'
     )
     failure = docker_cli.with_suffix(".fail")
     failure.touch()
+    recorded_before = state.load(wt)
+    container_before = docker_cli.read_text()
 
-    entered = _run(["enter", wt.name, *location, "--json"], tmp_path)
+    entered = _run(["enter", *location, "--json", "--", wt.name], tmp_path)
 
     assert entered.returncode == 1, entered.stderr
     assert entered.stdout == ""
     error = json.loads(entered.stderr)["error"]
     assert error["code"] == "FIREWALL_FAILED"
+    if not recoverable:
+        assert "Keep the worktree and its data intact" in error["hint"]
+        assert str(wt) in error["hint"]
+        assert expected_branch in error["hint"]
+        assert "treebox teardown" not in error["hint"]
+        assert "Then re-create:" not in error["hint"]
+        template_command = error["hint"].split("(", 1)[1].split(")", 1)[0]
+        inspected = _run(shlex.split(template_command)[1:], tmp_path)
+        assert inspected.returncode == 0, inspected.stderr
+        assert inspected.stdout.strip() == str(template)
+        assert _git(wt, "branch", "--show-current") == expected_branch
+        assert _git(wt, "rev-parse", "HEAD") == commit
+        assert (wt / "work.txt").read_text() == "existing work must survive\n"
+        assert (wt / "uncommitted.txt").read_text() == "uncommitted work must survive\n"
+        assert state.load(wt) == recorded_before
+        assert docker_cli.read_text() == container_before
+        return
     recovery = error["hint"].split("re-create: ", 1)[1]
     teardown, create = [shlex.split(command) for command in recovery.split(" && ")]
     assert teardown[0] == create[0] == "treebox"
     failure.unlink()
 
-    removed = _run([*teardown[1:], "--force", "--json"], tmp_path)
+    removed = _run([teardown[1], "--force", "--json", *teardown[2:]], tmp_path)
     assert removed.returncode == 0, removed.stderr
     assert not wt.exists()
-    restored = _run([*create[1:], "--json"], tmp_path)
+    restored = _run([create[1], "--json", *create[2:]], tmp_path)
 
     assert restored.returncode == 0, restored.stderr
     recovered = json.loads(restored.stdout)
