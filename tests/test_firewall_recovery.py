@@ -57,7 +57,7 @@ elif command == "exec" and "init-firewall.sh" in " ".join(args):
 elif command == "rm":
     state.pop("name", None)
     path.write_text(json.dumps(state))
-elif command not in {"info", "build", "exec", "rmi", "ps"}:
+elif command not in {"info", "build", "exec", "rmi", "ps", "image", "volume"}:
     sys.exit("Unexpected Docker command: " + repr(args))
 """
     )

@@ -9,9 +9,8 @@ mount, beside the lock and the docker runner's config dir::
     <worktree parent>/.records/<worktree leaf>.json
 
 Only host-side treebox writes it: ``create`` writes it under the worktree
-lock, before any runner resource depends on it. The sandbox-writable state in
-``state.py`` keeps only observations (lockfile hash, setup progress) and is
-never promoted to authority.
+lock, before any runner resource depends on it. Nothing in the
+sandbox-writable git dir is read for any decision.
 
 The record is bound to the registered worktree path it describes: a record
 whose ``worktree`` names another path (a copied or moved file) is invalid.
@@ -25,16 +24,23 @@ Module API (what later features extend)::
     record.save(dataclasses.replace(rec, ...)) # atomic replace
     record.remove(path)                        # on teardown
 
-There is one schema version and no upgrade path. The record format has never
-been released, so a new field is a new required key of that one version: add
-it to ``WorktreeRecord`` and do not bump ``SCHEMA_VERSION``. A record with
-another version or an unknown key is invalid, so a worktree made by another
-treebox version is torn down and created again, never reinterpreted.
+There is one schema version. The record format has never
+been released, so extending it means: add a field to ``WorktreeRecord`` as a
+required key of that version, with no ``SCHEMA_VERSION`` bump and no upgrade
+path. A record with another
+version, an unknown key or a missing key is invalid, so a worktree made by
+another treebox version is torn down and created again, never reinterpreted.
+
+Besides the policy, the record holds the host-observed result of the last
+setup (``setup``, see the setup model in ``lifecycle.py``): a sandbox that
+could mark its own setup done could make treebox skip setup forever or report
+stale dependencies as fresh, so that fact is host-owned too.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import tempfile
@@ -43,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from .harnesses import VALID_HARNESSES
+from .lifecycle import SetupResult, setup_log_path
 from .models import is_valid_template_name, same_path
 from .runners import VALID_ISOLATION
 
@@ -52,7 +59,7 @@ SCHEMA_VERSION = 1
 RECORD_DIR = ".records"
 
 _KEYS = frozenset(
-    {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template"}
+    {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template", "setup"}
 )
 
 
@@ -62,7 +69,8 @@ class WorktreeRecord:
 
     ``isolation`` and ``harness`` are registry names; ``template`` is a
     template identifier (``models.is_valid_template_name``); ``firewall`` is
-    always a real bool (``False`` for host worktrees)."""
+    always a real bool (``False`` for host worktrees). ``setup`` is not
+    policy: it is the result of the last setup attempt (``lifecycle.py``)."""
 
     worktree: Path
     base: str
@@ -70,6 +78,11 @@ class WorktreeRecord:
     harness: str
     firewall: bool
     template: str
+    setup: SetupResult = dataclasses.field(default_factory=SetupResult)
+
+    def same_policy(self, other: WorktreeRecord) -> bool:
+        """Whether ``other`` states the same creation policy (setup aside)."""
+        return dataclasses.replace(self, setup=other.setup) == other
 
 
 class RecordError(RuntimeError):
@@ -155,6 +168,10 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         raise _invalid(worktree, path, f"template {data['template']!r} is not a template name")
     if not same_path(data["worktree"], worktree):
         raise _invalid(worktree, path, f"it is bound to worktree {data['worktree']!r}")
+    try:
+        setup = SetupResult.from_json(data["setup"])
+    except ValueError as exc:
+        raise _invalid(worktree, path, str(exc)) from exc
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
@@ -162,6 +179,7 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         harness=data["harness"],
         firewall=data["firewall"],
         template=data["template"],
+        setup=setup,
     )
 
 
@@ -179,6 +197,7 @@ def save(rec: WorktreeRecord) -> None:
         "harness": rec.harness,
         "firewall": rec.firewall,
         "template": rec.template,
+        "setup": rec.setup.to_json(),
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -194,6 +213,8 @@ def save(rec: WorktreeRecord) -> None:
 
 
 def remove(worktree: Path) -> None:
-    """Delete the record for ``worktree`` (teardown). Missing is fine."""
-    with contextlib.suppress(FileNotFoundError):
-        record_path(worktree).unlink()
+    """Delete the record for ``worktree`` and its setup log (the last step of
+    a complete teardown). Missing is fine."""
+    for path in (record_path(worktree), setup_log_path(worktree)):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()

@@ -29,14 +29,15 @@ from rich.text import Text
 from . import (
     __version__,
     assets,
+    cleanup,
     forge,
     git,
+    lifecycle,
     locking,
     names,
     provision,
     record,
     resolve,
-    state,
     status,
     system,
 )
@@ -85,8 +86,9 @@ EXIT_CONFLICT = 5  # already exists / uncommitted changes / lock held
 SCHEMA_VERSION = 1
 
 _EPILOG = (
-    "Exit codes: 0 ok · 1 runtime/doctor hard-check · 2 usage · "
-    "3 not-found · 4 auth/permission · 5 conflict (exists/locked/dirty)."
+    "Exit codes: 0 ok · 1 runtime (incl. failed setup, incomplete teardown)/doctor "
+    "hard-check · 2 usage · 3 not-found · 4 auth/permission · 5 conflict "
+    "(exists/locked/dirty)."
 )
 
 app = typer.Typer(
@@ -399,6 +401,10 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_PERMISSION, "FETCH_FAILED", hint)
     if isinstance(exc, provision.SlugConflictError):
         return _ErrorInfo(EXIT_CONFLICT, "SLUG_CONFLICT", exc.hint)
+    if isinstance(exc, provision.InvalidLinkageError):
+        return _ErrorInfo(EXIT_CONFLICT, "INVALID_LINKAGE", exc.hint)
+    if isinstance(exc, provision.SetupFailedError):
+        return _ErrorInfo(EXIT_ERROR, "SETUP_FAILED", exc.hint)
     if isinstance(exc, record.RecordMissingError):
         return _ErrorInfo(EXIT_CONFLICT, "RECORD_MISSING", _record_hint(exc))
     if isinstance(exc, record.RecordInvalidError):
@@ -620,6 +626,10 @@ def create(
     (git branch -m <type>/<short-name>, e.g. feature/user-auth, fix/login-race,
     chore/bump-deps), then push. Every worktree gets a pre-push guard that
     keeps treebox/* refs un-pushable.
+
+    A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
+    exit status, and the file with its output). The worktree is kept and
+    marked unfinished; `treebox enter NAME` or the same create retries setup.
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -770,7 +780,11 @@ def enter(
         None, help="Extra args passed to the agent (after --)."
     ),
 ) -> None:
-    """Re-launch the agent in an existing worktree; refresh .env and re-sync deps if changed."""
+    """Re-launch the agent in an existing worktree; refresh .env and re-sync deps if changed.
+
+    An unfinished or failed setup runs again; if a setup step fails, enter
+    fails too (exit 1, SETUP_FAILED) and the next enter retries it.
+    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -917,28 +931,28 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         # listed (or offered by the teardown chooser).
         if same_path(wt_path, repo_path):
             continue
-        # A registration whose dir is gone (git-prunable, or removed under us)
-        # must never be shelled into — that would crash list/teardown on a path
-        # that isn't there. Surface it as `missing` so teardown can prune it.
-        missing = rec.prunable or not wt_path.is_dir()
+        # A registration whose dir is gone, or whose .git pointer no longer
+        # leads to it, must never be shelled into: git would crash on the
+        # missing path or act on the main checkout. `missing` keeps its old
+        # meaning for those two health values so teardown can prune them.
+        health = provision.worktree_health(repo_path, wt_path)
+        missing = health in ("directory_missing", "invalid_linkage")
         # The policy columns come from the host-owned record; a missing or
         # invalid record shows as honestly unknown (""), never as a guess.
-        # Observations are read through the main repo's registration so a
-        # missing worktree still resolves them.
         try:
             policy: record.WorktreeRecord | None = record.load(wt_path)
         except record.RecordError:
             policy = None
-        st = state.load_registered(repo_path, rec.path)
         deps: DepsFreshness
         if missing:
             subject, epoch, deps, env_present = "", 0, "unknown", False
         else:
             env_present = (wt_path / ".env").is_file()
-            if st and st.lockfile_hash:
-                deps = "fresh" if st.lockfile_hash == ecosystems.lockfile_hash(wt_path) else "stale"
-            else:
-                deps = "unknown"
+            deps = (
+                lifecycle.freshness(policy.setup, ecosystems.lockfile_hash(wt_path))
+                if policy
+                else "unknown"
+            )
             subject, epoch = git.last_commit(wt_path)
         rows.append(
             WorktreeRow(
@@ -954,6 +968,8 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
                 harness=policy.harness if policy else "",
                 deps=deps,
                 env="present" if env_present else "absent",
+                health=health,
+                setup=policy.setup.status if policy else "",
             )
         )
 
@@ -1259,7 +1275,13 @@ def teardown(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
 ) -> None:
-    """Remove worktree directories (and optionally their branches); caches are left intact."""
+    """Remove worktree directories (and optionally their branches); caches are left intact.
+
+    An incomplete cleanup fails teardown (exit 1, TEARDOWN_INCOMPLETE): it
+    names what remains (for example a container docker could not remove) and
+    keeps the worktree and its record, so the same command retries. A
+    worktree locked with `git worktree lock` is never removed.
+    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -1337,30 +1359,18 @@ def teardown(
                 json_out=json_out,
             )
 
-    # The dirty gate, unified. A worktree with uncommitted changes is unsafe to
-    # remove without --force. In the chooser a mixed selection is the norm, so we
-    # skip the dirty ones and still remove the clean ones the user picked (and say
-    # so). For explicit refs it stays all-or-nothing: naming a dirty tree should
-    # stop the whole run — a scripting contract, not a partial surprise.
-    def _blocked_dirty(c: resolve.Candidate) -> bool:
-        path = Path(c.path)
-        # A missing/corrupt .git pointer lets git walk up into the main
-        # checkout, so only ask git about dirtiness after linkage is proven.
-        return (
-            not force
-            and path.is_dir()
-            and provision.links_to_worktree_gitdir(repo_path, path)
-            and git.is_dirty(path)
-        )
-
-    skipped_dirty: list[resolve.Candidate] = []
-    if from_chooser:
-        skipped_dirty = [c for c in targets if _blocked_dirty(c)]
-        skipped = {c.path for c in skipped_dirty}
-        targets = [c for c in targets if c.path not in skipped]
-    else:
-        for cand in targets:
-            if _blocked_dirty(cand):
+    # The removal gate (uncommitted changes without --force, a git lock) runs
+    # here, so a refusal comes before the prompt, and again under the lock
+    # right before anything is removed (_gate), so work written while the
+    # prompt was open is never deleted. In the chooser a mixed selection is
+    # the norm, so blocked ones are skipped and the clean ones the user picked
+    # still go (and we say so). For explicit refs it stays all-or-nothing:
+    # naming a dirty tree stops the whole run - a scripting contract.
+    def _gate(cands: list[resolve.Candidate]) -> list[resolve.Candidate]:
+        blocked = [(c, why) for c in cands if (why := _teardown_block(repo_path, c, force))]
+        if blocked and not from_chooser:
+            cand, why = blocked[0]
+            if why == "dirty":
                 raise _die(
                     reporter,
                     f"Worktree '{cand.name}' has uncommitted changes.",
@@ -1370,6 +1380,22 @@ def teardown(
                     path=cand.path,
                     json_out=json_out,
                 )
+            raise _die(
+                reporter,
+                f"Worktree '{cand.name}' is locked by git (git worktree lock).",
+                code=EXIT_CONFLICT,
+                error_code="WORKTREE_LOCKED",
+                hint=f"treebox never removes a locked worktree. Unlock it first: "
+                f"git -C {repo_path} worktree unlock {cand.path}",
+                path=cand.path,
+                json_out=json_out,
+            )
+        skipped.extend(blocked)
+        out = {c.path for c, _ in blocked}
+        return [c for c in cands if c.path not in out]
+
+    skipped: list[tuple[resolve.Candidate, TeardownBlock]] = []
+    targets = _gate(targets)
 
     if not force and not from_chooser and any(Path(c.path).is_dir() for c in targets):
         # --json is a scripting contract: never block on a prompt (and never
@@ -1399,6 +1425,8 @@ def teardown(
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
                     stack.enter_context(locking.worktree_lock(Path(cand.path)))
+                # Recheck under the lock, immediately before removal.
+                targets = _gate(targets)
                 # --skip-container touches no containers, so it skips runner
                 # resolution entirely.
                 runners: list[Runner | None] = (
@@ -1409,7 +1437,8 @@ def teardown(
                         for cand in targets
                     ]
                 )
-                reporter.heading("teardown", ", ".join(c.name for c in targets))
+                if targets:
+                    reporter.heading("teardown", ", ".join(c.name for c in targets))
                 records = [
                     _teardown_one(
                         reporter,
@@ -1427,33 +1456,73 @@ def teardown(
         except locking.LockError as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
-    if skipped_dirty:
-        _report_skipped_dirty(reporter, skipped_dirty, removed=len(records))
+    if skipped:
+        _report_skipped(reporter, skipped, removed=sum(r["complete"] for r in records))
 
     if json_out:
         _emit_json({"schemaVersion": SCHEMA_VERSION, "worktrees": records})
 
-    # Honest exit: the clean ones are gone, but we refused the dirty ones. Do it
-    # last so the removals and the recap have already been reported.
-    if skipped_dirty:
+    # An incomplete cleanup is a failed teardown: name what remains. Nothing
+    # that names it was deleted, so the same command retries.
+    incomplete = [r for r in records if not r["complete"]]
+    if incomplete:
+        raise _die(
+            reporter,
+            "Teardown is incomplete: "
+            + "; ".join(f"{r['name']}: {', '.join(r['remaining'])}" for r in incomplete)
+            + ".",
+            code=EXIT_ERROR,
+            error_code="TEARDOWN_INCOMPLETE",
+            hint="The worktree and its ownership record are kept. Fix the cause, then run "
+            "the same teardown again.",
+            path=incomplete[0]["worktree_path"],
+            json_out=json_out,
+        )
+
+    # Honest exit: the clean ones are gone, but we refused the blocked ones. Do
+    # it last so the removals and the recap have already been reported.
+    if skipped:
         raise typer.Exit(EXIT_CONFLICT)
 
 
-def _report_skipped_dirty(
-    reporter: Reporter, skipped: list[resolve.Candidate], *, removed: int
+# Why the removal gate keeps a worktree: uncommitted changes (without
+# --force), or a git lock (never overridden).
+TeardownBlock = Literal["dirty", "locked"]
+
+
+def _teardown_block(repo_path: str, cand: resolve.Candidate, force: bool) -> TeardownBlock | None:
+    """Whether teardown must keep ``cand``, and why. A worktree git cannot
+    use (missing directory, invalid linkage) is never asked about dirtiness:
+    git there would walk up into the main checkout."""
+    path = Path(cand.path)
+    if any(rec.locked and same_path(rec.path, path) for rec in git.worktree_list(repo_path)):
+        return "locked"
+    if force or provision.worktree_health(repo_path, path) not in ("healthy", "unreadable_state"):
+        return None
+    return "dirty" if git.is_dirty(path) else None
+
+
+def _report_skipped(
+    reporter: Reporter, skipped: list[tuple[resolve.Candidate, TeardownBlock]], *, removed: int
 ) -> None:
     """Make the mixed-selection outcome unmistakable: name each worktree we kept
-    for having uncommitted changes, how to remove it anyway, and a one-line tally
-    so the user knows exactly what did and didn't happen."""
+    and why, how to remove it anyway, and a one-line tally so the user knows
+    exactly what did and didn't happen."""
     reporter.blank()
-    for cand in skipped:
-        reporter.fail(cand.name, "kept · uncommitted changes")
-    reporter.hint("commit or stash the changes, or re-run teardown with --force")
+    for cand, why in skipped:
+        reporter.fail(
+            cand.name, "kept · uncommitted changes" if why == "dirty" else "kept · locked"
+        )
+    if any(why == "dirty" for _, why in skipped):
+        reporter.hint("commit or stash the changes, or re-run teardown with --force")
+    if any(why == "locked" for _, why in skipped):
+        reporter.hint("unlock it first (git worktree unlock <path>); treebox never removes it")
     reporter.blank()
     plural = "s" if removed != 1 else ""
-    reporter.info(
-        f"Removed {removed} worktree{plural} · kept {len(skipped)} with uncommitted changes."
+    reasons = " or ".join(
+        sorted({"with uncommitted changes" if why == "dirty" else "locked" for _, why in skipped})
     )
+    reporter.info(f"Removed {removed} worktree{plural} · kept {len(skipped)} {reasons}.")
 
 
 # What happened to a teardown target's container/runner resources.
@@ -1467,10 +1536,12 @@ class TeardownRecord(TypedDict):
     name: str
     branch: str | None
     worktree_path: str
-    removed: bool  # False: it was already gone (still exit 0)
+    removed: bool  # False: it was already gone (still exit 0), or it was kept
     branch_deleted: bool
     container: ContainerOutcome
     volumes_removed: bool
+    complete: bool  # False: a step failed; the worktree and its record are kept
+    remaining: list[str]  # what is still present, "<resource> (<reason>)"
 
 
 def _teardown_runner(cfg: Config, cand: resolve.Candidate, *, remove_volumes: bool) -> Runner:
@@ -1513,91 +1584,53 @@ def _teardown_one(
     the runner from ``_teardown_runner``, or ``None`` under
     ``--skip-container`` (no container work, so no runner was resolved)."""
     wt = Worktree.at(repo_path, Path(cand.path), branch=cand.branch or "")
-    exists = wt.path.is_dir()
+    try:
+        result = cleanup.cleanup_one(
+            wt, run, force=force, delete_branch=delete_branch, reporter=reporter
+        )
+    except cleanup.MainWorktreeError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_CONFLICT,
+            error_code="MAIN_WORKTREE",
+            hint="treebox only manages linked worktrees; the repo itself is never a target.",
+            path=str(wt.path),
+            json_out=json_out,
+        ) from exc
 
-    branch_name = (
-        cand.branch
-        if cand.branch and (exists or git.local_branch_exists(repo_path, cand.branch))
-        else None
-    )
-
-    container: ContainerOutcome
-    volumes_removed = False
     if skip_container:
-        container = "skipped"
         reporter.note("container", "skipped")
+    if result.runner_error is not None:
+        reporter.warn(f"isolation teardown: {result.runner_error}")
+    shown = _short_path(wt.path, repo_path)
+    if result.worktree == "removed":
+        reporter.ok("worktree", f"removed {shown}")
+    elif result.worktree == "already_gone":
+        reporter.note("worktree", f"already gone · {shown}")
+    elif result.worktree == "cleanup_incomplete":
+        reporter.note("worktree", f"kept · cleanup incomplete · {shown}")
     else:
-        # run is None only under --skip-container, handled above; a real runner
-        # is always resolved when we reach an actual container teardown.
-        assert run is not None
-        container = "skipped"
-        try:
-            # The runner was constructed with the batch's volume choice
-            # (_teardown_runner); teardown options are its own business.
-            teardown_result = run.teardown(wt, reporter=reporter)
-            container = teardown_result.container
-            volumes_removed = teardown_result.volumes_removed
-        except Exception as exc:  # teardown is best-effort
-            container = "failed"
-            reporter.warn(f"isolation teardown: {exc}")
-
-    # Removing a worktree, pruning, and deleting a branch all rewrite git state
-    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
-    # section), so they queue behind any create or teardown doing the same.
-    # The runner's own cleanup above stays outside: it can be slow.
-    branch_deleted = False
-    with locking.repo_lock(repo_path):
-        if exists:
-            try:
-                git.worktree_remove(repo_path, wt.path, force=force)
-            except git.GitError:
-                # Last-resort cleanup for corrupt *linked* worktrees git refuses to
-                # remove. It must never run against the main working tree (git's
-                # refusal is also a GitError): that would delete the whole repo.
-                if same_path(wt.path, repo_path):
-                    raise _die(
-                        reporter,
-                        f"Refusing to remove the main working tree '{cand.name}'.",
-                        code=EXIT_CONFLICT,
-                        error_code="MAIN_WORKTREE",
-                        hint="treebox only manages linked worktrees; "
-                        "the repo itself is never a target.",
-                        path=str(wt.path),
-                        json_out=json_out,
-                    ) from None
-                import shutil as _sh
-
-                _sh.rmtree(wt.path, ignore_errors=True)
-                git.worktree_prune(repo_path)
-            reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
-        else:
-            git.worktree_prune(repo_path)
-            reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
-
-        if delete_branch and branch_name:
-            try:
-                git.delete_branch(repo_path, branch_name)
-                branch_deleted = True
-                reporter.ok("branch", f"deleted {branch_name}")
-            except git.GitError as exc:
-                reporter.warn(f"could not delete branch: {exc}")
-        elif branch_name:
-            reporter.note("branch", f"kept {branch_name}")
-
-    # The host-owned record goes last, after the worktree it describes: a
-    # failure above leaves it in place, so a retried teardown still knows the
-    # mode. It is not shared git state, so it stays outside the repo lock; the
-    # worktree lock the caller holds already covers it.
-    record.remove(wt.path)
+        reporter.fail("worktree", f"kept · {shown}")
+    if not result.complete:
+        reporter.note("record", "kept · the same teardown retries")
+    elif result.branch_error is not None:
+        reporter.warn(f"could not delete branch: {result.branch_error}")
+    elif result.branch_deleted:
+        reporter.ok("branch", f"deleted {result.branch}")
+    elif result.branch:
+        reporter.note("branch", f"kept {result.branch}")
 
     return TeardownRecord(
         name=cand.name,
-        branch=branch_name,
+        branch=result.branch,
         worktree_path=str(wt.path),
-        removed=exists,
-        branch_deleted=branch_deleted,
-        container=container,
-        volumes_removed=volumes_removed,
+        removed=result.worktree == "removed",
+        branch_deleted=result.branch_deleted,
+        container=result.runner.container,
+        volumes_removed=result.runner.volumes_removed,
+        complete=result.complete,
+        remaining=list(result.remaining),
     )
 
 

@@ -212,6 +212,8 @@ LIST_ROW_KEYS = {
     "harness",
     "deps",
     "env",
+    "health",
+    "setup",
 }
 TEARDOWN_RECORD_KEYS = {
     "name",
@@ -221,6 +223,8 @@ TEARDOWN_RECORD_KEYS = {
     "branch_deleted",
     "container",
     "volumes_removed",
+    "complete",
+    "remaining",
 }
 CONTAINER_VALUES = {"cleaned", "skipped", "failed"}
 DOCTOR_KEYS = {"schemaVersion", "ok", "isolation", "checks", "advisories"}

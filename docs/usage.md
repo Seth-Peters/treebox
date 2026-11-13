@@ -95,10 +95,19 @@ treebox create fix-auth --isolation docker
 
 A name that already exists is a loud conflict (exit `5`,
 `error.code: "SLUG_CONFLICT"`) with the ways out — `enter` it, `teardown` it,
-or pick another name. It is never silently reused. If a previous `create` died
-after registering the worktree but before setup completed, running the same
+or pick another name. It is never silently reused. If a previous `create` did
+not finish setup (it was interrupted, or a setup step failed), running the same
 `create` again finishes setup instead; a fully provisioned same-name worktree
 is still a conflict.
+
+**A failed setup is a failed `create`.** When a setup step (a package-manager
+install, a `setup_hook` command, the docker image build, the firewall, or
+`postCreate`) exits non-zero, `create` exits `1` with
+`error.code: "SETUP_FAILED"`. The message names the step and its exit status;
+`error.path` is the file that holds the step's output
+(`<worktree-parent>/.logs/<name>.setup.log`, outside the worktree). The
+worktree is kept and its setup is recorded as failed, so `treebox enter <name>`
+or the same `create` retries the setup. It never says ready on a failed setup.
 
 ### Submodule copies and recovery
 
@@ -239,11 +248,14 @@ worktree. For docker worktrees, the recorded firewall choice is reused too, so
 `create --no-firewall` keeps entering cleanly even under a `firewall = true`
 config.
 Dependencies re-sync **only if the lockfile changed** since the last setup
-(treebox stores the hash in the worktree's private git dir, so it never shows
-up in `git status`); a re-sync never changes the record. If a previous run died before
-setup completed, `enter` finishes the setup even though the recorded hash
-matches, instead of launching into a half-built tree. Anything after `--` is
-passed through to the agent. `--cold` forces a cache-bypassing re-sync.
+finished (treebox stores the hash with the setup result in the host-owned
+record; a re-sync never changes the recorded policy). If a previous setup was
+interrupted or failed, `enter` runs the setup again whatever the hash, instead
+of launching into a half-built tree; a setup step that fails again makes
+`enter` fail with `SETUP_FAILED` (exit `1`). A worktree whose `.git` pointer is
+missing or leads elsewhere is refused with `INVALID_LINKAGE` (exit `5`; the
+hint points at `teardown`). Anything after `--` is passed through to the
+agent. `--cold` forces a cache-bypassing re-sync.
 
 Under docker isolation, `enter` **runs the runner preflight first** (like
 `create` and `doctor`), so a stopped daemon fails fast with a clean
@@ -315,7 +327,11 @@ stable name instead of either value being truncated.
 A placeholder branch is always `treebox/<name>`, so its row just shows
 `⚠ unnamed` — work that can't be pushed yet is visible at a glance. `stale`
 means the lockfile changed since the last dependency sync — the next `enter`
-fixes that automatically.
+fixes that automatically. A setup that did not finish shows
+`◐ setup unfinished` or `✗ setup failed` in the DEPS column, and a worktree git
+cannot use shows its [health](#scripting-against-treebox)
+(`⚠ directory missing`, `⚠ invalid linkage`) there instead of a freshness it
+cannot have.
 
 ## `teardown` — clean up
 
@@ -342,16 +358,24 @@ instead of guessing. `--skip-container` leaves containers/images untouched.
 `--json` prints a structured record of what was removed (and never blocks on
 a prompt).
 
-Container/image cleanup and local branch deletion are best-effort after the
-target set is chosen: if a container or image removal fails, treebox warns,
-still attempts every remaining cleanup step (volumes, sandbox files), removes
-the worktree, and reports `container: "failed"`; a failed volume removal
-alone warns and reports `volumes_removed: false` without marking the
-container `failed`; if Docker itself is unavailable, the worktree is still
-removed and the record reports `container: "skipped"` with
-`volumes_removed: false`, even under `--remove-volumes`; if branch deletion
-fails, it warns and reports `branch_deleted: false` without undoing the
-worktree removal.
+**An incomplete cleanup is a failed `teardown`.** Teardown follows the
+[cleanup model](how-it-works.md#lifecycle-setup-and-cleanup): runner resources
+(container, image, volumes, sandbox files) first, then the worktree directory
+and its git registration, then the ownership record. When a step cannot
+finish - a container, image or volume removal fails, Docker is not reachable,
+or git refuses to remove the worktree - teardown exits `1` with
+`error.code: "TEARDOWN_INCOMPLETE"`, names what remains, and keeps the
+worktree, its host-owned record and the runner's resource manifest. Run the
+same `teardown` again when the cause is fixed: it retries the remaining steps.
+`--skip-container` is the explicit way to leave docker resources alone.
+
+Teardown checks for uncommitted changes and git locks before the prompt and
+again under the worktree lock, right before it removes anything: a file written
+while the confirmation prompt is open is never deleted. treebox never removes a
+worktree that git refuses to remove, and never a worktree locked with
+`git worktree lock` (`WORKTREE_LOCKED`, exit `5`, even with `--force`). Local
+branch deletion stays best-effort: if it fails, teardown warns and reports
+`branch_deleted: false` without undoing the worktree removal.
 
 **Run it with no refs** and treebox walks you through the whole decision — an
 arrow-key picker (`↑↓` to move, space to toggle, enter to confirm) over your
@@ -421,8 +445,9 @@ or a non-TTY, pass refs explicitly.
 `teardown` is also the recovery path for a **corrupt** worktree - a registered
 directory whose `.git` pointer file is gone (say, after an interrupted removal
 by hand). Git commands inside such a directory silently answer for the *main*
-checkout, so `create` and `enter` both refuse it loudly (exit `5`,
-`error.code: "SLUG_CONFLICT"`) with a hint pointing here rather than running
+checkout, so `create` and `enter` both refuse it loudly (exit `5`;
+`error.code` is `"SLUG_CONFLICT"` for `create` and `"INVALID_LINKAGE"` for
+`enter`) with a hint pointing here rather than running
 setup or an agent against your real checkout. `teardown` instead verifies the
 worktree's git linkage before asking whether it is dirty: a corrupt worktree is never blocked as "dirty" just because your
 main checkout has uncommitted changes. It takes the normal confirmation path
@@ -434,7 +459,7 @@ record, which lives beside the worktree and does not depend on the `.git`
 pointer, so a corrupt docker worktree is still torn down with the runner it was
 created with. Volume ownership comes separately from the host-owned resource
 manifest and is never read from sandbox-writable state. Teardown removes the
-record with the worktree.
+record only after the worktree and its runner resources are gone.
 
 `teardown` is also the recovery for a worktree without a usable record
 (`RECORD_MISSING` / `RECORD_INVALID` on `enter`, for example one made by an
@@ -442,7 +467,8 @@ older treebox): it needs no extra flag. Without a record, a worktree that has
 the runner-owned resource manifest is torn down as a docker worktree (its
 container, image and manifest go too), and any other as a host worktree. Then
 `treebox create` it again. The dirty-worktree and confirmation rules above
-apply as usual.
+apply as usual, and so does `TEARDOWN_INCOMPLETE`: the manifest is kept until
+every docker resource is gone, so the same plain `teardown` retries.
 
 ## `doctor` — is this host ready?
 
@@ -553,17 +579,39 @@ Current success payloads:
 | `doctor --json` | `schemaVersion`, `ok`, `isolation`, `checks`, `advisories` |
 
 `list` rows contain `name`, `branch`, `unnamed`, `missing`, `last_commit`,
-`commit_epoch`, `path`, `base`, `isolation`, `harness`, `deps`, and `env`.
-`deps` is `fresh`, `stale`, or `unknown`; `env` is `present` or `absent`.
+`commit_epoch`, `path`, `base`, `isolation`, `harness`, `deps`, `env`,
+`health`, and `setup`. `deps` is `fresh`, `stale`, or `unknown`: `fresh` and
+`stale` only after a finished setup (a matching lockfile hash alone is never
+fresh); `env` is `present` or `absent`. `setup` is the
+[setup model](how-it-works.md#lifecycle-setup-and-cleanup) state - `pending`,
+`failed`, or `done` - or `""` when the record is missing or invalid. `health`
+is the one classification `create`, `enter`, `list` and `teardown` share:
+
+| `health` | Meaning | `missing` |
+| -------- | ------- | :-------: |
+| `healthy` | Registered, linked to its own git registration, record readable. | `false` |
+| `directory_missing` | The directory is gone; git may still list it. `teardown` prunes it. | `true` |
+| `invalid_linkage` | Registered, but its `.git` pointer is missing or leads elsewhere. `enter` refuses (`INVALID_LINKAGE`); `teardown` recovers it. | `true` |
+| `unregistered` | A directory git has no registration for (never listed; seen by `create`). | `false` |
+| `unreadable_state` | Git is fine, but the host-owned record is missing or invalid (`RECORD_MISSING` / `RECORD_INVALID`). | `false` |
+
+`missing` is kept for older consumers: it is `true` exactly when `health` is
+`directory_missing` or `invalid_linkage` (only the git registration is
+reliable), the same cases older treebox versions reported.
+
 `teardown` records contain `name`, `branch`, `worktree_path`, `removed`,
-`branch_deleted`, `container`, and `volumes_removed`; `container` is `cleaned`,
-`skipped`, or `failed`. Each field reports what the runner actually did to
-that resource: `container` is `skipped` when cleanup didn't run
-(`--skip-container`, or Docker unavailable) and `failed` when a container or
-image removal failed, while `volumes_removed` is `true` only when docker
-volumes were really removed - never on host isolation, not merely because
-`--remove-volumes` was passed, and a failed volume removal leaves it `false`
-without marking `container` failed. `doctor` checks contain `name`,
+`branch_deleted`, `container`, `volumes_removed`, `complete`, and `remaining`;
+`container` is `cleaned`, `skipped`, or `failed`. Each field reports what the
+runner actually did to that resource: `container` is `skipped` when cleanup
+didn't run (`--skip-container`, or Docker unavailable) and `failed` when a
+container or image removal failed, while `volumes_removed` is `true` only when
+docker volumes were really removed - never on host isolation, not merely
+because `--remove-volumes` was passed, and a failed volume removal leaves it
+`false` without marking `container` failed. `complete` is `false` when a
+cleanup step did not finish; `remaining` then names each resource that is
+still present (`"<resource> (<reason>)"`) and the command exits `1`
+(`TEARDOWN_INCOMPLETE`) after the payload. `removed` is `true` only when the
+worktree directory was removed in this run. `doctor` checks contain `name`,
 `ok`, and `detail`.
 
 JSON errors are emitted to stderr as:
@@ -600,12 +648,16 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `DOCKER_UNAVAILABLE` | `1` | Docker is installed but the daemon is unavailable. |
 | `RUNNING_AS_ROOT` | `1` | `create` or `enter` requested Docker isolation as root (uid 0). See the [user requirement and recovery steps](install.md#what-each-isolation-mode-needs). |
 | `SUBMODULE_COPY_FAILED` | `1` | An I/O or permission error prevents the submodule copy. |
-| `ERROR` | `1` | Runtime or setup failure, including a staged credential refresh failure. |
+| `SETUP_FAILED` | `1` | A setup step exited non-zero. The message names the step and its exit status; `error.path` is its output. The worktree is kept, marked unfinished; `enter` or the same `create` retries the setup. |
+| `TEARDOWN_INCOMPLETE` | `1` | A teardown step did not finish (a container, image or volume removal failed, Docker is not reachable, or git refused to remove the worktree). The message names what remains; the worktree and its ownership record are kept, so the same `teardown` retries. |
+| `ERROR` | `1` | Runtime failure, including a staged credential refresh failure. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
 | `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
-| `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes. |
+| `INVALID_LINKAGE` | `5` | `enter` target's `.git` pointer is missing or does not lead to its git registration (`health: invalid_linkage`) - recover with `treebox teardown <name>`. |
+| `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes (checked before the prompt and again right before removal). |
+| `WORKTREE_LOCKED` | `5` | Teardown target is locked with `git worktree lock`; treebox never removes it (also with `--force`). Unlock it first. |
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. Also raised, rarely, when the repository lock that parallel `create` / `teardown` calls queue on has been held for over five minutes: another operation is stuck, not merely busy. |

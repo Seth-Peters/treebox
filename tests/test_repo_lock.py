@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from treebox import git, locking
+from treebox import git, locking, record
 from treebox.cli import app
 
 
@@ -108,6 +108,9 @@ def test_create_queues_behind_the_repository_lock(
     assert json.loads(blocked.stderr)["error"]["code"] == "LOCK_HELD"
     assert not _branch_exists(repo, "queued")
     assert not (Path(root) / "queued").exists()
+    # The record is written before the repository lock is taken, and a create
+    # that never got the lock takes it back.
+    assert not record.exists(Path(root) / "queued")
 
     released = _run(["create", "queued", *base])
     assert released.exit_code == 0, released.output
@@ -137,6 +140,7 @@ def test_failed_worktree_add_leaves_no_orphan_branch_and_a_retry_succeeds(
     assert not _branch_exists(repo, "raced")
     assert not (Path(root) / "raced").exists()
     assert "raced" not in _git(repo, "worktree", "list").stdout
+    assert not record.exists(Path(root) / "raced")
 
     config_lock.unlink()
     retried = _run(["create", "raced", *base])
@@ -220,9 +224,35 @@ def test_teardown_queues_behind_the_repository_lock(
     assert blocked.exit_code == 5
     assert json.loads(blocked.stderr)["error"]["code"] == "LOCK_HELD"
     assert (Path(root) / "doomed").is_dir()
+    # The record goes last, after the locked git steps, so it is still there.
+    assert record.exists(Path(root) / "doomed")
 
     removed = _run(["teardown", "doomed", *base, "--force", "--delete-branch", "--json"])
     assert removed.exit_code == 0, removed.output
-    record = json.loads(removed.stdout)["worktrees"][0]
-    assert record["removed"] is True
-    assert record["branch_deleted"] is True
+    result = json.loads(removed.stdout)["worktrees"][0]
+    assert result["removed"] is True
+    assert result["branch_deleted"] is True
+    assert not record.exists(Path(root) / "doomed")
+
+
+def test_create_writes_the_record_before_it_takes_the_repository_lock(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """Lock order is worktree, then repo. The host-owned record belongs to the
+    worktree, so `create` writes it under the worktree lock alone, never while
+    it holds the repository lock."""
+    real_save = record.save
+    held_during_save: list[bool] = []
+
+    def save_and_probe(rec: record.WorktreeRecord) -> None:
+        try:
+            with locking.repo_lock(repo, timeout=0.05):
+                held_during_save.append(False)
+        except locking.LockError:
+            held_during_save.append(True)
+        real_save(rec)
+
+    monkeypatch.setattr(record, "save", save_and_probe)
+    created = _run(["create", "ordered", "--repo", str(repo), "--root", root, "--json"])
+    assert created.exit_code == 0, created.output
+    assert held_during_save and not any(held_during_save)

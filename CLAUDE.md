@@ -55,10 +55,11 @@ run (pluggable)** — with three registries that define everything swappable.
 Module map:
 
 - **`provision.py`** owns the host-side half, identical for every runner:
-  `fetch → resolve branch → git worktree add → install pre-push guard →
-  copy submodules → copy .env → runner.setup (cache-backed) →
-  record lockfile hash → hand to runner`. An explicit `create NAME` uses the
-  name as the branch, created fresh from `origin/<base>` (an existing branch is
+  `write record (setup pending) → fetch → resolve branch → git worktree add →
+  install pre-push guard → copy submodules → copy .env → runner.setup
+  (cache-backed) → record the setup result → hand to runner`. An explicit
+  `create NAME` uses the name as the branch, created fresh from
+  `origin/<base>` (an existing branch is
   a `BRANCH_EXISTS` conflict — `--checkout` is the resume path); a nameless
   `create` makes a `treebox/<petname>` placeholder. Every worktree gets the
   pre-push guard (`extensions.worktreeConfig` + `core.hooksPath` into the
@@ -125,7 +126,8 @@ Module map:
   on the *same* worktree fails fast (`LOCK_HELD`). `repo_lock(path)` is per
   repository (keyed by the git common dir, so every root and linked worktree
   shares it) and *waits*: `create` holds it from the fetch through
-  `git worktree add`, `teardown` around `worktree remove`/`prune`/branch
+  `git worktree add` (the record is written before it, under the worktree
+  lock only), `teardown` around `worktree remove`/`prune`/branch
   delete, and the small writers of shared files (`extensions.worktreeConfig`,
   `info/exclude`) take it too. Anything that writes git state shared by the
   whole repository belongs under it; setup, container work, and the agent
@@ -140,31 +142,42 @@ Module map:
 - **`record.py`** is the host-owned worktree record: the authority for a
   worktree's creation policy (isolation, firewall, template, harness, base),
   at `<worktree parent>/.records/<leaf>.json`, outside every sandbox mount.
-  One schema version (`schemaVersion`; unknown keys, other versions, and
-  unknown isolation/harness names are refused - there is no upgrade path),
+  One schema version (`schemaVersion`; unknown or missing keys, other
+  versions, and unknown isolation/harness names are refused),
   bound to the registered worktree path, written atomically by `create`
   under the worktree lock before any runner resource depends on it.
   API: `load(path)` (raises `RecordMissingError` / `RecordInvalidError`),
   `save(record)`, `remove(path)`, `record_path(path)`, `exists(path)`. The
-  record format has never been released, so a new field is a new required
-  key of the one schema version: add it to `WorktreeRecord` without a
-  `SCHEMA_VERSION` bump and without an upgrade path.
-  On `enter`, a missing or invalid record is a classified error
-  (`RECORD_MISSING` / `RECORD_INVALID`, exit 5) whose recovery is to recreate
-  the worktree (`teardown`, then `create`), never a fallback to config
-  defaults or to `state.py`. `teardown` needs no record: without one it
-  picks the docker runner when the runner-owned resource manifest exists
-  (`runners.docker.has_resource_manifest`), else the host runner.
-- **`state.py`** stores per-worktree *observations* only (lockfile hash +
-  `provisioned`) inside the worktree's private git dir
-  (`.git/worktrees/<id>/`), so it never appears in `git status` and is pruned
-  with the worktree. The lockfile hash is what lets `enter` re-sync only when
-  deps changed (the `provisioned` flag makes `enter` finish an interrupted
-  setup even when the hash matches). This state is sandbox-writable, so it
-  never decides policy and never authorizes destructive host cleanup; it is
-  read and written without following links (a planted symlink reads as no
-  state and is replaced, not written through). `list` reads it through the
-  repo's own worktree registration (`load_registered`).
+  record format has never been released, so to extend it, add a field to
+  `WorktreeRecord` as a required key of the one schema version, without a
+  `SCHEMA_VERSION` bump and without an upgrade path. On `enter`, a missing or
+  invalid record is a classified error (`RECORD_MISSING` / `RECORD_INVALID`,
+  exit 5) whose recovery is to recreate the worktree (`teardown`, then
+  `create`), never a fallback to config defaults. `teardown` needs no record: without one it picks the
+  docker runner when the runner-owned resource manifest exists
+  (`runners.docker.has_resource_manifest`), else the host runner. Besides the
+  policy the record holds the host-observed `setup` result (a required key):
+  a sandbox that could mark its own setup done could make treebox skip setup
+  forever or report stale deps fresh, so nothing in the sandbox-writable git
+  dir is read for any decision.
+- **`lifecycle.py`** holds the **setup model** (`SetupResult`: `pending` / `failed` /
+  `done` + lockfile hash; `setup_reason` decides whether `enter` runs setup,
+  `resumable` whether a same-name `create` finishes it, `freshness` what
+  `list` reports). A failed setup step is a failed `create`/`enter`
+  (`SETUP_FAILED`, exit 1, output in `<parent>/.logs/<leaf>.setup.log`).
+- **`cleanup.py`** owns one worktree's cleanup through `cleanup_one`: runner
+  resources, then the worktree, git registration and branch (under
+  `locking.repo_lock`), then the ownership record, last.
+  A failed step keeps the resources and records a retry needs (the record,
+  and the docker resource manifest that picks the runner when the record is
+  missing or invalid). Git refusal never falls back to filesystem deletion.
+  `CleanupResult` returns completed effects and remaining resources.
+  Incomplete cleanup fails with `TEARDOWN_INCOMPLETE` (exit 1); the same
+  command retries. The CLI owns batch validation, the worktree lock,
+  confirmation and result rendering; runner adapters own their resources.
+  Worktree health (`healthy`, `directory_missing`,
+  `invalid_linkage`, `unregistered`, `unreadable_state`) is classified once,
+  in `provision.worktree_health`, and exposed as `health` in `list --json`.
 - **`models.py`** holds the `Worktree` value object and the path-as-identity
   rule: the registered *path* identifies a worktree (the *name* is only its
   directory leaf, and can repeat under a nested root); the *branch* is a
@@ -258,9 +271,9 @@ What a backend may **assume** (host locality):
 - Provisioning already happened host-side (`provision.py` writes the
   worktree, guard, submodules, `.env` before the runner sees it).
 - The host filesystem is visible *at identical absolute paths*: docker
-  bind-mounts the worktree and its git common dir 1:1, state lives in the
-  host-side private git dir, the record lives beside the worktree, and the
-  lockfile hash stats host files.
+  bind-mounts the worktree and its git common dir 1:1, the record (policy
+  and setup result) lives beside the worktree, and the lockfile hash stats
+  host files.
 
 Consequence: OCI-compatible engines (podman, etc.) and bind-mount sandboxes
 (bubblewrap/nsjail-style) fit this seam as-is. SSH-remote, VM, or cloud

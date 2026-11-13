@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from .. import ecosystems
 from ..harnesses import Harness
 from ..models import Worktree
-from ..output import Reporter, StepError
+from ..output import Reporter
 from ..system import have
 from .base import RunnerFacts, RunnerTeardownResult
 
@@ -84,12 +84,9 @@ class HostRunner:
             env = dict(os.environ)
             env.update(step.env)
             detail = "from-source (cold)" if cold_root else "cache-backed"
-            try:
-                reporter.step(f"setup · {step.name}", detail, step.argv, cwd=str(wt.path), env=env)
-            except StepError:
-                # Setup failures are non-fatal: the tree is still usable and the
-                # operator can fix deps inside the agent session.
-                reporter.warn(f"{step.name} setup failed; continuing")
+            # A failing step raises StepError: a failed setup is a failed
+            # create/enter (the setup model in lifecycle.py records it).
+            reporter.step(f"setup · {step.name}", detail, step.argv, cwd=str(wt.path), env=env)
 
     def _run_override(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
         cache_env = ecosystems.cache_env(self.config.caches, cold_cache_root=cold_root)
@@ -97,16 +94,9 @@ class HostRunner:
         env = dict(os.environ)
         env.update(cache_env)
         for i, command in enumerate(self.config.setup_hook or []):
-            try:
-                reporter.step(
-                    f"setup · hook {i + 1}",
-                    "done",
-                    ["sh", "-c", command],
-                    cwd=str(wt.path),
-                    env=env,
-                )
-            except StepError:
-                reporter.warn(f"setup hook step {i + 1} failed; continuing")
+            reporter.step(
+                f"setup · hook {i + 1}", "done", ["sh", "-c", command], cwd=str(wt.path), env=env
+            )
 
     def dry_run_setup(
         self,

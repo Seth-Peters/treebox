@@ -106,6 +106,23 @@ class DoctorCheck:
     required: bool = True
 
 
+def _unusable(row: WorktreeRow) -> bool:
+    """A worktree git cannot use (its directory or its linkage is broken)."""
+    return row["health"] in ("directory_missing", "invalid_linkage", "unregistered")
+
+
+def _deps_cell(row: WorktreeRow, deps_style: dict[str, str]) -> Text:
+    """The DEPS cell: a worktree git cannot use, or an unfinished setup, says
+    so instead of a dependency freshness it cannot have."""
+    if _unusable(row):
+        return Text("⚠ " + row["health"].replace("_", " "), style="wt.warn")
+    if row["setup"] == "failed":
+        return Text("✗ setup failed", style="wt.fail")
+    if row["setup"] == "pending":
+        return Text("◐ setup unfinished", style="wt.warn")
+    return Text(f"● {row['deps']}", style=deps_style[row["deps"]])
+
+
 class StepError(RuntimeError):
     """A progress step failed; carries the captured command output."""
 
@@ -349,8 +366,8 @@ class Reporter:
 
     def _dump_log(self, log: str) -> None:
         log = log.strip()
-        if not log:
-            return
+        if not log or self.silent:
+            return  # --json: the error object names where the output is
         self.console.print(Text("      output", style="wt.muted"))
         for line in log.splitlines():
             self.console.print(Text("      " + line, style="wt.muted"))
@@ -419,8 +436,7 @@ class Reporter:
                     isolation,
                     style="wt.unknown" if isolation == "unknown" else "wt.detail",
                 )
-                deps = r["deps"]
-                deps_cell = Text(f"● {deps}", style=deps_style[deps])
+                deps_cell = _deps_cell(r, deps_style)
                 env_ok = r["env"] == "present"
                 env_cell = Text(
                     ("● " if env_ok else "○ ") + r["env"],
@@ -518,6 +534,14 @@ class Reporter:
             caption += f" · {unnamed} unnamed"
         if stale:
             caption += f" · {stale} stale"
+        broken = sum(1 for r in rows if _unusable(r))
+        unfinished = sum(
+            1 for r in rows if not _unusable(r) and r["setup"] in ("pending", "failed")
+        )
+        if unfinished:
+            caption += f" · {unfinished} setup unfinished"
+        if broken:
+            caption += f" · {broken} unhealthy"
         console.print()
         console.print(Text("  Summary: " + caption, style="wt.muted"))
         render_root()
