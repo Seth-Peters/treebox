@@ -11,6 +11,7 @@ for enter/teardown.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -575,6 +576,113 @@ def test_branch_gitmodules_without_one_in_the_main_checkout_is_kept(
     assert list((wt / "sub").iterdir()) == []
     assert "skipped sub" in created.stderr
     _assert_pristine(wt)
+
+
+def _add_second_submodule_to_main(repo: Path) -> None:
+    """Give ``main`` (and its checkout) a second submodule ``libC``, so a
+    branch can rename, add or drop one while another is still copied."""
+    added = _git(repo, *_FILE_PROTOCOL, "submodule", "add", "-q", _sub_url(repo), "libC")
+    assert added.returncode == 0, added.stderr
+    assert _git(repo, *_IDENTITY, "commit", "-q", "-m", "add libC").returncode == 0
+    assert _git(repo, "push", "-q", "origin", "main").returncode == 0
+
+
+def _dry_run_submodule_plan(commands: list[str]) -> tuple[list[str], list[str]]:
+    """The (copied, skipped) submodule paths a dry-run plan names."""
+    copied = [c.split()[3] for c in commands if c.startswith("# copy submodule ")]
+    skipped = [c.split()[3] for c in commands if c.startswith("# submodules: skipped ")]
+    return copied, skipped
+
+
+def _real_submodule_result(stderr: str, wt: Path) -> tuple[list[str], list[str]]:
+    """The (copied, skipped) submodule paths a real ``create --print`` did:
+    skipped from its notes, copied from the trees that now have content."""
+    skipped = re.findall(r"submodules\s+skipped (\S+) ·", stderr)
+    declared = _git(wt, "config", "-f", ".gitmodules", "--get-regexp", "path").stdout
+    paths = [line.split(" ", 1)[1] for line in declared.splitlines()] if declared else []
+    copied = [p for p in paths if (wt / p / "lib.txt").is_file()]
+    if paths:
+        assert f"copied {len(copied)}" in stderr
+    return copied, skipped
+
+
+_BRANCH_EDITS: dict[str, tuple[list[str], tuple[list[str], list[str]]]] = {
+    # branch edit -> the (copied, skipped) paths the real run gives
+    "renamed": (["mv", "sub", "libB"], (["libC"], ["libB"])),
+    "added": (["submodule", "add", "-q", "{url}", "extra"], (["sub", "libC"], ["extra"])),
+    "removed": (["rm", "-q", "libC"], (["sub"], [])),
+}
+
+
+@pytest.mark.parametrize("case", [*_BRANCH_EDITS, "no-gitmodules"])
+@pytest.mark.parametrize("entry", ["checkout", "named", "nameless"])
+def test_dry_run_submodule_plan_matches_the_real_run(
+    repo: Path, tmp_path: Path, root: str, hermetic_config, case: str, entry: str
+):
+    """``create --dry-run`` (human and ``--json``) names the same copied and
+    skipped submodule paths as the real ``create`` for the same branch, for
+    every create entry: ``--checkout``, a named new branch from
+    ``origin/<base>``, and a nameless create. The dry run changes nothing."""
+    _add_second_submodule_to_main(repo)
+    if case == "no-gitmodules":
+        edits = [["rm", "-q", "sub", "libC", ".gitmodules"]]
+        expected: tuple[list[str], list[str]] = ([], [])
+    else:
+        edit, expected = _BRANCH_EDITS[case]
+        edits = [[arg.replace("{url}", _sub_url(repo)) for arg in edit]]
+    _push_branch_from_clone(repo, tmp_path, case, *edits)
+
+    if entry == "checkout":
+        args = ["create", "--checkout", case]
+    elif entry == "named":
+        args = ["create", f"new-{case}", "--base", case]
+    else:
+        args = ["create", "--base", case]
+    args += ["--repo", str(repo), "--root", root]
+    before_worktrees = _git(repo, "worktree", "list", "--porcelain").stdout
+    before_status = _git(repo, "status", "--porcelain").stdout
+
+    planned = _run([*args, "--dry-run", "--json"])
+    assert planned.exit_code == 0, planned.output
+    commands = json.loads(planned.stdout)["commands"]
+    assert _dry_run_submodule_plan(commands) == expected
+    assert not any("copy submodule trees" in c for c in commands)
+    human = _run([*args, "--dry-run"])
+    assert human.exit_code == 0, human.output
+    for path in expected[0]:
+        assert f"# copy submodule {path} from {repo} into" in human.stderr
+    for path in expected[1]:
+        assert f"# submodules: skipped {path} · not checked out in {repo}" in human.stderr
+    # A dry run changes nothing on disk.
+    assert not Path(root).exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before_worktrees
+    assert _git(repo, "status", "--porcelain").stdout == before_status
+
+    created = _run([*args, "--print"])
+    assert created.exit_code == 0, created.output
+    (wt,) = [p for p in Path(root).iterdir() if (p / ".git").is_file()]
+    assert _real_submodule_result(created.stderr, wt) == expected
+    _assert_pristine(wt)
+
+
+def test_dry_run_of_a_resumed_worktree_plans_from_its_own_gitmodules(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """A resumed unprovisioned worktree is planned from the ``.gitmodules``
+    on its disk, the file the real run reads."""
+    _add_second_submodule_to_main(repo)
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    base = ["create", "--checkout", "renamed", "--repo", str(repo), "--root", root]
+    assert _run([*base, "--print"]).exit_code == 0
+    wt = Path(root) / "renamed"
+    state._state_path(wt).unlink()
+
+    planned = _run([*base, "--dry-run", "--json"])
+    assert planned.exit_code == 0, planned.output
+    assert _dry_run_submodule_plan(json.loads(planned.stdout)["commands"]) == (
+        ["libC"],
+        ["libB"],
+    )
 
 
 def test_managed_file_copy_refuses_a_directory_planted_mid_copy(tmp_path: Path, monkeypatch):

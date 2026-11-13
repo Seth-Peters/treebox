@@ -723,18 +723,28 @@ def submodule_paths(repo: str | Path) -> list[str]:
     the working tree at ``repo`` (empty when there is no such regular file)."""
     if not has_gitmodules(repo):
         return []
+    return _submodule_paths_from(repo, ["-f", ".gitmodules"])
+
+
+def submodule_paths_at_revision(repo: str | Path, revision: str) -> list[str]:
+    """Relative paths of configured submodules in the ``.gitmodules`` that
+    ``revision`` tracks, without checkout: what ``submodule_paths`` reads in
+    a worktree that ``worktree add`` checks out at ``revision``.
+
+    As in ``has_gitmodules``, only a regular file counts: a symlink (mode
+    120000) or a directory at that name declares nothing.
+    """
+    out = _run(["-C", str(repo), "ls-tree", revision, "--", ".gitmodules"])
+    if not any(entry.split(" ", 1)[0] in {"100644", "100755"} for entry in out.splitlines()):
+        return []
+    return _submodule_paths_from(repo, ["--blob", f"{revision}:.gitmodules"])
+
+
+def _submodule_paths_from(repo: str | Path, source: list[str]) -> list[str]:
+    """The ``submodule.*.path`` values of one ``.gitmodules`` (a ``-f`` file
+    or a ``--blob``); empty when git cannot parse it."""
     try:
-        out = _run(
-            [
-                "-C",
-                str(repo),
-                "config",
-                "-f",
-                ".gitmodules",
-                "--get-regexp",
-                r"^submodule\..*\.path$",
-            ]
-        )
+        out = _run(["-C", str(repo), "config", *source, "--get-regexp", r"^submodule\..*\.path$"])
     except GitError:
         return []
     paths = []
