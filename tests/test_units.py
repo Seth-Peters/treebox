@@ -4078,6 +4078,22 @@ def test_bundled_dockerfile_keeps_no_download_caches_or_unused_browsers():
         assert args.split() == ["--only-shell", "chromium"], args
 
 
+def test_bundled_image_runs_playwright_cli_chromium_without_its_own_sandbox():
+    # On a Linux Docker host (stock Ubuntu 24.04) Docker's default seccomp
+    # profile blocks the user namespaces Chromium's sandbox needs, and
+    # playwright-cli turns that sandbox on for its "chrome" channel on Linux:
+    # Chromium then aborts with "No usable sandbox!". The container is the
+    # isolation boundary, so the image turns Chromium's own sandbox off.
+    import treebox.assets as assets
+
+    text, _ = _bundled_dockerfile_args()
+    assert re.search(r"^ENV PLAYWRIGHT_MCP_SANDBOX=false$", text, flags=re.M)
+    config = json.loads(
+        (assets._bundled_template_dir() / assets.CONFIG_FILE).read_text(encoding="utf-8")
+    )
+    assert "PLAYWRIGHT_MCP_SANDBOX" not in config.get("env", {})
+
+
 def test_bundled_container_json_does_not_override_dockerfile_pins():
     # Version pins live in the Dockerfile next to their checksums. A build arg
     # in container.json would silently override them (it did: "latest").

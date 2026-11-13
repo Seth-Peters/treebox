@@ -237,6 +237,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends vim cmake \
 USER ${USERNAME}
 ```
 
+**Chromium runs without its own sandbox.** In the container, Playwright
+starts Chromium with `--no-sandbox`. Chromium's sandbox needs new user
+namespaces, and Docker's default seccomp profile blocks them on a Linux Docker
+host (for example a stock Ubuntu 24.04 host or a GitHub Actions runner), so
+there Chromium stops with `No usable sandbox!`. This is acceptable because the
+container is the isolation boundary: the agent in it already runs any code
+it likes, so Chromium's sandbox adds no protection against the agent. The
+playwright library and `playwright screenshot` turn the sandbox off by
+default. `playwright-cli` turns it on, so the image sets
+`ENV PLAYWRIGHT_MCP_SANDBOX=false` (see the `PLAYWRIGHT_MCP_SANDBOX` variable
+in the [playwright-cli README](https://github.com/microsoft/playwright-cli#configuration-file), under "Configuration via env").
+To turn the sandbox back on, remove that line from your own template's
+`Dockerfile`, and give the container a seccomp profile that allows user
+namespaces (`runArgs` in `container.json`); a script also needs
+`chromiumSandbox: true` in its launch options.
+
 **Hosts the build needs.** A build needs outbound HTTPS to these hosts (Debian
 uses HTTP):
 

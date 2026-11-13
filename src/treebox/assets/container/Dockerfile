@@ -125,8 +125,19 @@ RUN case "$(dpkg --print-architecture)" in \
 # headless. Firefox, WebKit and the full Chromium build are not installed.
 # playwright-cli opens the "chrome" channel, which it finds at
 # /opt/google/chrome/chrome: that path points to the headless shell.
+#
+# Chromium runs without its own sandbox here: the container is the isolation
+# boundary, and the agent in it already runs any code it likes. Chromium's
+# sandbox needs new user namespaces, which Docker's default seccomp profile
+# blocks on a Linux Docker host (for example stock Ubuntu 24.04), so there
+# Chromium aborts with "No usable sandbox!". The playwright library and
+# `playwright screenshot` already launch Chromium with --no-sandbox (their
+# chromiumSandbox option defaults to false). playwright-cli turns the sandbox
+# on for its "chrome" channel on Linux unless PLAYWRIGHT_MCP_SANDBOX=false.
+# To turn the sandbox back on, remove that line.
 USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_MCP_SANDBOX=false
 ARG PLAYWRIGHT_CLI_VERSION=0.1.24
 ARG PLAYWRIGHT_VERSION=1.65.0
 RUN treebox-online registry.npmjs.org \
