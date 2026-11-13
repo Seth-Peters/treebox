@@ -107,8 +107,8 @@ Module map:
   name → live branch → unique substring (`resolve.py`); ambiguity exits 2.
   `create` and `enter` share `_run_session` for runner preflight, the
   worktree lock (see `locking.py`), provision error classification, and the final
-  `--json`/`--print`/launch fork (the emit fork calls `runner.prepare_entry`
-  so the printed `entry_command` is never dead on replay).
+  `--json`/`--print`/launch fork. Every path first calls `runner.prepare_entry`.
+  See its contract in `runners/base.py`.
   `_reconcile_with_state` folds recorded
   creation-time choices into existing-worktree sessions before the runner and
   harness objects are resolved: recorded isolation conflicts with a mismatched
@@ -224,9 +224,9 @@ What a sandboxed backend must **guarantee** (the security invariants):
   sandbox-writable worktree state never records Docker volume ownership.
 - The shared `.git/hooks` is presented read-only (host git executes it).
 - Egress lockdown, when enabled, exists before any workspace-derived code
-  runs (firewall-before-post-create), and is re-established when
-  `prepare_entry` restarts a stopped sandbox (iptables rules don't survive
-  a container restart).
+  runs and at every entry. For runner changes, read the `prepare_entry`
+  contract in `runners/base.py`. For Docker host access, read the
+  [operator-template firewall rules](docs/configuration.md#the-containerjson-schema).
 - Only user-level treebox config is ever read — never the target repo's.
 - Sandboxed runners must enforce the
   [non-root user requirement](docs/install.md#what-each-isolation-mode-needs)

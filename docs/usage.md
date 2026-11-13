@@ -260,10 +260,27 @@ Both conditions stop `create` or `enter` with an
 [`ERROR` failure](#scripting-against-treebox); inspect their contents before
 removing the conflict.
 
-A container that stopped since setup (host reboot, manual `docker stop`)
-is restarted with the firewall re-established
-before the agent launches - and before a `--print`/`--json` command is
-emitted - so a treebox-owned restart never leaves egress silently open.
+### Docker entry and firewall recovery
+
+treebox restarts a stopped container before entry. If the container was
+created with the firewall enabled, treebox runs `init-firewall.sh` on every
+entry, including entries to running containers. This step occurs before the
+agent starts or treebox emits a `--print` or `--json` command. It restores
+rules lost after a container restart outside treebox.
+
+If initialization fails during setup or entry, treebox exits with
+`FIREWALL_FAILED` (exit `1`). It does not start the agent or emit an entry
+command. The bundled script drops traffic on failure. Its allowlist fetch
+then cannot succeed on another entry.
+
+Inspect the operator template named in `error.hint`. If the hint includes a
+teardown and create command, commit or back up uncommitted work before you
+use it. The command checks out the current branch and preserves the worktree
+path, template, firewall choice, and harness.
+
+If the CLI cannot restore the same path and branch, the hint gives no
+teardown command. Keep the worktree and repair the sandbox manually. If no
+branch is available, save the current work on a branch first.
 
 ## `list` — what exists, what's stale
 
@@ -496,9 +513,8 @@ agent — it hands you the launch command instead, so your script decides when
 to run it. The command is self-contained for both isolation modes: it carries
 the worktree directory (`cd … && exec …` on host, `docker exec -w …` in
 docker), so replaying it from any directory launches the agent in the box.
-It is also entry-ready: for a docker worktree, a stopped container is
-restarted (with the firewall re-applied) before the command is printed, so
-the emitted command is never dead on replay.
+Before it prints the command, treebox completes the
+[Docker entry checks](#docker-entry-and-firewall-recovery).
 Without `--json`, `--print`, or `--dry-run`, `create` and `enter` launch the
 agent and exit with the agent process's exit code. Human `--dry-run` writes the
 would-run plan to stderr; `--dry-run --json` writes its payload to stdout.
@@ -574,5 +590,6 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
+| `FIREWALL_FAILED` | `1` | The sandbox firewall failed to initialize. See [firewall recovery](#docker-entry-and-firewall-recovery). |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |

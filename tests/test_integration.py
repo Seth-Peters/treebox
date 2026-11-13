@@ -1831,6 +1831,42 @@ def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
     assert res.stdout == ""
 
 
+def test_enter_firewall_failure_is_classified_and_never_launches(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed firewall init on entry is a classified, non-zero result on
+    every path (issue #59): --json carries FIREWALL_FAILED and emits no
+    payload, and the launch path never starts the agent with open egress."""
+    from treebox.runners import docker as dr
+    from treebox.runners.base import FirewallError
+
+    wt = Path(root) / "feature-auth"
+    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_state_runner(wt, "docker")
+
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+
+    def _fail(self: dr.DockerRunner, w: object) -> None:
+        raise FirewallError("firewall initialization failed: ERROR: boom", hint="re-create")
+
+    launched: list[object] = []
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", _fail)
+    monkeypatch.setattr(dr.DockerRunner, "launch", lambda self, w, **kw: launched.append(w) or 0)
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 1, res.output
+    assert res.stdout == ""
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "FIREWALL_FAILED"
+    assert "boom" in err["message"]
+    assert err["hint"] == "re-create"
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 1, res.output
+    assert launched == []
+
+
 def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, hermetic_config):
     """A worktree recorded with a runner this version doesn't know is a loud
     conflict — never silently entered with the host default."""

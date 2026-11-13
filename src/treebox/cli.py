@@ -57,7 +57,7 @@ from .models import (
     worktree_root,
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
-from .runners import VALID_ISOLATION, PreflightError, Runner, get_runner
+from .runners import VALID_ISOLATION, FirewallError, PreflightError, Runner, get_runner
 
 # Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
 EXIT_OK = 0
@@ -434,6 +434,8 @@ def _classify(exc: Exception) -> _ErrorInfo:
     if isinstance(exc, PreflightError):
         # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    if isinstance(exc, FirewallError):
+        return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -860,13 +862,12 @@ def _run_session(
         run.preflight(reporter)
         with locking.worktree_lock(path):
             outcome = provision_call()
-            if json_out or print_only:
-                # The launch path makes the sandbox entry-ready inside
-                # run.launch; the emit path must do the same, or a stopped
-                # container yields an entry_command that is dead on replay
-                # (and a manual `docker start` workaround would silently
-                # skip the firewall re-init).
-                run.prepare_entry(outcome.worktree)
+            # Every entry - launch and emit alike - makes the sandbox
+            # entry-ready first: a stopped container is started, and the
+            # firewall is re-applied even on a running one (`docker restart`
+            # outside treebox drops the rules). A failure here is classified
+            # and nothing launches or is emitted.
+            run.prepare_entry(outcome.worktree)
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
