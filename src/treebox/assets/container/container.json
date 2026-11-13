@@ -2,9 +2,7 @@
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
-      "TZ": "UTC",
-      "CODEX_CLI_VERSION": "latest",
-      "CLAUDE_CODE_VERSION": "latest"
+      "TZ": "UTC"
     }
   },
   "user": "agent",

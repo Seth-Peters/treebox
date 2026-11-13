@@ -24,8 +24,10 @@ Module API (what later features extend)::
     record.save(dataclasses.replace(rec, ...)) # atomic replace
     record.remove(path)                        # on teardown
 
-There is one schema version. Extending it: add a field to
-``WorktreeRecord`` as a required key of that version. A record with another
+There is one schema version. The record format has never
+been released, so extending it means: add a field to ``WorktreeRecord`` as a
+required key of that version, with no ``SCHEMA_VERSION`` bump and no upgrade
+path. A record with another
 version, an unknown key or a missing key is invalid, so a worktree made by
 another treebox version is torn down and created again, never reinterpreted.
 

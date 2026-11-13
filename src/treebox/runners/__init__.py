@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final
 
-from .base import PreflightError, Runner, RunnerFacts, RunnerTeardownResult
+from .base import FirewallError, PreflightError, Runner, RunnerFacts, RunnerTeardownResult
 from .docker import DockerRunner
 from .host import HostRunner
 
@@ -52,6 +52,7 @@ __all__ = [
     "RUNNERS",
     "VALID_ISOLATION",
     "DockerRunner",
+    "FirewallError",
     "HostRunner",
     "PreflightError",
     "Runner",

@@ -1,0 +1,10 @@
+# Keeps the commit-SHA pins of every action in .github/workflows/ current.
+# Dependabot updates the SHA and its trailing version comment together.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"

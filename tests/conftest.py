@@ -17,6 +17,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def non_root_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from treebox import system
+
+    monkeypatch.setattr(system, "identity", lambda: system.Identity(uid=1000, gid=1000))
+
+
 @pytest.fixture(autouse=True)
 def isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide the developer's global/system gitconfig from every git subprocess.
