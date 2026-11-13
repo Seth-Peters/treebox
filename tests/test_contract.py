@@ -208,6 +208,8 @@ CREATE_KEYS = {
     "created",
     "resources",
 }
+# enter also says which limits config or template now give differently.
+ENTER_KEYS = CREATE_KEYS | {"resources_drift"}
 DRY_RUN_KEYS = {
     "schemaVersion",
     "dry_run",
@@ -265,7 +267,7 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
     entered = json.loads(
         _run(["enter", "shape", "--repo", str(repo), "--root", root, "--json"]).stdout
     )
-    assert set(entered) == CREATE_KEYS
+    assert set(entered) == ENTER_KEYS
     assert entered["created"] is False
 
     # list

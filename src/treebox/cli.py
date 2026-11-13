@@ -381,11 +381,11 @@ def _note_ignored_limits(reporter: Reporter, run: Runner, ignored: list[str]) ->
         )
 
 
-def _recreate_command(
-    rec: record.WorktreeRecord, branch: str | None, limits: ResourceLimits
-) -> str:
-    """The exact commands that re-create a worktree's sandbox with ``limits``
-    (teardown keeps the branch, and its commits, by default)."""
+def _recreate_command(rec: record.WorktreeRecord, branch: str | None, flags: ResourceLimits) -> str:
+    """The exact commands that re-create a worktree's sandbox. ``flags`` are
+    the limits to choose by flag; every other limit comes from config and the
+    template again, as on any create (teardown keeps the branch, and its
+    commits, by default)."""
     name = rec.worktree.name
     create = ["treebox", "create", name]
     if branch and branch != "detached":
@@ -393,7 +393,7 @@ def _recreate_command(
     create += ["--isolation", rec.isolation]
     if rec.firewall:
         create.append("--firewall")
-    create += ["--template", rec.template, "-H", rec.harness, *limits.cli_flags()]
+    create += ["--template", rec.template, "-H", rec.harness, *flags.cli_flags()]
     return f"treebox teardown {name} && {shlex.join(create)}"
 
 
@@ -406,14 +406,20 @@ def _check_entry_resources(
     explicit: ResourceLimits,
     config_limits: ResourceLimits,
     json_out: bool,
-) -> None:
+) -> ResourceLimits:
     """The recorded limits are what an existing sandbox has, and a container's
     limits cannot change in place. An explicit flag that differs is a
-    conflict (exit 5) with the re-create commands; a config or template
-    value that now differs is a warning with the same commands - never a
-    silent no-op."""
+    conflict (exit 5) with the re-create commands. A limit that config or the
+    template gave at create, and that they now give differently, is drift: a
+    warning with the same commands, never a silent no-op. Returns the drift
+    (the values config and template now give; unset = no drift).
+
+    A limit an explicit ``create`` flag chose (``rec.explicit_resources``)
+    never drifts: the operator picked it on purpose. Neither does one this
+    ``enter`` restates by flag."""
     _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
     recorded = rec.resources
+    chosen = recorded.only(rec.explicit_resources)
     differs = [n for n in explicit.names() if getattr(explicit, n) != getattr(recorded, n)]
     if differs:
         flags = ", ".join(
@@ -427,7 +433,7 @@ def _check_entry_resources(
             code=EXIT_CONFLICT,
             error_code="RESOURCE_MISMATCH",
             hint="Drop the flag to keep the recorded limits, or commit your work and "
-            "re-create the sandbox: " + _recreate_command(rec, branch, explicit.over(recorded)),
+            "re-create the sandbox: " + _recreate_command(rec, branch, explicit.over(chosen)),
             path=str(record.record_path(rec.worktree)),
             json_out=json_out,
         )
@@ -438,14 +444,18 @@ def _check_entry_resources(
     # Only a value the config or template sets counts: an unset default asks
     # for nothing, so it never contradicts a limit chosen at create.
     wanted = config_limits.over(template).only(run.supported_resources)
-    drift = [n for n in wanted.names() if getattr(wanted, n) != getattr(recorded, n)]
-    if drift:
+    pinned = rec.explicit_resources | set(explicit.names())
+    drift = wanted.only(
+        n for n in wanted.names() if n not in pinned and getattr(wanted, n) != getattr(recorded, n)
+    )
+    if drift.names():
         reporter.warn(
             f"limits: this sandbox keeps its recorded limits ({recorded.describe()}); "
-            f"config and template now give {wanted.only(drift).describe()}. A limit "
-            "change cannot apply to an existing sandbox. To apply it, commit your "
-            f"work and re-create: {_recreate_command(rec, branch, wanted.over(recorded))}"
+            f"config and template now give {drift.describe()}. A limit change cannot "
+            "apply to an existing sandbox. To apply it, commit your work and "
+            f"re-create: {_recreate_command(rec, branch, chosen)}"
         )
+    return drift
 
 
 def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
@@ -657,8 +667,11 @@ def _emit_result(
     json_out: bool,
     print_only: bool,
     limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
-    """Write the machine/script-facing result to stdout."""
+    """Write the machine/script-facing result to stdout. ``drift`` (``enter``
+    only) is what config and template now give for a limit the sandbox
+    keeps: ``resources_drift``, every key present, ``null`` = no drift."""
     if json_out:
         payload = {
             "schemaVersion": SCHEMA_VERSION,
@@ -670,6 +683,8 @@ def _emit_result(
             "created": outcome.created,
             "resources": limits.to_json(),
         }
+        if drift is not None:
+            payload["resources_drift"] = drift.to_json()
         _emit_json(payload)
     elif print_only:
         sys.stdout.write(" ".join(shlex.quote(p) for p in outcome.entry_command) + "\n")
@@ -868,7 +883,9 @@ def create(
     limits, ignored_limits = _creation_limits(
         reporter, cfg, run, explicit_limits, json_out=json_out
     )
-    cfg = cfg.with_overrides(resources=limits)
+    cfg = cfg.with_overrides(
+        resources=limits, explicit_resources=frozenset(explicit_limits.names())
+    )
     run = get_runner(cfg)
 
     if dry_run:
@@ -1039,7 +1056,7 @@ def enter(
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
     if rec.resources.names():
         reporter.summary("limits", rec.resources.describe())
-    _check_entry_resources(
+    drift = _check_entry_resources(
         reporter,
         run,
         rec,
@@ -1073,6 +1090,7 @@ def enter(
         print_only=print_only,
         args=args or [],
         limits=rec.resources,
+        drift=drift,
     )
 
 
@@ -1087,6 +1105,7 @@ def _run_session(
     print_only: bool,
     args: list[str],
     limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
     the lock on the worktree at ``path``, the provisioning step, one exception
@@ -1114,7 +1133,7 @@ def _run_session(
         raise _handle(reporter, exc, json_out=json_out) from exc
 
     if json_out or print_only:
-        _emit_result(outcome, json_out=json_out, print_only=print_only, limits=limits)
+        _emit_result(outcome, json_out=json_out, print_only=print_only, limits=limits, drift=drift)
         return
     reporter.blank()
     # Style-A closing line: green "Ready", dim "in <total> — launching <harness>".

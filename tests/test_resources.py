@@ -401,28 +401,77 @@ def test_record_round_trips_limits(tmp_path: Path):
     wt = tmp_path / "wts" / "w"
     wt.mkdir(parents=True)
     limits = ResourceLimits(cpus=1.5, memory="4g", pids=512)
-    record.save(record.WorktreeRecord(wt, "main", "docker", "claude", False, "default", limits))
+    rec = record.WorktreeRecord(
+        wt, "main", "docker", "claude", False, "default", limits, frozenset({"pids", "cpus"})
+    )
+    record.save(rec)
     data = json.loads(record.record_path(wt).read_text())
     assert data["schemaVersion"] == record.SCHEMA_VERSION == 2
     assert data["resources"] == {"cpus": 1.5, "memory": "4g", "pids": 512}
-    assert record.load(wt).resources == limits
+    assert data["explicitResources"] == ["cpus", "pids"]  # display order
+    assert record.load(wt) == rec
+
+
+@pytest.mark.parametrize(
+    ("explicit", "reason"),
+    [
+        (None, "missing key"),
+        ("memory", "list of distinct limit names"),
+        (["memory", "memory"], "list of distinct limit names"),
+        ([1], "list of distinct limit names"),
+        (["swap"], "unset limit"),
+        (["cpus"], "unset limit"),  # cpus is not recorded: a flag always sets a value
+    ],
+)
+def test_record_explicit_resources_are_validated(tmp_path: Path, explicit: object, reason: str):
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(
+        record.WorktreeRecord(
+            wt, "main", "docker", "claude", False, "default", ResourceLimits(memory="4g")
+        )
+    )
+    path = record.record_path(wt)
+    data = json.loads(path.read_text())
+    if explicit is None:
+        del data["explicitResources"]
+    else:
+        data["explicitResources"] = explicit
+    path.write_text(json.dumps(data))
+    with pytest.raises(record.RecordInvalidError, match=reason):
+        record.load(wt)
 
 
 @pytest.fixture
-def boxed(repo: Path, root: str, home: Path, engine, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A worktree whose record says docker with recorded limits (setup and
-    container entry are stubbed: this is about the limit policy)."""
-    _run(["create", "lim", "--repo", str(repo), "--root", root, "--print"])
-    wt = Path(root) / "lim"
-    limits = ResourceLimits(cpus=1.5, memory="4g", pids=512)
-    record.save(dataclasses.replace(record.load(wt), isolation="docker", resources=limits))
+def docker_cli(engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real CLI on the docker runner with the fake engine: image build,
+    setup, and container entry are stubbed (this is about the limit policy)."""
+    monkeypatch.setattr(dr.DockerRunner, "setup", lambda self, w, cold, reporter: None)
     monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, w: None)
     monkeypatch.setattr(dr.DockerRunner, "refresh", lambda self, w, reporter: None)
-    return wt
+
+
+def _create(repo: Path, root: str, *extra: str):
+    res = _run(
+        ["create", "lim", "--repo", str(repo), "--root", root, "--isolation", "docker", *extra]
+    )
+    assert res.exit_code == 0, res.output
+    return res
+
+
+@pytest.fixture
+def boxed(repo: Path, root: str, home: Path, docker_cli) -> Path:
+    """A docker worktree created with the limits as explicit flags."""
+    _create(repo, root, "--cpus", "1.5", "--memory", "4g", "--pids-limit", "512", "--print")
+    return Path(root) / "lim"
 
 
 def _enter(repo: Path, root: str, *extra: str):
     return _run(["enter", "lim", "--repo", str(repo), "--root", root, *extra])
+
+
+_DRIFT = "limits: this sandbox keeps"
+_NO_DRIFT = {"cpus": None, "memory": None, "pids": None}
 
 
 def test_enter_with_a_different_limit_is_a_conflict_with_recreate_commands(
@@ -446,17 +495,82 @@ def test_enter_restating_the_recorded_limit_is_fine(repo: Path, root: str, boxed
     assert json.loads(res.stdout)["resources"] == {"cpus": 1.5, "memory": "4g", "pids": 512}
 
 
-def test_enter_warns_when_config_now_gives_another_limit(
-    repo: Path, root: str, home: Path, boxed: Path
+def test_explicit_flag_under_another_config_default_never_drifts(
+    repo: Path, root: str, home: Path, docker_cli
 ):
+    """`--memory 4g` under `memory = "2g"` is a choice, not drift: no warning
+    on enter, also after the config default changes again."""
+    _config(home, '[resources]\nmemory = "2g"\n')
+    _create(repo, root, "--memory", "4g", "--print")
+    assert record.load(Path(root) / "lim").explicit_resources == {"memory"}
+    for text in ('[resources]\nmemory = "2g"\n', '[resources]\nmemory = "3g"\n'):
+        _config(home, text)
+        res = _enter(repo, root, "--print")
+        assert res.exit_code == 0, res.output
+        assert _DRIFT not in res.stderr
+        res = _enter(repo, root, "--json")
+        assert res.exit_code == 0, res.output
+        assert json.loads(res.stdout)["resources_drift"] == _NO_DRIFT
+
+
+def test_enter_warns_once_when_config_changed_after_create(
+    repo: Path, root: str, home: Path, docker_cli
+):
+    _config(home, '[resources]\nmemory = "2g"\n')
+    _create(repo, root, "--cpus", "1.5", "--print")
     res = _enter(repo, root, "--print")
-    assert res.exit_code == 0 and "limits: this sandbox keeps" not in res.stderr
-    _config(home, '[resources]\nmemory = "8g"\n')
+    assert res.exit_code == 0 and _DRIFT not in res.stderr  # nothing changed yet
+    _config(home, '[resources]\nmemory = "3g"\n')
     res = _enter(repo, root, "--print")
     assert res.exit_code == 0, res.output
-    assert "keeps its recorded limits (cpus 1.5 · memory 4g · pids 512)" in res.stderr
-    assert "config and template now give memory 8g" in res.stderr
-    assert "--memory 8g" in res.stderr
+    assert res.stderr.count(_DRIFT) == 1
+    assert "keeps its recorded limits (cpus 1.5 · memory 2g)" in res.stderr
+    assert "config and template now give memory 3g" in res.stderr
+    # The re-create commands restate only the flag-chosen limit: memory comes
+    # from the config again.
+    assert "--template default -H claude --cpus 1.5\n" in res.stderr
+    res = _enter(repo, root, "--json")
+    assert res.exit_code == 0, res.output
+    assert res.stderr == ""  # one JSON payload on stdout, nothing printed
+    payload = json.loads(res.stdout)
+    assert payload["resources_drift"] == {"cpus": None, "memory": "3g", "pids": None}
+    assert payload["resources"] == {"cpus": 1.5, "memory": "2g", "pids": None}
+
+
+def test_enter_warns_once_when_the_template_changed_after_create(
+    repo: Path, root: str, home: Path, docker_cli, tmp_path: Path
+):
+    _template(tmp_path / "tpl", {"resources": {"pids": 256}})
+    _create(repo, root, "--print")
+    res = _enter(repo, root, "--print")
+    assert res.exit_code == 0 and _DRIFT not in res.stderr
+    _template(tmp_path / "tpl", {"resources": {"pids": 300}})
+    res = _enter(repo, root, "--print")
+    assert res.exit_code == 0, res.output
+    assert res.stderr.count(_DRIFT) == 1
+    assert "config and template now give pids 300" in res.stderr
+    res = _enter(repo, root, "--json")
+    assert json.loads(res.stdout)["resources_drift"] == {"cpus": None, "memory": None, "pids": 300}
+
+
+def test_restating_the_recorded_value_is_silent(repo: Path, root: str, home: Path, docker_cli):
+    _config(home, '[resources]\nmemory = "2g"\n')
+    _create(repo, root, "--print")
+    _config(home, '[resources]\nmemory = "3g"\n')
+    res = _enter(repo, root, "--memory", "2048m", "--print")
+    assert res.exit_code == 0, res.output
+    assert _DRIFT not in res.stderr
+    res = _enter(repo, root, "--memory", "2g", "--json")
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["resources_drift"] == _NO_DRIFT
+
+
+def test_host_enter_has_no_drift(repo: Path, root: str, home: Path):
+    _run(["create", "lim", "--repo", str(repo), "--root", root, "--print"])
+    _config(home, '[resources]\nmemory = "3g"\n')
+    res = _enter(repo, root, "--json")
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["resources_drift"] == _NO_DRIFT
 
 
 def test_list_json_shows_recorded_limits(repo: Path, root: str, boxed: Path):
@@ -476,6 +590,23 @@ def test_resumed_create_must_restate_the_recorded_limits(repo: Path, root: str, 
     error = json.loads(res.stderr)["error"]
     assert error["code"] == "RECORD_CONFLICT"
     assert "--pids-limit 64" in error["hint"]
+
+
+def test_resume_restating_a_default_limit_by_flag_keeps_its_source(
+    repo: Path, root: str, home: Path, docker_cli
+):
+    """The hint restates every recorded limit as a flag. That resume matches
+    the record (the values are the policy), and the record keeps how each
+    limit was first chosen, so a later config change still drifts."""
+    from treebox import state
+
+    _config(home, '[resources]\nmemory = "2g"\n')
+    _create(repo, root, "--print")
+    wt = Path(root) / "lim"
+    state.save(wt, state.WorktreeState(lockfile_hash="", provisioned=False))
+    _config(home, "")
+    _create(repo, root, "--memory", "2g", "--print")
+    assert record.load(wt).explicit_resources == frozenset()
 
 
 # --- the docker run command: recorded limits on every (re)create -------------------

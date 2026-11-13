@@ -42,9 +42,10 @@ from pathlib import Path
 from typing import Any
 
 from .models import is_valid_template_name, same_path
-from .resources import ResourceLimitError, ResourceLimits, from_mapping
+from .resources import RESOURCE_NAMES, ResourceLimitError, ResourceLimits, from_mapping
 
-# 2 added ``resources`` (the effective CPU/memory/process limits). A version-1
+# 2 added ``resources`` (the effective CPU/memory/process limits) and
+# ``explicitResources`` (which of them a create flag chose). A version-1
 # record has no limits and still loads: it means "no treebox cap".
 SCHEMA_VERSION = 2
 _SUPPORTED_VERSIONS = (1, 2)
@@ -55,7 +56,7 @@ RECORD_DIR = ".records"
 _V1_KEYS = frozenset(
     {"schemaVersion", "worktree", "base", "isolation", "harness", "firewall", "template"}
 )
-_KEYS = _V1_KEYS | {"resources"}
+_KEYS = _V1_KEYS | {"resources", "explicitResources"}
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,9 @@ class WorktreeRecord:
     a template identifier (``models.is_valid_template_name``); ``firewall`` is
     always a real bool (``False`` for host worktrees). ``resources`` are the
     limits the sandbox was created with (unset = no treebox cap; always unset
-    for a runner that applies none, such as host)."""
+    for a runner that applies none, such as host). ``explicit_resources``
+    names the limits an explicit ``create`` flag chose; every other limit came
+    from config or the template, so only those can drift."""
 
     worktree: Path
     base: str
@@ -76,6 +79,7 @@ class WorktreeRecord:
     firewall: bool
     template: str
     resources: ResourceLimits = field(default_factory=ResourceLimits)
+    explicit_resources: frozenset[str] = frozenset()
 
 
 class RecordError(RuntimeError):
@@ -162,6 +166,17 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         limits = from_mapping(data.get("resources", {}), source="resources")
     except ResourceLimitError as exc:
         raise _invalid(worktree, path, str(exc).rstrip(".")) from exc
+    explicit = data.get("explicitResources", [])
+    if (
+        not isinstance(explicit, list)
+        or not all(isinstance(n, str) for n in explicit)
+        or len(set(explicit)) != len(explicit)
+    ):
+        raise _invalid(worktree, path, "explicitResources must be a list of distinct limit names")
+    # A flag always sets a value, so an explicit limit is a recorded one.
+    stray = sorted(set(explicit) - set(limits.names()))
+    if stray:
+        raise _invalid(worktree, path, f"explicitResources names unset limit(s) {', '.join(stray)}")
     return WorktreeRecord(
         worktree=worktree,
         base=data["base"],
@@ -170,6 +185,7 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         firewall=data["firewall"],
         template=data["template"],
         resources=limits,
+        explicit_resources=frozenset(explicit),
     )
 
 
@@ -188,6 +204,7 @@ def save(rec: WorktreeRecord) -> None:
         "firewall": rec.firewall,
         "template": rec.template,
         "resources": rec.resources.to_json(),
+        "explicitResources": [n for n in RESOURCE_NAMES if n in rec.explicit_resources],
     }
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

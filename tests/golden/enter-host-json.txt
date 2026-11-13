@@ -17,6 +17,11 @@
     "cpus": null,
     "memory": null,
     "pids": null
+  },
+  "resources_drift": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
   }
 }
 # --- stderr ---

@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 
@@ -443,6 +443,7 @@ def _creation_record(
         firewall=config.firewall,
         template=config.template,
         resources=config.resources,
+        explicit_resources=config.explicit_resources,
     )
 
 
@@ -459,7 +460,9 @@ def _check_resume_policy(wt: Worktree, policy: record.WorktreeRecord) -> bool:
         prior = record.load(wt.path)
     except record.RecordMissingError:
         return False
-    if prior != policy:
+    # The limits must match; whether a flag or a default gave them does not
+    # change the sandbox, so the record keeps how they were first chosen.
+    if replace(prior, explicit_resources=policy.explicit_resources) != policy:
         raise RecordConflictError(wt.name, prior)
     return True
 

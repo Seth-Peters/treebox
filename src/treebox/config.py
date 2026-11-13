@@ -77,6 +77,9 @@ class Config:
     # treebox cap. For an existing worktree the CLI replaces this with the
     # limits in its host-owned record (what the sandbox actually has).
     resources: ResourceLimits = field(default_factory=ResourceLimits)
+    # Which of ``resources`` an explicit ``create`` flag chose (never read
+    # from TOML): the record keeps it so only config or template values drift.
+    explicit_resources: frozenset[str] = frozenset()
 
     def with_overrides(
         self,
@@ -91,6 +94,7 @@ class Config:
         setup_hook: list[str] | None = None,
         caches: dict[str, str] | None = None,
         resources: ResourceLimits | None = None,
+        explicit_resources: frozenset[str] | None = None,
     ) -> Config:
         """Return a copy with non-None overrides applied. Values are applied
         as given — callers run ``validate_config`` after flag overrides."""
@@ -105,6 +109,7 @@ class Config:
             "setup_hook": setup_hook,
             "caches": caches,
             "resources": resources,
+            "explicit_resources": explicit_resources,
         }
         applied = {k: v for k, v in overrides.items() if v is not None}
         return replace(self, **applied)
