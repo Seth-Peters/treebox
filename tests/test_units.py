@@ -12,7 +12,7 @@ import pytest
 
 from treebox import ecosystems
 from treebox.config import Config, load_config
-from treebox.models import Worktree, flatten_branch, worktree_path
+from treebox.models import Worktree, derive_name, worktree_path
 from treebox.runners.docker import DockerRunner
 
 
@@ -254,14 +254,29 @@ def test_golden_snapshot_gate_preserves_and_detects_trailing_spaces(tmp_path: Pa
     assert "+meaningful trailing spaces   " in compared.stdout
 
 
-def test_flatten_branch():
-    assert flatten_branch("feature/auth") == "feature--auth"
-    assert flatten_branch("bugfix/docs-outdated") == "bugfix--docs-outdated"
-    assert flatten_branch("simple") == "simple"
+@pytest.mark.parametrize(
+    ("branch", "name"),
+    [
+        ("simple", "simple"),
+        ("feature/auth", "feature--auth"),
+        ("bugfix/docs-outdated", "bugfix--docs-outdated"),
+        ("feature/x/y", "feature--x--y"),
+        ("treebox/fix-auth", "fix-auth"),
+        # A placeholder drops its prefix, then flattens like any branch: the
+        # name is one directory leaf, never a nested path.
+        ("treebox/a/b", "a--b"),
+        ("treebox/a/b/c", "a--b--c"),
+        # Only a leading prefix is a placeholder marker.
+        ("feature/treebox/x", "feature--treebox--x"),
+    ],
+)
+def test_derive_name_flattens_every_branch_shaped_input(branch: str, name: str):
+    assert derive_name(branch) == name
+    assert "/" not in derive_name(branch)
 
 
 def test_name_and_placeholder_helpers():
-    from treebox.models import derive_name, is_placeholder, is_slug, placeholder_branch
+    from treebox.models import is_placeholder, is_slug, placeholder_branch
 
     # NAME is one clean lowercase token — nothing else.
     assert is_slug("fix-auth") and is_slug("x2") and is_slug("brave-otter")
@@ -273,10 +288,6 @@ def test_name_and_placeholder_helpers():
     assert placeholder_branch("brave-otter") == "treebox/brave-otter"
     assert is_placeholder("treebox/brave-otter")
     assert not is_placeholder("feature/auth") and not is_placeholder(None)
-
-    # A placeholder implies its own slug; other branches flatten.
-    assert derive_name("treebox/fix-auth") == "fix-auth"
-    assert derive_name("feature/auth") == "feature--auth"
 
 
 def test_is_valid_name_accepts_slash_separated_slugs():
@@ -653,7 +664,7 @@ def fake_common_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def _boxed_worktree(tmp_path: Path, branch: str = "feature/x") -> Worktree:
-    name = flatten_branch(branch)
+    name = derive_name(branch)
     wt_path = tmp_path / "root" / name
     wt_path.mkdir(parents=True, exist_ok=True)
     return Worktree("/repo", name, branch, "main", wt_path)
@@ -1001,23 +1012,13 @@ def test_docker_refresh_restages_credentials_without_setup(
     assert not staged.exists()
 
 
-def test_firewall_template_fails_closed():
-    """The firewall overlay grants only the needed capabilities and bakes in the
-    env post-create.sh gates on: if the firewall never initialized, workspace
-    setup refuses to run rather than running with open egress."""
+def test_firewall_overlay_grants_required_capabilities():
     import treebox.assets as assets
 
     tpl = assets.template_dir("default")
     fw = json.loads((tpl / "firewall.json").read_text())
     assert fw["env"]["TREEBOX_FIREWALL"] == "1"
     assert "--cap-add=NET_ADMIN" in fw["runArgs"]
-
-    post_create = (tpl / "post-create.sh").read_text()
-    gate = post_create.index("/run/treebox-firewall-ready")
-    assert gate < post_create.index("&& uv sync")  # gate precedes workspace code
-
-    init_fw = (tpl / "init-firewall.sh").read_text()
-    assert "touch" in init_fw and "/run/treebox-firewall-ready" in init_fw
 
 
 def test_template_dir_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1290,7 +1291,14 @@ def test_docker_prepare_entry_restarts_stopped_container_and_relocks_egress(
     assert start < firewall
 
 
-def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fake_common_dir):
+def test_docker_prepare_entry_relocks_egress_of_a_running_container(
+    tmp_path: Path, fake_common_dir
+):
+    """A container restarted outside treebox (`docker restart`) is already
+    running when the operator enters, but its rules are gone (issue #59). So
+    every entry runs the guarded firewall init - the script itself skips the
+    rebuild only when the ready flag AND the live DROP policy are present -
+    and never restarts a running container."""
     cfg = Config(isolation="docker")
     wt = _boxed_worktree(tmp_path)
     slug = DockerRunner(cfg)._slug(wt)
@@ -1298,7 +1306,67 @@ def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fak
 
     DockerRunner(cfg, docker=fake).prepare_entry(wt)
 
-    assert not any(c[0] == "start" or "init-firewall.sh" in " ".join(c) for c in fake.calls)
+    assert not any(c[0] == "start" for c in fake.calls)
+    firewall = [c for c in fake.calls if "init-firewall.sh" in " ".join(c)]
+    assert len(firewall) == 1
+    assert firewall[0][firewall[0].index("-u") + 1] == "root"
+    # The treebox side never reads the ready flag: the decision to skip the
+    # rebuild is the script's alone, and it also checks the live policy.
+    assert not any("treebox-firewall-ready" in " ".join(c) for c in fake.calls)
+
+
+def test_docker_prepare_entry_firewall_failure_is_classified(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed firewall init blocks the entry with a typed error the CLI
+    classifies (FIREWALL_FAILED), carrying the script's own diagnostics."""
+    from treebox.runners.base import FirewallError
+
+    monkeypatch.setattr("treebox.git.branch_for_path", lambda repo, path: "feature/x")
+    cfg = Config(isolation="docker", firewall=True)
+    wt = _boxed_worktree(tmp_path)
+    runner = DockerRunner(cfg)
+    firewall_args = tuple(runner._firewall_command(wt)[1:])
+    fake = _FakeDocker(
+        ids="abc123\n",
+        name=runner._slug(wt),
+        running=True,
+        failures={firewall_args: "ERROR: Failed to fetch GitHub IP ranges"},
+    )
+
+    with pytest.raises(FirewallError, match="Failed to fetch GitHub IP ranges") as raised:
+        DockerRunner(cfg, docker=fake).prepare_entry(wt)
+    # Fail-closed rules block the allowlist fetch, so another entry cannot
+    # recover: the hint points at a fresh container.
+    assert raised.value.hint is not None
+    assert "treebox teardown" in raised.value.hint
+
+
+def test_docker_setup_firewall_failure_is_classified(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
+    """The setup-time lockdown fails the same typed way, and post-create (the
+    first workspace-derived code) never runs."""
+    from treebox.output import StepError
+    from treebox.runners.base import FirewallError
+
+    monkeypatch.setattr("treebox.git.branch_for_path", lambda repo, path: "feature/x")
+
+    class _FailingFirewall(_RecordingReporter):
+        def step(self, label, detail, argv, *, cwd=None, env=None):
+            super().step(label, detail, argv, cwd=cwd, env=env)
+            if "init-firewall.sh" in " ".join(argv):
+                raise StepError(label, 1, "ERROR: Invalid host port: 99999")
+            return ""
+
+    fake = _FakeDocker(ids="")
+    runner = DockerRunner(Config(isolation="docker", firewall=True), docker=fake)
+    rep = _FailingFirewall()
+
+    with pytest.raises(FirewallError, match="Invalid host port"):
+        runner.setup(_boxed_worktree(tmp_path), cold=True, reporter=rep)
+
+    assert not any("post-create.sh" in " ".join(a) for a in rep.steps)
 
 
 def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
@@ -1860,7 +1928,9 @@ def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
     assert run.config.template == "hardened"  # recovered from state, not the config default
 
 
-def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
+def test_docker_doctor_gates_on_binary_and_daemon(
+    monkeypatch: pytest.MonkeyPatch, non_root_identity
+):
     """doctor is the only safety gate before a sandboxed create: each missing
     dependency must raise its own loud PreflightError carrying a stable machine
     code and a remediation hint. Docker is the whole dependency: the binary and
@@ -1887,6 +1957,29 @@ def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
     runner.preflight(rep)  # all dependencies present → no raise
+
+
+def test_docker_preflight_refuses_root_before_any_other_gate(monkeypatch: pytest.MonkeyPatch):
+    """Docker isolation as uid 0 is refused up front: the sandbox user would be
+    root (it could delete its own firewall rules) and the template cannot add a
+    second uid-0 user. The root gate comes first, so a root user with no docker
+    is told the real blocker. The host runner stays usable as root."""
+    from treebox.output import Reporter
+    from treebox.runners import docker as dr
+    from treebox.runners.base import PreflightError
+    from treebox.runners.host import HostRunner
+
+    rep = Reporter(quiet=True)
+    monkeypatch.setattr(dr.system, "identity", lambda: dr.system.Identity(uid=0, gid=0))
+    monkeypatch.setattr(dr.system, "have", lambda c: False)
+    monkeypatch.setattr(dr, "_docker_available", lambda: False)
+
+    with pytest.raises(PreflightError, match="root") as exc_info:
+        DockerRunner(Config(isolation="docker")).preflight(rep)
+    assert exc_info.value.error_code == "RUNNING_AS_ROOT"
+    assert "useradd" in (exc_info.value.hint or "")
+
+    HostRunner(Config()).preflight(rep)  # host isolation as root: no raise
 
 
 def test_docker_preflight_hints_are_platform_aware(monkeypatch: pytest.MonkeyPatch):
@@ -1969,6 +2062,8 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
 
     worktree = tmp_path / "wt"
     worktree.mkdir()
+    # The branch declares the same (untrusted) submodule paths.
+    (worktree / ".gitmodules").write_text((repo / ".gitmodules").read_text())
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
@@ -1990,6 +2085,71 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.
     assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+
+def test_plan_submodules_refuses_unsafe_paths_before_any_copy(tmp_path: Path):
+    """The shared selection rule (real run and dry-run plan) refuses unsafe
+    ``.gitmodules`` paths and skips one the main checkout does not have."""
+    from treebox.provision import SubmoduleStep, plan_submodules
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".gitmodules").write_text(
+        '[submodule "up"]\n\tpath = ../outside\n\turl = x\n'
+        '[submodule "link"]\n\tpath = vendor\n\turl = x\n'
+        '[submodule "ok"]\n\tpath = sub\n\turl = x\n'
+    )
+    (repo / "vendor").symlink_to(outside)
+    (repo / "sub").mkdir()
+
+    steps = plan_submodules(str(repo), ["../outside", "vendor", "sub", "libB"])
+
+    assert steps == [
+        SubmoduleStep("../outside", "refuse", "skipping submodule with unsafe path: '../outside'"),
+        SubmoduleStep("vendor", "refuse", "skipping submodule behind a symlink: 'vendor'"),
+        SubmoduleStep("sub", "copy"),
+        SubmoduleStep("libB", "skip", f"skipped libB · not checked out in {repo}"),
+    ]
+    assert plan_submodules(str(repo), []) == []
+
+
+def test_submodule_paths_at_revision_reads_only_a_regular_gitmodules(tmp_path: Path):
+    """Like ``has_gitmodules`` on a checked-out tree: a tracked symlink or
+    directory named ``.gitmodules`` declares nothing, and no file is checked out."""
+    import subprocess
+
+    from treebox import git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def commit(message: str) -> str:
+        run = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@e"]
+        subprocess.run([*run, "add", "-A"], check=True)
+        subprocess.run([*run, "commit", "-qm", message, "--allow-empty"], check=True)
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    empty = commit("empty")
+    (repo / "real.ini").write_text('[submodule "a"]\n\tpath = libA\n\turl = x\n')
+    (repo / ".gitmodules").write_text('[submodule "b"]\n\tpath = libB\n\turl = x\n')
+    regular = commit("regular")
+    (repo / ".gitmodules").unlink()
+    (repo / ".gitmodules").symlink_to("real.ini")
+    symlink = commit("symlink")
+    (repo / ".gitmodules").unlink()
+    (repo / ".gitmodules").mkdir()
+    (repo / ".gitmodules" / "x").write_text('[submodule "c"]\n\tpath = libC\n')
+    directory = commit("directory")
+
+    assert git.submodule_paths_at_revision(repo, empty) == []
+    assert git.submodule_paths_at_revision(repo, regular) == ["libB"]
+    assert git.submodule_paths_at_revision(repo, symlink) == []
+    assert git.submodule_paths_at_revision(repo, directory) == []
 
 
 def test_copy_env_is_force_ignored_in_the_worktree(tmp_path: Path):
@@ -2028,7 +2188,9 @@ def test_git_argv_uses_end_of_options_separator(monkeypatch: pytest.MonkeyPatch)
     git.worktree_add("/r", "/wt", git.BranchPlan("new", "b", "--detach"))
     git.delete_branch("/r", "b")
 
-    local, new, delete = calls
+    resolve, *_ = [c for c in calls if "rev-parse" in c]
+    assert resolve[-2:] == ["--end-of-options", "--detach^{commit}"]
+    local, new, delete = [c for c in calls if "rev-parse" not in c]
     assert local[-3:] == ["--", "/wt", "b"]
     assert new[-5:] == ["-b", "b", "--", "/wt", "--detach"]
     assert delete[-2:] == ["--", "b"]

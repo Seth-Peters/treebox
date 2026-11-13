@@ -171,8 +171,22 @@ First run builds your image (cached after that), provisions the worktree, runs
 - `postCreate` → the command exec'd in the workspace after the container starts
 
 When the firewall is enabled (`firewall = true` in config, or `--firewall` per
-run; `--no-firewall` opts one run out), `firewall.json` deep-merges on top. Any
-container config in the target repo itself is deliberately ignored — see
+run; `--no-firewall` opts one run out), `firewall.json` deep-merges on top.
+The bundled `init-firewall.sh` permits DNS, GitHub IP ranges, and addresses
+resolved from `ALLOWED_DOMAINS` in `allowed-domains.sh`.
+
+The default gateway has no blanket exception. To permit specific TCP ports
+at that address, set `ALLOWED_HOST_PORTS` in your template's
+`allowed-domains.sh`, for example `ALLOWED_HOST_PORTS=(5432 8080)`.
+Use decimal port numbers from `1` to `65535`, without leading zeros.
+An empty or absent array opens no additional ports. On Docker Desktop, the
+gateway is the engine VM, not the macOS host.
+
+The allowlist is baked into the image from the operator template. After an
+edit, [re-create the sandbox](usage.md#docker-entry-and-firewall-recovery)
+to apply the change. Existing operator templates keep their own scripts;
+treebox does not replace them with updated bundled scripts. Any container
+config in the target repo itself is deliberately ignored. See
 [how it works](how-it-works.md#the-sandbox-config-lives-outside-the-box).
 
 ## Environment variables
@@ -198,5 +212,6 @@ the branch commits `.env/`, or an agent created one - treebox leaves it
 untouched and skips the copy with a warning (`.env not copied: ... is a
 directory in this worktree`); `create` and `enter` still succeed, and
 `treebox list --json` reports `"env": "absent"` for that worktree. Rename or
-remove the directory on the branch to get the copy back. `.gitmodules` follows
-the same rule.
+remove the directory on the branch to get the copy back. Treebox never copies
+`.gitmodules`: the worktree keeps its branch's own file (see
+[submodule copies](usage.md#submodule-copies-and-recovery)).

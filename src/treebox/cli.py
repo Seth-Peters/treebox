@@ -49,7 +49,6 @@ from .models import (
     WorktreeRow,
     derive_name,
     expand_user,
-    flatten_branch,
     is_placeholder,
     is_valid_name,
     path_is_under,
@@ -59,7 +58,7 @@ from .models import (
     worktree_root,
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
-from .runners import VALID_ISOLATION, PreflightError, Runner, get_runner
+from .runners import VALID_ISOLATION, FirewallError, PreflightError, Runner, get_runner
 
 # Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
 EXIT_OK = 0
@@ -284,6 +283,29 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
         ) from exc
 
 
+def _check_root(reporter: Reporter, repo_path: str, root: str, *, json_out: bool = False) -> None:
+    """Refuse a worktree root that cannot hold worktrees: the root, or its
+    nearest existing ancestor, is not a directory (a regular file, a dangling
+    symlink). A root that does not exist yet is fine - create makes it."""
+    base = worktree_root(repo_path, root)
+    probe = base
+    while not os.path.lexists(probe) and probe != probe.parent:
+        probe = probe.parent
+    if probe.is_dir():
+        return
+    where = "" if probe == base else f" ({probe} is not a directory)"
+    raise _die(
+        reporter,
+        f"Worktree root {base} is not a directory{where}.",
+        code=EXIT_USAGE,
+        error_code="INVALID_ROOT",
+        hint="Point --root (or root in config.toml) at a directory, "
+        "or at a path that does not exist yet.",
+        path=str(base),
+        json_out=json_out,
+    )
+
+
 def _validate_branch(reporter: Reporter, branch: str, *, json_out: bool = False) -> None:
     if not git.check_ref_format(branch):
         raise _die(
@@ -411,9 +433,10 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Runner dependency problems keep exit 1 (codes are stable; agents
-        # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE).
+        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    if isinstance(exc, FirewallError):
+        return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -540,7 +563,9 @@ def create(
         None, "--base", help="Base branch for the new branch (resolved as origin/<base>)."
     ),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -610,14 +635,15 @@ def create(
     if checkout is not None:
         _validate_branch(reporter, checkout, json_out=json_out)
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     if checkout is not None:
-        wt_name = flatten_branch(name) if name else derive_name(checkout)
+        wt_name = derive_name(name or checkout)
         target_branch = checkout
     elif name is not None:
         # An explicit name IS the branch: slashes stay in the branch, the
         # directory flattens them (feature/auth -> feature--auth).
-        wt_name = flatten_branch(name)
+        wt_name = derive_name(name)
         target_branch = name
         _validate_branch(reporter, target_branch, json_out=json_out)
     else:
@@ -712,7 +738,9 @@ def enter(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -750,6 +778,7 @@ def enter(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
@@ -834,13 +863,12 @@ def _run_session(
         run.preflight(reporter)
         with locking.worktree_lock(path):
             outcome = provision_call()
-            if json_out or print_only:
-                # The launch path makes the sandbox entry-ready inside
-                # run.launch; the emit path must do the same, or a stopped
-                # container yields an entry_command that is dead on replay
-                # (and a manual `docker start` workaround would silently
-                # skip the firewall re-init).
-                run.prepare_entry(outcome.worktree)
+            # Every entry - launch and emit alike - makes the sandbox
+            # entry-ready first: a stopped container is started, and the
+            # firewall is re-applied even on a running one (`docker restart`
+            # outside treebox drops the rules). A failure here is classified
+            # and nothing launches or is emitted.
+            run.prepare_entry(outcome.worktree)
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
@@ -937,6 +965,7 @@ def list_cmd(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     rows = _collect_rows(repo_path, cfg)
 
@@ -1229,6 +1258,7 @@ def teardown(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     targets: list[resolve.Candidate] = []
     # Which targets also lose their local branch, by path. The chooser fills this
@@ -1539,43 +1569,48 @@ def _teardown_one(
             container = "failed"
             reporter.warn(f"isolation teardown: {exc}")
 
-    if exists:
-        try:
-            git.worktree_remove(repo_path, wt.path, force=force)
-        except git.GitError:
-            # Last-resort cleanup for corrupt *linked* worktrees git refuses to
-            # remove. It must never run against the main working tree (git's
-            # refusal is also a GitError): that would delete the whole repo.
-            if same_path(wt.path, repo_path):
-                raise _die(
-                    reporter,
-                    f"Refusing to remove the main working tree '{cand.name}'.",
-                    code=EXIT_CONFLICT,
-                    error_code="MAIN_WORKTREE",
-                    hint="treebox only manages linked worktrees; "
-                    "the repo itself is never a target.",
-                    path=str(wt.path),
-                    json_out=json_out,
-                ) from None
-            import shutil as _sh
-
-            _sh.rmtree(wt.path, ignore_errors=True)
-            git.worktree_prune(repo_path)
-        reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
-    else:
-        git.worktree_prune(repo_path)
-        reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
-
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
     branch_deleted = False
-    if delete_branch and branch_name:
-        try:
-            git.delete_branch(repo_path, branch_name)
-            branch_deleted = True
-            reporter.ok("branch", f"deleted {branch_name}")
-        except git.GitError as exc:
-            reporter.warn(f"could not delete branch: {exc}")
-    elif branch_name:
-        reporter.note("branch", f"kept {branch_name}")
+    with locking.repo_lock(repo_path):
+        if exists:
+            try:
+                git.worktree_remove(repo_path, wt.path, force=force)
+            except git.GitError:
+                # Last-resort cleanup for corrupt *linked* worktrees git refuses to
+                # remove. It must never run against the main working tree (git's
+                # refusal is also a GitError): that would delete the whole repo.
+                if same_path(wt.path, repo_path):
+                    raise _die(
+                        reporter,
+                        f"Refusing to remove the main working tree '{cand.name}'.",
+                        code=EXIT_CONFLICT,
+                        error_code="MAIN_WORKTREE",
+                        hint="treebox only manages linked worktrees; "
+                        "the repo itself is never a target.",
+                        path=str(wt.path),
+                        json_out=json_out,
+                    ) from None
+                import shutil as _sh
+
+                _sh.rmtree(wt.path, ignore_errors=True)
+                git.worktree_prune(repo_path)
+            reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
+        else:
+            git.worktree_prune(repo_path)
+            reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
+
+        if delete_branch and branch_name:
+            try:
+                git.delete_branch(repo_path, branch_name)
+                branch_deleted = True
+                reporter.ok("branch", f"deleted {branch_name}")
+            except git.GitError as exc:
+                reporter.warn(f"could not delete branch: {exc}")
+        elif branch_name:
+            reporter.note("branch", f"kept {branch_name}")
 
     return TeardownRecord(
         name=cand.name,
@@ -1595,7 +1630,9 @@ def _teardown_one(
 def doctor(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
