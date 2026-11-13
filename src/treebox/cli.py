@@ -28,6 +28,7 @@ from rich.text import Text
 from . import (
     __version__,
     assets,
+    cleanup,
     forge,
     git,
     lifecycle,
@@ -1871,142 +1872,59 @@ def _teardown_one(
     ``--skip-container`` (no container work, so no runner was resolved) or
     when neither the directory nor a record is left to name the mode."""
     wt = Worktree.at(repo_path, Path(cand.path), branch=cand.branch or "")
-    exists = wt.path.is_dir()
-    # Decisions follow the cleanup model (lifecycle.Cleanup): each step runs
-    # only when every earlier one is complete, and the ownership record goes
-    # last, so an incomplete teardown can always be retried.
-    cleanup = lifecycle.Cleanup()
+    try:
+        result = cleanup.cleanup_one(
+            wt, run, force=force, delete_branch=delete_branch, reporter=reporter
+        )
+    except cleanup.MainWorktreeError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_CONFLICT,
+            error_code="MAIN_WORKTREE",
+            hint="treebox only manages linked worktrees; the repo itself is never a target.",
+            path=str(wt.path),
+            json_out=json_out,
+        ) from exc
 
-    branch_name = (
-        cand.branch
-        if cand.branch and (exists or git.local_branch_exists(repo_path, cand.branch))
-        else None
-    )
-
-    container: ContainerOutcome
-    volumes_removed = False
     if skip_container:
-        container = "skipped"
         reporter.note("container", "skipped")
     elif run is None:
-        # The directory and its record are both gone, so the isolation mode
-        # is unreadable and the config default is only a guess we won't act on.
-        container = "skipped"
         reporter.warn(
             "worktree directory is gone — recorded isolation mode unreadable; "
             "remove any leftover container manually"
         )
+    if result.runner_error is not None:
+        reporter.warn(f"isolation teardown: {result.runner_error}")
+    shown = _short_path(wt.path, repo_path)
+    if result.worktree == "removed":
+        reporter.ok("worktree", f"removed {shown}")
+    elif result.worktree == "already_gone":
+        reporter.note("worktree", f"already gone · {shown}")
+    elif result.worktree == "cleanup_incomplete":
+        reporter.note("worktree", f"kept · cleanup incomplete · {shown}")
     else:
-        try:
-            # The runner was constructed with the batch's volume choice
-            # (_teardown_runner); teardown options are its own business.
-            teardown_result = run.teardown(wt, reporter=reporter)
-            container = teardown_result.container
-            volumes_removed = teardown_result.volumes_removed
-            cleanup.remaining.extend(teardown_result.remaining)
-        except Exception as exc:
-            container = "failed"
-            reporter.warn(f"isolation teardown: {exc}")
-            cleanup.keep(f"{run.name} resources", str(exc))
-
-    # Removing a worktree, pruning, and deleting a branch all rewrite git state
-    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
-    # section), so they queue behind any create or teardown doing the same.
-    # The runner's own cleanup above stays outside: it can be slow.
-    removed = False
-    branch_deleted = False
-    with locking.repo_lock(repo_path):
-        if not cleanup.complete:
-            reporter.note(
-                "worktree", f"kept · cleanup incomplete · {_short_path(wt.path, repo_path)}"
-            )
-        else:
-            removed = _remove_worktree(
-                reporter, cleanup, wt, repo_path, force=force, json_out=json_out
-            )
-
-        if cleanup.complete:
-            # The host-owned record goes last, with the worktree it describes.
-            record.remove(wt.path)
-            if delete_branch and branch_name:
-                try:
-                    git.delete_branch(repo_path, branch_name)
-                    branch_deleted = True
-                    reporter.ok("branch", f"deleted {branch_name}")
-                except git.GitError as exc:
-                    reporter.warn(f"could not delete branch: {exc}")
-            elif branch_name:
-                reporter.note("branch", f"kept {branch_name}")
-        else:
-            reporter.note("record", "kept · the same teardown retries")
+        reporter.fail("worktree", f"kept · {shown}")
+    if not result.complete:
+        reporter.note("record", "kept · the same teardown retries")
+    elif result.branch_error is not None:
+        reporter.warn(f"could not delete branch: {result.branch_error}")
+    elif result.branch_deleted:
+        reporter.ok("branch", f"deleted {result.branch}")
+    elif result.branch:
+        reporter.note("branch", f"kept {result.branch}")
 
     return TeardownRecord(
         name=cand.name,
-        branch=branch_name,
+        branch=result.branch,
         worktree_path=str(wt.path),
-        removed=removed,
-        branch_deleted=branch_deleted,
-        container=container,
-        volumes_removed=volumes_removed,
-        complete=cleanup.complete,
-        remaining=cleanup.remaining,
+        removed=result.worktree == "removed",
+        branch_deleted=result.branch_deleted,
+        container=result.runner.container,
+        volumes_removed=result.runner.volumes_removed,
+        complete=result.complete,
+        remaining=list(result.remaining),
     )
-
-
-def _remove_worktree(
-    reporter: Reporter,
-    cleanup: lifecycle.Cleanup,
-    wt: Worktree,
-    repo_path: str,
-    *,
-    force: bool,
-    json_out: bool,
-) -> bool:
-    """Remove the worktree directory and its git registration, by health.
-    Returns whether a directory was removed; what could not be removed goes
-    into ``cleanup``. A tree git refuses to remove (dirty, locked) is kept:
-    there is no fallback that deletes it anyway."""
-    health = provision.worktree_health(repo_path, wt.path)
-    shown = _short_path(wt.path, repo_path)
-    removed = False
-    if health in ("healthy", "unreadable_state"):
-        try:
-            git.worktree_remove(repo_path, wt.path, force=force)
-            removed = True
-        except git.GitError as exc:
-            cleanup.keep("worktree", f"git refused to remove it: {exc}")
-    elif health == "invalid_linkage":
-        # git cannot remove a tree whose .git pointer is broken: removing the
-        # directory and pruning the registration is the documented recovery.
-        # Never the main working tree (it is no linked worktree at all).
-        if same_path(wt.path, repo_path):
-            raise _die(
-                reporter,
-                f"Refusing to remove the main working tree '{wt.name}'.",
-                code=EXIT_CONFLICT,
-                error_code="MAIN_WORKTREE",
-                hint="treebox only manages linked worktrees; the repo itself is never a target.",
-                path=str(wt.path),
-                json_out=json_out,
-            )
-        try:
-            shutil.rmtree(wt.path)
-            removed = True
-        except OSError as exc:
-            cleanup.keep("worktree", f"cannot remove the directory: {exc}")
-    elif health == "unregistered":
-        cleanup.keep("worktree", "git has no registration for this directory; remove it by hand")
-    if not removed or health == "invalid_linkage":
-        git.worktree_prune(repo_path)  # git removed nothing itself: drop its stale entry
-    if git.worktree_registered(repo_path, str(wt.path)):
-        cleanup.keep("git registration", "git still lists the worktree")
-    if removed:
-        reporter.ok("worktree", f"removed {shown}")
-    elif health == "directory_missing" and cleanup.complete:
-        reporter.note("worktree", f"already gone · {shown}")
-    else:
-        reporter.fail("worktree", f"kept · {shown}")
-    return removed
 
 
 # --- doctor ------------------------------------------------------------------

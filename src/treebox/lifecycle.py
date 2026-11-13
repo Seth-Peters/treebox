@@ -1,4 +1,4 @@
-"""The two lifecycle models every command derives its decisions from.
+"""The setup model and its persisted results.
 
 **Setup model.** One ``SetupResult`` per worktree, kept in the host-owned
 record (``record.py``), outside every sandbox mount, so a sandboxed agent can
@@ -20,23 +20,14 @@ never mark its own setup done or its dependencies fresh::
 ``list`` reports ``fresh`` / ``stale`` only from a ``done`` result: a matching
 hash alone never makes a worktree fresh.
 
-**Cleanup model.** ``teardown`` removes one worktree's resources in a fixed
-order and records every step that did not finish::
+Worktree cleanup is implemented by ``cleanup.cleanup_one``. It owns the
+ordered removal of runner resources, the worktree and the ownership record.
 
-    1. runner resources   (container, image, volumes, sandbox files)
-    2. worktree           (directory + git registration)
-    3. ownership          (host-owned record, setup log)
-
-A step runs only when every earlier step is complete, and the ownership
-record (and the runner's resource manifest) are removed only when everything
-else is gone. An incomplete cleanup is a failed ``teardown`` that names what
-remains; the same command retries, because nothing that names the remaining
-resources was deleted.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -129,23 +120,3 @@ def setup_log_path(worktree: Path) -> Path:
     """Where the output of the last failed setup step of ``worktree`` is kept:
     beside the record, outside every sandbox mount."""
     return worktree.parent / ".logs" / f"{worktree.name}.setup.log"
-
-
-# --- cleanup model -----------------------------------------------------------
-
-
-@dataclass
-class Cleanup:
-    """The progress of one worktree's teardown. ``remaining`` names each
-    resource a step could not remove, with the reason, in removal order."""
-
-    remaining: list[str] = field(default_factory=list)
-
-    def keep(self, resource: str, reason: str) -> None:
-        self.remaining.append(f"{resource} ({reason})")
-
-    @property
-    def complete(self) -> bool:
-        """Every step so far finished: the next step may run, and once the
-        last one ran, the ownership record may go."""
-        return not self.remaining

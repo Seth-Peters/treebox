@@ -63,7 +63,7 @@ class RunnerTeardownResult:
     ``failed`` means a container/image removal was attempted and failed after
     every remaining cleanup step was still tried. ``remaining`` names each
     runner resource that is still present because a step failed or could not
-    run (``"<resource> (<reason>)"``, the cleanup model in ``lifecycle.py``):
+    run (``"<resource> (<reason>)"``, the cleanup result in ``cleanup.py``):
     while it is non-empty the caller keeps the worktree and its ownership
     record, and the runner keeps the metadata a retry needs, so the same
     teardown can finish the job. Also reports whether per-runner volumes were
