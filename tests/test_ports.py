@@ -297,8 +297,7 @@ def test_range_exhaustion_is_classified_before_anything_is_provisioned(
     ("damage", "code"),
     [
         (lambda path: path.unlink(), "RECORD_MISSING"),
-        # A record without the required ports key does not parse: there is
-        # one schema version and no upgrade.
+        # A record without the required ports key does not parse.
         (
             lambda path: path.write_text(
                 json.dumps({k: v for k, v in json.loads(path.read_text()).items() if k != "ports"})
