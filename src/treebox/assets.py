@@ -106,6 +106,13 @@ def _bundled_template_dir() -> Path:
     return Path(p)
 
 
+# A reserved directory under ``user_templates_root()`` where ``template init``
+# builds a new template and parks the old one during a ``--force`` swap. It is
+# not a template: ``available_templates`` skips it and ``template init`` refuses
+# the name, so a leftover from an interrupted run never shows up as one.
+STAGING_DIR = ".treebox-tmp"
+
+
 def user_templates_root() -> Path:
     """Where named, user-authored templates live: ``$TREEBOX_HOME/templates``
     (default ``~/.treebox/templates``). ``treebox template init`` scaffolds
@@ -213,5 +220,5 @@ def available_templates() -> list[str]:
     names = {DEFAULT_TEMPLATE}
     root = user_templates_root()
     if root.is_dir():
-        names.update(p.name for p in root.iterdir() if p.is_dir())
+        names.update(p.name for p in root.iterdir() if p.is_dir() and p.name != STAGING_DIR)
     return sorted(names)

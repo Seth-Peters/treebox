@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -1812,6 +1813,14 @@ def template_init(
             error_code="INVALID_NAME",
             json_out=json_out,
         )
+    if name == assets.STAGING_DIR:
+        raise _die(
+            reporter,
+            f"Invalid template name '{name}': treebox reserves it for its staging directory.",
+            code=EXIT_USAGE,
+            error_code="INVALID_NAME",
+            json_out=json_out,
+        )
     if from_template not in assets.available_templates():
         raise _die(
             reporter,
@@ -1859,17 +1868,22 @@ def template_init(
         elif target.is_symlink() or target.exists():
             target.unlink()
 
-    # Copy into a staging dir beside the destination and swap it into place, so
-    # a failed copy leaves any existing template untouched rather than deleting
-    # it up front — and no OSError escapes as a bare traceback.
-    staging = dest.parent / f".{name}.treebox-tmp"
+    # Build the new template in a fresh, uniquely named staging dir under the
+    # reserved STAGING_DIR, then swap it in with renames: move any existing
+    # template aside into that staging dir, rename the new one into place, and
+    # delete the old one only after that. Each rename is atomic, so after any
+    # failure the old template is complete and unchanged. A staging dir left by
+    # an interrupted run has its own name, so it never blocks the next run.
+    staging_root = dest.parent / assets.STAGING_DIR
+    staging: Path | None = None
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        _remove(staging)
-        shutil.copytree(src, staging)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f"{name}.", dir=staging_root))
+        shutil.copytree(src, staging / "new")
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        if staging is not None:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
             f"Could not copy template into {dest}: {exc}.",
@@ -1879,15 +1893,17 @@ def template_init(
             json_out=json_out,
         ) from exc
 
+    old = staging / "old"
     if existing:
         try:
-            _remove(dest)
+            dest.rename(old)
         except OSError as exc:
             with contextlib.suppress(OSError):
                 _remove(staging)
             raise _die(
                 reporter,
-                f"Could not overwrite existing template at {dest}: {exc}.",
+                f"Could not overwrite existing template at {dest}: {exc}. "
+                "The existing template is unchanged.",
                 code=EXIT_ERROR,
                 error_code="OVERWRITE_FAILED",
                 path=str(dest),
@@ -1895,18 +1911,35 @@ def template_init(
             ) from exc
 
     try:
-        staging.rename(dest)
+        (staging / "new").rename(dest)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        kept = ""
+        if existing:
+            try:
+                old.rename(dest)
+            except OSError:
+                # Do not delete the staging dir: it holds the only copy of the
+                # old template now.
+                kept = f" The previous template is kept at {old}."
+        if not kept:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
-            f"Could not copy template into {dest}: {exc}.",
+            f"Could not copy template into {dest}: {exc}.{kept}",
             code=EXIT_ERROR,
             error_code="COPY_FAILED",
             path=str(dest),
             json_out=json_out,
         ) from exc
+
+    leftover = ""
+    try:
+        _remove(staging)
+    except OSError as exc:
+        leftover = (
+            f"could not remove the previous template copy at {staging} ({exc}); delete it by hand"
+        )
 
     missing = assets.missing_template_files(dest)
     if json_out:
@@ -1928,6 +1961,8 @@ def template_init(
         reporter.warn(
             f"copied from an incomplete source — missing required files: {', '.join(missing)}"
         )
+    if leftover:
+        reporter.warn(leftover)
     reporter.hint(
         "Edit the Dockerfile and container.json, then: "
         f"treebox create <name> --isolation docker --template {name}"

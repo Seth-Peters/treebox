@@ -437,7 +437,10 @@ treebox template path node                 # print the resolved dir: cd "$(treeb
 
 `template init <name>` always yields a directory with the **full required file
 set**, so `create --template <name>` can't fail on a half-copied template; it
-refuses to clobber an existing template without `--force`. Then edit the
+refuses to clobber an existing template without `--force`. A `--force`
+overwrite is all-or-nothing: treebox builds the new template beside the old
+one and swaps it in, so if the overwrite fails, the old template stays
+complete and unchanged. Then edit the
 `Dockerfile` and `container.json` and launch with
 `treebox create <name> --isolation docker --template <name>`. `template list`
 flags any template dir missing a required file or carrying malformed JSON

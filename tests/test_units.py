@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -4003,22 +4004,144 @@ def test_template_init_unknown_from_is_not_found_under_env_override(
     assert json.loads(res.stderr)["error"]["code"] == "TEMPLATE_NOT_FOUND"
 
 
-def test_template_init_overwrite_removal_failure_has_distinct_code(
+def _tree_bytes(root: Path) -> dict[str, bytes | None]:
+    """Every entry under ``root`` by relative path: file bytes, or None for a dir."""
+    return {
+        str(p.relative_to(root)): (None if p.is_dir() else p.read_bytes())
+        for p in sorted(root.rglob("*"))
+    }
+
+
+def _customized_template(template_home: Path) -> Path:
+    """A `webdev` template an operator has edited: a changed Dockerfile and a
+    scripts/ dir that only this template has."""
+    assert _cli(["template", "init", "webdev"]).exit_code == 0
+    dest = template_home / "templates" / "webdev"
+    with (dest / "Dockerfile").open("a") as fh:
+        fh.write("# operator customization\n")
+    (dest / "scripts").mkdir()
+    (dest / "scripts" / "setup.sh").write_text("echo custom\n")
+    return dest
+
+
+def _staging_entries(template_home: Path) -> list[str]:
+    import treebox.assets as assets
+
+    staging = template_home / "templates" / assets.STAGING_DIR
+    return sorted(p.name for p in staging.iterdir()) if staging.is_dir() else []
+
+
+def test_template_init_force_move_aside_failure_keeps_old_template(
     template_home: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # A failed --force cleanup is not the source==destination TEMPLATE_CONFLICT;
-    # an agent must be able to tell "copy onto itself" from "removal failed".
-    import treebox.cli as cli_mod
+    # The first step of the swap (moving the old template aside) fails: a clean
+    # OVERWRITE_FAILED, the old template byte-identical, no staging residue.
+    dest = _customized_template(template_home)
+    before = _tree_bytes(dest)
+    real = Path.rename
 
-    assert _cli(["template", "init", "webdev"]).exit_code == 0
+    def rename(self: Path, target: str | Path) -> Path:
+        if self == dest:
+            raise OSError("permission denied")
+        return real(self, target)
 
-    def boom(_path: Path) -> None:
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(cli_mod.shutil, "rmtree", boom)
+    monkeypatch.setattr(Path, "rename", rename)
     res = _cli(["template", "init", "webdev", "--force", "--json"])
     assert res.exit_code == 1
     assert json.loads(res.stderr)["error"]["code"] == "OVERWRITE_FAILED"
+    assert _tree_bytes(dest) == before
+    assert _staging_entries(template_home) == []
+
+
+def test_template_init_force_failure_mid_swap_restores_old_template(
+    template_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The old template is already moved aside when the new one fails to move in:
+    # the old one goes back, byte-identical, and the run is a clean COPY_FAILED.
+    dest = _customized_template(template_home)
+    before = _tree_bytes(dest)
+    real = Path.rename
+    calls: list[tuple[Path, Path]] = []
+
+    def rename(self: Path, target: str | Path) -> Path:
+        calls.append((self, Path(target)))
+        if self.name == "new" and Path(target) == dest:
+            raise OSError("injected rename failure")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    res = _cli(["template", "init", "webdev", "--force", "--json"])
+    assert res.exit_code == 1
+    assert json.loads(res.stderr)["error"]["code"] == "COPY_FAILED"
+    assert [c[0].name for c in calls] == ["webdev", "new", "old"]  # aside, in, back
+    assert _tree_bytes(dest) == before
+    assert _staging_entries(template_home) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_template_init_force_read_only_subdir_replaces_template_completely(
+    template_home: Path,
+):
+    # The reported case: a read-only subdir inside the existing template used to
+    # fail with OVERWRITE_FAILED after most of the template was deleted. Now the
+    # new template replaces the old one completely (the old-only scripts/ is
+    # gone), and the old copy that could not be deleted stays out of the way.
+    import treebox.assets as assets
+
+    dest = _customized_template(template_home)
+    (dest / "scripts").chmod(0o555)
+    fresh = _tree_bytes(assets.template_dir("default"))
+    try:
+        res = _cli(["template", "init", "webdev", "--force"])
+        assert res.exit_code == 0, res.stderr
+        assert "could not remove the previous template copy" in res.stderr
+        assert _tree_bytes(dest) == fresh
+        assert not (dest / "scripts").exists()
+        listed = json.loads(_cli(["template", "list", "--json"]).stdout)
+        assert [t["name"] for t in listed["templates"]] == ["default", "webdev"]
+    finally:
+        for p in (template_home / "templates").rglob("scripts"):
+            p.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_template_init_force_ignores_leftover_from_interrupted_run(template_home: Path):
+    # An interrupted run can leave a staging dir that cannot even be deleted. It
+    # must not break the next --force, and `template list` must not show it.
+    import treebox.assets as assets
+
+    dest = _customized_template(template_home)
+    leftover = template_home / "templates" / assets.STAGING_DIR / "webdev.interrupted"
+    (leftover / "new" / "ro").mkdir(parents=True)
+    (leftover / "new" / "ro" / "f").write_text("x")
+    (leftover / "new" / "ro").chmod(0o555)
+    try:
+        res = _cli(["template", "init", "webdev", "--force", "--json"])
+        assert res.exit_code == 0, res.stderr
+        assert _tree_bytes(dest) == _tree_bytes(assets.template_dir("default"))
+        assert _staging_entries(template_home) == ["webdev.interrupted"]
+        listed = json.loads(_cli(["template", "list", "--json"]).stdout)
+        assert [t["name"] for t in listed["templates"]] == ["default", "webdev"]
+    finally:
+        (leftover / "new" / "ro").chmod(0o755)
+
+
+def test_template_init_force_success_leaves_no_staging_residue(template_home: Path):
+    import treebox.assets as assets
+
+    dest = _customized_template(template_home)
+    res = _cli(["template", "init", "webdev", "--force", "--json"])
+    assert res.exit_code == 0, res.stderr
+    assert _tree_bytes(dest) == _tree_bytes(assets.template_dir("default"))
+    assert _staging_entries(template_home) == []
+
+
+def test_template_init_rejects_reserved_staging_name(template_home: Path):
+    import treebox.assets as assets
+
+    res = _cli(["template", "init", assets.STAGING_DIR, "--json"])
+    assert res.exit_code == 2
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_NAME"
 
 
 def test_template_init_copy_failure_is_structured_and_preserves_existing(
@@ -4027,12 +4150,10 @@ def test_template_init_copy_failure_is_structured_and_preserves_existing(
     # A copytree failure must be a clean COPY_FAILED (not a bare traceback), and
     # under --force the pre-existing template must survive because the copy is
     # staged and swapped in only on success.
-    import treebox.assets as assets
     import treebox.cli as cli_mod
 
-    assert _cli(["template", "init", "webdev"]).exit_code == 0
-    dest = template_home / "templates" / "webdev"
-    before = sorted(p.name for p in dest.iterdir())
+    dest = _customized_template(template_home)
+    before = _tree_bytes(dest)
 
     def boom(_src: Path, _dst: Path) -> None:
         raise OSError("disk full")
@@ -4042,10 +4163,8 @@ def test_template_init_copy_failure_is_structured_and_preserves_existing(
     assert res.exit_code == 1
     assert json.loads(res.stderr)["error"]["code"] == "COPY_FAILED"
     # The existing template is intact, and no staging residue is left behind.
-    assert dest.is_dir()
-    assert sorted(p.name for p in dest.iterdir()) == before
-    assert assets.missing_template_files(dest) == []
-    assert not (dest.parent / ".webdev.treebox-tmp").exists()
+    assert _tree_bytes(dest) == before
+    assert _staging_entries(template_home) == []
 
 
 def test_template_path_resolves_default_and_named(template_home: Path):
