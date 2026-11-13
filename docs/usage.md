@@ -268,7 +268,7 @@ $ treebox list
 Sorted by recency — the worktree you want is almost always the one that just
 committed. The **name** is the stable handle; the **branch** is read live.
 A worktree's **isolation** is read from its host-owned record;
-legacy worktrees (no record yet - see [`adopt`](#adopt-record-a-legacy-worktree))
+worktrees without a record (for example made by an older treebox)
 or worktrees with an invalid record show `unknown`
 instead of being mislabeled with the current config default. The muted
 **Root** footer shows the discovery root. It does not show the intermediate
@@ -394,38 +394,20 @@ main checkout has uncommitted changes. It takes the normal confirmation path
 instead (the interactive prompt, or `--force` under `--json` / non-TTY), and
 removal clears both the directory and git's stale registration without
 touching the main checkout's files. Container cleanup survives the corruption
-too: teardown reads the worktree's isolation and template from its host-owned
+too: teardown reads the worktree's isolation mode from its host-owned
 record, which lives beside the worktree and does not depend on the `.git`
 pointer, so a corrupt docker worktree is still torn down with the runner it was
 created with. Volume ownership comes separately from the host-owned resource
 manifest and is never read from sandbox-writable state. Teardown removes the
 record with the worktree.
 
-If a worktree's recorded isolation mode is unknown, or the worktree has no
-usable record (`RECORD_MISSING` / `RECORD_INVALID`), teardown refuses it as a
-conflict rather than guessing how to drive its container - the same stance
-`enter` takes. Pass `--isolation <mode>` to name the mode yourself, or
-`--skip-container` to remove the tree and its branch anyway and clear any
-leftover container yourself.
-
-## `adopt` - record a legacy worktree
-
-```bash
-treebox adopt brave-otter --isolation docker --firewall --template node
-treebox adopt brave-otter --isolation host -H codex
-treebox adopt moved-tree --isolation docker --force   # replace an invalid record
-```
-
-Worktrees created by an older treebox have no
-[host-owned record](how-it-works.md#the-host-owned-record), so `enter` and
-`teardown` refuse them with `RECORD_MISSING` (exit `5`). `adopt` is the
-migration step: you state how the worktree was created, and treebox writes the
-record (atomically, under the worktree lock). `--isolation` is required; the
-other options default to your config, exactly as for `create`. treebox never
-reads the policy from the worktree's own state, because a sandboxed agent can
-write that state. A worktree that already has a record is `RECORD_EXISTS`;
-`--force` replaces it (also the recovery for `RECORD_INVALID`, for example after
-the worktree root was moved). `--json` prints the recorded policy.
+`teardown` is also the recovery for a worktree without a usable record
+(`RECORD_MISSING` / `RECORD_INVALID` on `enter`, for example one made by an
+older treebox): it needs no extra flag. Without a record, a worktree that has
+the runner-owned resource manifest is torn down as a docker worktree (its
+container, image and manifest go too), and any other as a host worktree. Then
+`treebox create` it again. The dirty-worktree and confirmation rules above
+apply as usual.
 
 ## `doctor` — is this host ready?
 
@@ -574,12 +556,10 @@ failure. Both submodule copy errors include `error.path` and `error.hint`.
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. |
-| `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (a record from another treebox version, or hand-edited). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
-| `RECORD_MISSING` | `5` | The worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (created by an older treebox, or the record was deleted) - `treebox adopt <name> --isolation <mode>`, or `teardown <name> --isolation <mode>`. |
-| `RECORD_INVALID` | `5` | The host-owned record cannot be trusted (unreadable, unsupported `schemaVersion`, or bound to another path) - `treebox adopt <name> --force --isolation <mode>`. |
+| `RECORD_MISSING` | `5` | `enter`: the worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (made by an older treebox, or the record was deleted) - `treebox teardown <name>`, then `treebox create` again. |
+| `RECORD_INVALID` | `5` | `enter` / resumed `create`: the host-owned record does not parse (another `schemaVersion`, an unknown isolation mode or harness, or bound to another path) - `treebox teardown <name>`, then `treebox create` again. |
 | `RECORD_CONFLICT` | `5` | A resumed `create` of a half-built worktree asks for different settings than its record holds - re-run with the recorded settings from the hint, or tear it down. |
-| `RECORD_EXISTS` | `5` | `adopt` found a record already in place - pass `--force` to replace it. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
 | `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
