@@ -15,16 +15,17 @@ Three closed vocabularies sit on top of that seam:
 Every `create` walks the same host-side pipeline, regardless of isolation mode:
 
 ```text
-fetch origin                 # required — a failure exits 4, loudly
-  └─ resolve origin/<base>
-       └─ write the host-owned record   # policy, setup pending
-            └─ git worktree add   # .treebox/worktrees/<name>, on <name> (or treebox/<petname>)
-                 └─ install pre-push guard     # treebox/* refs can't be pushed
-                      └─ copy submodules
-                           └─ copy .env
-                                └─ runner.setup      # deps, from the shared cache
-                                     └─ record the setup result (done + lockfile hash, or failed)
-                                          └─ hand off to the runner
+reserve the port block            # machine-wide ledger; a full range exits 5
+  └─ write the host-owned record   # policy, port block copy, setup pending
+       └─ fetch origin             # required - a failure exits 4, loudly
+            └─ resolve origin/<base>
+                 └─ git worktree add   # .treebox/worktrees/<name>, on <name> (or treebox/<petname>)
+                      └─ install pre-push guard     # treebox/* refs can't be pushed
+                           └─ copy submodules
+                                └─ copy .env
+                                     └─ runner.setup      # deps, from the shared cache
+                                          └─ record the setup result (done + lockfile hash, or failed)
+                                               └─ hand off to the runner
 ```
 
 The runner — picked with `--isolation` — only decides **where** the last two
@@ -48,7 +49,10 @@ After selection, `enter` and `teardown` keep that full path for provisioning,
 state access, runner operations, and reporting. See
 [worktree selection](usage.md#enter-come-back-to-a-worktree) for ref matching.
 The Docker sandbox mounts the absolute path and a live agent's working
-directory is there, so the worktree directory is never renamed. The
+directory is there, so the worktree directory is never renamed. The path also gives the
+worktree its machine-unique
+[`TREEBOX_ID`](usage.md#services-in-parallel-worktrees), the same hash the
+docker container and image names carry. The
 **branch** is a mutable attribute.
 An explicit `create NAME` starts on the branch `NAME` itself (slashes kept in
 the branch, flattened to `--` in the directory); a nameless `create` starts
@@ -113,7 +117,8 @@ exit `1`); an interrupted one stays `pending`. `list` reports `deps: fresh` or
 1. Runner resources: container, image, volumes (with `--remove-volumes`), and
    the sandbox files that hold the resource manifest.
 2. The worktree: its directory and its git registration.
-3. Ownership: the host-owned record and the setup log.
+3. Ownership: the host-owned record and the setup log, then the worktree's
+   [port block](#port-blocks).
 
 A step runs only when every earlier step finished. Each resource a step could
 not remove is named in `remaining`. While anything remains, the worktree, its
@@ -134,7 +139,9 @@ field maps to it.
 ### The host-owned record
 
 The worktree's **creation policy** - isolation, firewall, sandbox template,
-harness, and base - lives in a host-owned record outside every sandbox mount:
+harness, base, and the effective
+[resource limits](configuration.md#resource-limits) - lives in a host-owned
+record outside every sandbox mount:
 
 ```text
 <worktree-parent>/.records/<name>.json
@@ -145,13 +152,18 @@ can be below the configured discovery root (the same parent that holds
 `.locks/` and `.containers/`). `create` writes the record atomically, under the
 worktree lock, before any runner resource depends on it. The record is
 versioned (`schemaVersion`) and bound to the registered worktree path it
-describes. `enter` reads the policy only from this record: it reuses the
+describes. Besides the policy it holds `resources` (the effective limits) and
+`explicitResources` (the limits a `create` flag chose); both are required.
+`enter` reads the policy only from this record: it reuses the
 recorded isolation, firewall, and template, and the recorded harness unless a
 per-session `--harness` is passed; a per-session `--template` is the
 operator's override for one session. An explicit `--isolation` that disagrees
 with the recorded mode is a conflict, not an override. `teardown` takes the
 isolation mode from the record and removes the record only after the
 worktree and its runner resources are gone.
+The record also keeps a copy of the worktree's [port block](#port-blocks);
+the machine-wide ledger stays the one source of truth for which blocks are
+taken.
 
 A sandboxed agent therefore cannot choose host execution, drop its firewall, or
 point its next sandbox at a template it wrote: none of that is in files it can
@@ -192,6 +204,60 @@ manifest) of a docker worktree that still has its record, the worktree stays
 tear-downable, but image and volume removal are skipped with a warning:
 treebox does not guess ownership from volume names, current templates,
 container mounts, or sandbox-writable state.
+
+### Port blocks
+
+Each worktree gets one block of ports for its repo-owned services
+(`TREEBOX_PORT_BASE`, `TREEBOX_PORT_COUNT`; see
+[services in parallel worktrees](usage.md#services-in-parallel-worktrees)).
+Blocks must not overlap across every repo and worktree root on the machine,
+so the allocator's state lives one level above any repository, in the
+user-level treebox home:
+
+```text
+$TREEBOX_HOME/ports.json   the ledger: each taken block and its owner
+$TREEBOX_HOME/ports.lock   the ledger lock
+```
+
+**One source of truth.** Only the ledger says which blocks are taken. Each
+entry names its owner by registered worktree path (and its repo). The record
+keeps a copy of the worktree's own block, so `list` and
+the entry commands read it without the lock, but a record never makes a block
+taken: every allocation reads only the ledger, under its lock, and writes it
+atomically (a complete temporary file, `fsync`, then a rename) before the
+lock is released.
+
+**Locks.** Every command that touches a block already holds the worktree
+lock; the ledger lock comes second and is held only for the ledger update. It
+waits for other treebox processes (parallel creates are normal) and fails as
+`LOCK_HELD` (exit `5`) only after 30 seconds. While holding it, the allocator
+may test whether another worktree's lock is held, without waiting, so the
+reverse order can never deadlock.
+
+**Stale entries.** An entry is reclaimed only when nothing can still use its
+block: its directory does not exist, git has no registration for it (so
+neither `enter` nor `teardown` can reach it), and no process holds its
+worktree lock (so no `create` is between its ledger write and its
+`git worktree add`). A worktree that a failed teardown kept still has its
+directory or its registration, so it keeps its block for the retry.
+
+**When a process dies.** For each point between two writes, the state left
+and how the next command repairs it:
+
+| The process dies | State left | Repair |
+| ---------------- | ---------- | ------ |
+| In `create`, while it writes the ledger | The old ledger or the new one (atomic rename), never a partial file. | Nothing to repair. |
+| In `create`, after the ledger write, before the record | A ledger entry; no record, no worktree. | The same `create` returns the same entry (no second block). If nobody retries, the entry is stale (no directory, no registration, no lock) and the next allocation reclaims it. |
+| In `create`, after the record, before `git worktree add` | The entry and the record; no worktree. | The same `create` resumes with both. Otherwise the entry is stale, as above. |
+| In `create`, after `git worktree add` | A half-built worktree with its record and block. | The same `create` (or `enter`) finishes setup with the same block. `teardown` releases it. |
+| In `enter`, after a ledger write for a worktree without a block | The entry; the record has no copy yet. | The next `enter` returns the same entry and records it. |
+| In `teardown`, before the record is removed | The worktree (or what remains of it), its record and its block. | The same `teardown` retries; the block is released only when it completes. |
+| In `teardown`, after the record is removed, before the release | An entry whose worktree is gone. | Stale: the next allocation reclaims it. |
+
+If the ledger itself is deleted, each worktree takes the block in its record
+back on its next `enter` while the block is still free, so the values its
+services use stay the same. An unreadable or malformed ledger is never
+rewritten or guessed at: it is `PORT_LEDGER_INVALID` (exit `1`).
 
 ## Warmth lives in the cache, not the tree
 
@@ -236,6 +302,29 @@ isolation uses your live `~/.claude` / `~/.codex` login dirs; docker isolation
 never mounts those live dirs. Instead, each harness declares which login files
 to copy into a per-worktree credentials dir, refreshed on every `enter`.
 
+Where a login comes from has one rule: the login file first
+(`~/.claude/.credentials.json`, `~/.codex/auth.json`). Only when that file is
+absent, on macOS (`sys.platform == "darwin"`), and for a harness that keeps
+its login in the Keychain (Claude Code: your user's `Claude Code-credentials`
+item), treebox reads the Keychain item and stages it as the login file. The
+read has a time limit and no terminal input, so a macOS permission dialog
+nobody answers, or a denied one, is no login - never a wait. `doctor`, the
+unattended `LOGIN_MISSING` check, and the staged copy all use this one rule.
+The secret is written only to the owner-only staged file, which lives beside
+the worktree, never inside it; it is never in argv, output, logs, or the
+worktree record.
+
+**Token refresh.** The sandbox gets a copy, so the host and the sandbox each
+hold their own. What is known: every `create` and `enter` replaces the staged
+copy with the host's current login (or deletes it after a host logout), and a
+token the agent refreshes inside the sandbox is written only to the staged
+copy, never back to the host. What is not known: whether a refresh on one
+side makes the other side's copy stop working (if the provider rotates
+refresh tokens). treebox does not test this. If the sandbox copy goes stale,
+the agent in the sandbox reports that it is not logged in; leave the
+sandbox, make sure the agent on the host is logged in, and run
+`treebox enter` again: it restages the copy from the host.
+
 ## Built to be scripted
 
 treebox assumes the caller is often another program:
@@ -247,9 +336,8 @@ treebox assumes the caller is often another program:
   without parsing prose.
 - **`--json` with a `schemaVersion`** that only gains fields within a version
   (git-porcelain discipline), plus `--print` and `--dry-run` for scripts that
-  want the commands, not the side effects. An emitted entry command is
-  entry-ready: a stopped docker sandbox is restarted (firewall re-applied)
-  before the command is printed, never dead on replay.
+  want the commands, not the side effects. Before it emits an entry command,
+  treebox completes the [Docker entry checks](usage.md#docker-entry-and-firewall-recovery).
 - **Unattended mode** (`--non-interactive`, also with a terminal attached):
   no picker, question or credential prompt; what would need an answer is a
   classified failure. When treebox launches the agent it passes the agent's

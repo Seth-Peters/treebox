@@ -23,3 +23,8 @@ ALLOWED_DOMAINS=(
 
   cdn.playwright.dev
 )
+
+# TCP ports the sandbox may reach on the Docker host (the container's default
+# gateway). Empty: no additional host ports are opened.
+# Open only what the agent needs, for example: ALLOWED_HOST_PORTS=(5432 8080)
+ALLOWED_HOST_PORTS=()

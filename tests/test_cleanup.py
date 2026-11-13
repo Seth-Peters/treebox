@@ -147,3 +147,36 @@ def test_main_worktree_is_rejected_before_runner_cleanup(repo: Path, tmp_path: P
         )
     assert resource.read_text() == "untouched\n"
     assert (repo / "uv.lock").read_text() == "version = 1\n"
+
+
+def test_cleanup_releases_ports_after_worktree_and_record_are_gone(
+    worktree: Worktree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from treebox import ports
+    from treebox.config import PortRange
+    from treebox.models import PortBlock
+
+    with locking.worktree_lock(worktree.path):
+        block, _ = ports.reserve(worktree.path, worktree.repo, PortRange())
+        release = ports.release
+        resources_present: list[tuple[bool, bool, bool]] = []
+
+        def observed_release(path: Path) -> PortBlock | None:
+            resources_present.append(
+                (
+                    path.exists(),
+                    git.worktree_registered(worktree.repo, str(path)),
+                    record.exists(path),
+                )
+            )
+            return release(path)
+
+        monkeypatch.setattr(ports, "release", observed_release)
+        result = cleanup.cleanup_one(
+            worktree, None, force=False, delete_branch=False, reporter=Reporter(silent=True)
+        )
+    assert result.complete is True
+    assert result.released_ports == block
+    assert result.port_error is None
+    assert resources_present == [(False, False, False)]
+    assert release(worktree.path) is None

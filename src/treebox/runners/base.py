@@ -32,6 +32,7 @@ from typing import Literal, Protocol, runtime_checkable
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter
+from ..resources import ResourceLimits
 
 
 class PreflightError(RuntimeError):
@@ -50,6 +51,18 @@ class PreflightError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
+        self.hint = hint
+
+
+class FirewallError(RuntimeError):
+    """The requested egress lockdown could not be established.
+
+    The sandbox is not entry-ready: the CLI classifies this
+    (``FIREWALL_FAILED``, with the remediation ``hint``) and never launches
+    the agent or emits an ``entry_command`` after it."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
         self.hint = hint
 
 
@@ -103,6 +116,11 @@ class RunnerFacts:
 @runtime_checkable
 class Runner(Protocol):
     name: str
+    # The generic limits (``resources.RESOURCE_NAMES``) this runner can apply
+    # to its sandbox; it maps each one to its own engine. An explicit flag for
+    # a limit outside this set is refused; a config or template default for
+    # one is not applied. The host runner applies none.
+    supported_resources: frozenset[str]
 
     def preflight(self, reporter: Reporter) -> None:
         """Verify this runner's host dependencies before provisioning (also
@@ -117,6 +135,19 @@ class Runner(Protocol):
         """Persist runner-owned host metadata before this worktree's first
         setup. Sandboxed runners keep security-sensitive ownership records
         outside every sandbox-writable mount; host runners may no-op."""
+        ...
+
+    def template_resources(self) -> ResourceLimits:
+        """The limits this runner's sandbox definition sets by itself (the
+        docker runner: the operator template's ``resources`` object and raw
+        ``runArgs`` limits) - the lowest-precedence tier, used only when a new
+        sandbox is created. Runners without a template return no limits."""
+        ...
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        """Refuse, before provisioning, limits the engine would refuse at
+        sandbox creation (the docker runner: more CPUs than the engine has).
+        Raises ``resources.ResourceLimitError``."""
         ...
 
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
@@ -146,14 +177,13 @@ class Runner(Protocol):
         ...
 
     def prepare_entry(self, wt: Worktree) -> None:
-        """Make the sandbox entry-ready before the agent (or an emitted
-        ``entry_command``) enters it: the docker runner restarts a stopped
-        container and re-establishes the firewall; a no-op on the host. The
-        CLI calls it before emitting ``--print``/``--json`` output, and
-        ``launch`` implementations needing the same guarantee call it
-        themselves (the docker runner's does) - so an emitted
-        ``entry_command`` is never dead on arrival and a treebox-owned
-        restart never leaves egress silently open."""
+        """Prepare the sandbox before launch or entry-command emission.
+
+        The CLI calls this method on every entry, before ``launch`` or
+        ``--print``/``--json`` output. Docker starts a stopped container and
+        checks its enabled firewall even when the container is already running.
+        A failed firewall initialization raises ``FirewallError`` and blocks
+        launch and command emission. This method is a no-op on the host."""
         ...
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:

@@ -1,6 +1,7 @@
-"""Cross-process advisory locking: one lock per worktree, one per repository.
+"""Cross-process advisory locking: one lock per worktree, one per repository,
+and one machine-wide lock for the port-block ledger.
 
-Two different things need exclusion, on two different keys:
+Three different things need exclusion, on three different keys:
 
 - **A worktree** (``worktree_lock``). ``create``, ``enter``, and ``teardown``
   of the same worktree must not race on its directory, its container, or the
@@ -23,13 +24,22 @@ Two different things need exclusion, on two different keys:
   parallel creates of different names are legitimate, so they queue for the
   short git section and then run their slow setup concurrently.
 
-Lock order is always worktree lock, then repo lock; nothing takes them the
-other way round, and ``repo_lock`` is never nested.
+- **The port-block ledger** (``ports_lock``). Port blocks are unique across
+  every repo and root on the machine, so their lock is one level above any
+  repository: a file in the user-level treebox home (``ports.py`` owns where).
+  It is *waiting* too, held only for the short ledger read-modify-write.
+
+Lock order: the worktree lock first, then either the repo lock or the ports
+lock, never the other way round. The repo lock and the ports lock are never
+nested: not in each other, and not in themselves. While holding the ports
+lock, the allocator may *probe* other worktrees' locks
+(``worktree_lock_held``), which never waits, so it cannot deadlock.
 """
 
 from __future__ import annotations
 
 import errno
+import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -45,13 +55,26 @@ _REPO_LOCK_FILE = "treebox-repo.lock"
 # slow ``git fetch`` ahead of it in the queue, not for the common case (the
 # section is normally well under a second).
 REPO_LOCK_TIMEOUT = 300.0
+# How long a caller queues for the ports ledger before giving up. The section
+# is a small JSON read-modify-write (normally milliseconds); the limit only
+# turns a stuck holder into a classified failure instead of a hang.
+PORTS_LOCK_TIMEOUT = 30.0
 _POLL_INTERVAL = 0.05
 # Say something once a wait has been noticeable; never for an uncontended lock.
 _ANNOUNCE_AFTER = 1.0
+_BUSY = (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK)
 
 
 class LockError(RuntimeError):
-    pass
+    """A lock is held by another process. ``hint`` is the recovery advice."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
+def _worktree_lock_path(path: Path) -> Path:
+    return path.parent / ".locks" / f"{path.name}.lock"
 
 
 @contextmanager
@@ -69,9 +92,8 @@ def worktree_lock(path: Path) -> Iterator[None]:
         yield
         return
 
-    lock_dir = path.parent / ".locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{name}.lock"
+    lock_path = _worktree_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     # Deliberately not a `with`: the descriptor must stay open (holding the
     # flock) for the whole yielded block; the finally below closes it.
     fd = open(lock_path, "w")  # noqa: SIM115
@@ -79,12 +101,80 @@ def worktree_lock(path: Path) -> Iterator[None]:
         try:
             fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+            if exc.errno in _BUSY:
                 raise LockError(
                     f"Another treebox is already working on '{name}'. "
                     "Wait for it to finish or use a different worktree."
                 ) from exc
             raise
+        yield
+    finally:
+        fd.close()
+
+
+def worktree_lock_held(path: Path) -> bool:
+    """Whether some process holds the worktree lock for ``path`` right now.
+
+    Never waits and never creates anything (the allocator calls it for other
+    repositories' worktrees). A lock file that does not exist is not held. A
+    probe from the process that holds the lock also reports it held: flock
+    locks belong to the open file, not to the process."""
+    try:
+        import fcntl
+    except ImportError:
+        return False
+    try:
+        fd = os.open(_worktree_lock_path(path), os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in _BUSY:
+            return True
+        raise
+    finally:
+        os.close(fd)  # also releases the probe's own lock
+    return False
+
+
+@contextmanager
+def _waiting_lock(
+    lock_path: Path,
+    *,
+    limit: float,
+    stuck: Callable[[], LockError],
+    on_wait: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Hold the flock on ``lock_path`` for the block, polling until it is
+    free. ``on_wait`` is called once if the wait becomes noticeable; after
+    ``limit`` seconds the error ``stuck()`` is raised."""
+    try:
+        import fcntl
+    except ImportError:  # non-POSIX: locking unsupported, proceed unguarded
+        yield
+        return
+
+    # Not a `with`: the descriptor must stay open (holding the flock) for the
+    # whole yielded block; the finally below closes it.
+    fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        started = time.monotonic()
+        announced = False
+        while True:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in _BUSY:
+                    raise
+            waited = time.monotonic() - started
+            if waited >= limit:
+                raise stuck()
+            if on_wait is not None and not announced and waited >= _ANNOUNCE_AFTER:
+                announced = True
+                on_wait()
+            time.sleep(_POLL_INTERVAL)
         yield
     finally:
         fd.close()
@@ -107,39 +197,38 @@ def repo_lock(
     is stuck rather than busy (``REPO_LOCK_TIMEOUT`` by default).
 
     Keep the block to git operations: never hold it across dependency setup,
-    a container build, or the agent session.
+    a container build, the agent session, or the ports lock.
     """
-    try:
-        import fcntl
-    except ImportError:  # non-POSIX: locking unsupported, proceed unguarded
-        yield
-        return
-
     limit = REPO_LOCK_TIMEOUT if timeout is None else timeout
-    lock_path = git.common_dir(path) / _REPO_LOCK_FILE
-    # Not a `with`: the descriptor must stay open (holding the flock) for the
-    # whole yielded block; the finally below closes it.
-    fd = open(lock_path, "w")  # noqa: SIM115
-    try:
-        started = time.monotonic()
-        announced = False
-        while True:
-            try:
-                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
-                    raise
-            waited = time.monotonic() - started
-            if waited >= limit:
-                raise LockError(
-                    "Another treebox operation has held this repository's git "
-                    f"state for over {limit:.0f}s. Wait for it to finish, then retry."
-                )
-            if on_wait is not None and not announced and waited >= _ANNOUNCE_AFTER:
-                announced = True
-                on_wait()
-            time.sleep(_POLL_INTERVAL)
+
+    def stuck() -> LockError:
+        return LockError(
+            "Another treebox operation has held this repository's git "
+            f"state for over {limit:.0f}s. Wait for it to finish, then retry."
+        )
+
+    with _waiting_lock(
+        git.common_dir(path) / _REPO_LOCK_FILE, limit=limit, stuck=stuck, on_wait=on_wait
+    ):
         yield
-    finally:
-        fd.close()
+
+
+@contextmanager
+def ports_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """Hold the machine-wide port-ledger lock at ``lock_path`` for the block,
+    waiting for other treebox processes (``PORTS_LOCK_TIMEOUT`` by default).
+    Keep the block to the ledger read-modify-write."""
+    limit = PORTS_LOCK_TIMEOUT if timeout is None else timeout
+
+    def stuck() -> LockError:
+        return LockError(
+            f"Another treebox process has held the port-block ledger lock "
+            f"({lock_path}) for over {limit:.0f}s.",
+            hint="Wait for it to finish, then retry. If no treebox is running, "
+            "a process is stuck holding the lock: find it with "
+            f"`lsof {lock_path}`.",
+        )
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _waiting_lock(lock_path, limit=limit, stuck=stuck):
+        yield

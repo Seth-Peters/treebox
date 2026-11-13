@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -34,9 +35,11 @@ from . import (
     lifecycle,
     locking,
     names,
+    ports,
     provision,
     record,
     resolve,
+    resources,
     status,
     system,
 )
@@ -50,18 +53,27 @@ from .models import (
     WorktreeRow,
     derive_name,
     expand_user,
-    flatten_branch,
     is_placeholder,
     is_valid_name,
     is_valid_template_name,
     path_is_under,
     placeholder_branch,
     same_path,
+    worktree_id,
     worktree_path,
     worktree_root,
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
-from .runners import VALID_ISOLATION, DockerRunner, HostRunner, PreflightError, Runner, get_runner
+from .resources import ResourceLimitError, ResourceLimits
+from .runners import (
+    VALID_ISOLATION,
+    DockerRunner,
+    FirewallError,
+    HostRunner,
+    PreflightError,
+    Runner,
+    get_runner,
+)
 from .runners.docker import has_resource_manifest
 
 # Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
@@ -210,6 +222,9 @@ def _reconcile_with_record(
     - ``template``: the template decides the container's user and mounts, so
       the recorded choice wins over the config default; an explicit
       ``--template`` stays a legitimate per-session operator override.
+    - ``resources``: the recorded limits are what the sandbox has, so they
+      always win (``_check_entry_resources`` refuses a conflicting flag and
+      warns about a config or template change).
 
     ``record.load`` already refused unknown isolation and harness names, so
     the recorded ``str`` names are final here: callers resolve
@@ -226,7 +241,9 @@ def _reconcile_with_record(
             "down and re-create the worktree with the new one.",
             json_out=json_out,
         )
-    cfg = cfg.with_overrides(isolation=rec.isolation, firewall=rec.firewall)
+    cfg = cfg.with_overrides(
+        isolation=rec.isolation, firewall=rec.firewall, resources=rec.resources
+    )
     if harness is None:
         cfg = cfg.with_overrides(harness=rec.harness)
     if template is None:
@@ -242,6 +259,202 @@ def _record_hint(exc: record.RecordError) -> str:
         f"Tear it down and create it again: treebox teardown {exc.worktree.name}, "
         "then treebox create (add --checkout <branch> to keep its branch)."
     )
+
+
+# --- resource limits ---------------------------------------------------------
+
+_CPUS_HELP = (
+    "CPU limit for this worktree's sandbox, in CPUs (a decimal, at least 0.01, "
+    "at most the engine's CPU count), e.g. --cpus 2 or --cpus 1.5. Maps to "
+    "docker run --cpus. Overrides \\[resources] cpus in config and the template's "
+    "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
+    "--isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_MEMORY_HELP = (
+    "Memory limit for this worktree's sandbox, in Docker's memory syntax: a "
+    "number and a unit b, k, m, g, t or p (binary multiples; a bare number is "
+    "bytes; at least 6m), e.g. --memory 4g or --memory 512m. Maps to docker run "
+    "--memory. Overrides \\[resources] memory in config and the template's "
+    "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
+    "--isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_PIDS_HELP = (
+    "Process limit for this worktree's sandbox: the most processes and threads "
+    "it can run at once (a positive whole number), e.g. --pids-limit 512. Maps "
+    "to docker run --pids-limit. Overrides \\[resources] pids in config and the "
+    "template's resources. Unset: no treebox cap. Fixed when the sandbox is "
+    "created. --isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_ENTER_LIMIT_NOTE = (
+    " On enter: only restates the recorded limit; a different value is a "
+    "conflict (exit 5) with the re-create commands."
+)
+
+
+def _resource_flags(
+    reporter: Reporter,
+    *,
+    cpus: str | None,
+    memory: str | None,
+    pids_limit: str | None,
+    json_out: bool,
+) -> ResourceLimits:
+    """Validate the ``--cpus`` / ``--memory`` / ``--pids-limit`` flags before
+    anything is provisioned: a bad value is a usage error (exit 2)."""
+    try:
+        return resources.from_flags(cpus=cpus, memory=memory, pids=pids_limit)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="See the units and an example in `treebox create --help`.",
+            json_out=json_out,
+        ) from exc
+
+
+def _refuse_unsupported_limits(
+    reporter: Reporter, run: Runner, explicit: ResourceLimits, *, json_out: bool
+) -> None:
+    """An explicit limit the runner cannot apply is an error, never ignored."""
+    unsupported = [n for n in explicit.names() if n not in run.supported_resources]
+    if not unsupported:
+        return
+    flags = ", ".join(resources.FLAGS[n] for n in unsupported)
+    raise _die(
+        reporter,
+        f"The {run.name} runner cannot apply {flags}"
+        + (
+            ": it runs the agent on the host, with no sandbox to cap."
+            if run.name == "host"
+            else "."
+        ),
+        code=EXIT_USAGE,
+        error_code="RESOURCE_UNSUPPORTED",
+        hint=f"Drop {flags}, or use a sandbox: --isolation docker.",
+        json_out=json_out,
+    )
+
+
+def _creation_limits(
+    reporter: Reporter,
+    cfg: Config,
+    run: Runner,
+    explicit: ResourceLimits,
+    *,
+    json_out: bool,
+) -> tuple[ResourceLimits, list[str]]:
+    """The effective limits of a new sandbox, field by field: explicit flag,
+    then user config (``cfg.resources``), then the runner's template tier,
+    restricted to what the runner can apply. Also returns the config limits
+    this runner does not apply (shown as a note, never an error: one
+    ``[resources]`` table must not break every host worktree). Engine-refused
+    values fail here, before provisioning."""
+    _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
+    try:
+        wanted = explicit.over(cfg.resources).over(run.template_resources())
+        effective = wanted.only(run.supported_resources)
+        run.check_resources(effective)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="Pick a smaller value, or check the Docker engine's resources (docker info).",
+            json_out=json_out,
+        ) from exc
+    except _PROVISION_ERRORS as exc:
+        raise _handle(reporter, exc, json_out=json_out) from exc
+    ignored = [n for n in cfg.resources.names() if n not in run.supported_resources]
+    return effective, ignored
+
+
+def _note_ignored_limits(reporter: Reporter, run: Runner, ignored: list[str]) -> None:
+    if ignored:
+        reporter.note(
+            "limits",
+            f"[resources] {', '.join(ignored)} not applied: the {run.name} runner "
+            "sets no such limit",
+        )
+
+
+def _recreate_command(rec: record.WorktreeRecord, branch: str | None, flags: ResourceLimits) -> str:
+    """The exact commands that re-create a worktree's sandbox. ``flags`` are
+    the limits to choose by flag; every other limit comes from config and the
+    template again, as on any create (teardown keeps the branch, and its
+    commits, by default)."""
+    name = rec.worktree.name
+    create = ["treebox", "create", name]
+    if branch and branch != "detached":
+        create += ["--checkout", branch]
+    create += ["--isolation", rec.isolation]
+    if rec.firewall:
+        create.append("--firewall")
+    create += ["--template", rec.template, "-H", rec.harness, *flags.cli_flags()]
+    return f"treebox teardown {name} && {shlex.join(create)}"
+
+
+def _check_entry_resources(
+    reporter: Reporter,
+    run: Runner,
+    rec: record.WorktreeRecord,
+    *,
+    branch: str | None,
+    explicit: ResourceLimits,
+    config_limits: ResourceLimits,
+    json_out: bool,
+) -> ResourceLimits:
+    """The recorded limits are what an existing sandbox has, and a container's
+    limits cannot change in place. An explicit flag that differs is a
+    conflict (exit 5) with the re-create commands. A limit that config or the
+    template gave at create, and that they now give differently, is drift: a
+    warning with the same commands, never a silent no-op. Returns the drift
+    (the values config and template now give; unset = no drift).
+
+    A limit an explicit ``create`` flag chose (``rec.explicit_resources``)
+    never drifts: the operator picked it on purpose. Neither does one this
+    ``enter`` restates by flag."""
+    _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
+    recorded = rec.resources
+    chosen = recorded.only(rec.explicit_resources)
+    differs = [n for n in explicit.names() if getattr(explicit, n) != getattr(recorded, n)]
+    if differs:
+        flags = ", ".join(
+            f"{resources.FLAGS[n]} {resources.format_value(n, getattr(explicit, n))}"
+            for n in differs
+        )
+        raise _die(
+            reporter,
+            f"Worktree '{rec.worktree.name}' was created with limits "
+            f"{recorded.describe()}; {flags} cannot apply to its existing sandbox.",
+            code=EXIT_CONFLICT,
+            error_code="RESOURCE_MISMATCH",
+            hint="Drop the flag to keep the recorded limits, or commit your work and "
+            "re-create the sandbox: " + _recreate_command(rec, branch, explicit.over(chosen)),
+            path=str(record.record_path(rec.worktree)),
+            json_out=json_out,
+        )
+    try:
+        template = run.template_resources()
+    except _PROVISION_ERRORS:
+        template = ResourceLimits()  # enter tolerates a deleted or broken template
+    # Only a value the config or template sets counts: an unset default asks
+    # for nothing, so it never contradicts a limit chosen at create.
+    wanted = config_limits.over(template).only(run.supported_resources)
+    pinned = rec.explicit_resources | set(explicit.names())
+    drift = wanted.only(
+        n for n in wanted.names() if n not in pinned and getattr(wanted, n) != getattr(recorded, n)
+    )
+    if drift.names():
+        reporter.warn(
+            f"limits: this sandbox keeps its recorded limits ({recorded.describe()}); "
+            f"config and template now give {drift.describe()}. A limit change cannot "
+            "apply to an existing sandbox. To apply it, commit your work and "
+            f"re-create: {_recreate_command(rec, branch, chosen)}"
+        )
+    return drift
 
 
 def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
@@ -270,6 +483,29 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
             hint="Run inside a git repo, or pass --repo <path>.",
             json_out=json_out,
         ) from exc
+
+
+def _check_root(reporter: Reporter, repo_path: str, root: str, *, json_out: bool = False) -> None:
+    """Refuse a worktree root that cannot hold worktrees: the root, or its
+    nearest existing ancestor, is not a directory (a regular file, a dangling
+    symlink). A root that does not exist yet is fine - create makes it."""
+    base = worktree_root(repo_path, root)
+    probe = base
+    while not os.path.lexists(probe) and probe != probe.parent:
+        probe = probe.parent
+    if probe.is_dir():
+        return
+    where = "" if probe == base else f" ({probe} is not a directory)"
+    raise _die(
+        reporter,
+        f"Worktree root {base} is not a directory{where}.",
+        code=EXIT_USAGE,
+        error_code="INVALID_ROOT",
+        hint="Point --root (or root in config.toml) at a directory, "
+        "or at a path that does not exist yet.",
+        path=str(base),
+        json_out=json_out,
+    )
 
 
 def _validate_branch(reporter: Reporter, branch: str, *, json_out: bool = False) -> None:
@@ -353,8 +589,12 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(
             EXIT_CONFLICT,
             "LOCK_HELD",
-            "Another run holds this worktree — wait, then retry.",
+            exc.hint or "Another run holds this worktree — wait, then retry.",
         )
+    if isinstance(exc, ports.PortsExhaustedError):
+        return _ErrorInfo(EXIT_CONFLICT, "PORTS_EXHAUSTED", exc.hint)
+    if isinstance(exc, ports.LedgerInvalidError):
+        return _ErrorInfo(EXIT_ERROR, "PORT_LEDGER_INVALID", exc.hint)
     if isinstance(exc, git.FetchError):
         msg = str(exc).lower()
         if "publickey" in msg or "permission denied" in msg:
@@ -413,10 +653,10 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Runner dependency problems keep exit 1 (codes are stable; agents
-        # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE,
-        # RUNNING_AS_ROOT).
+        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    if isinstance(exc, FirewallError):
+        return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -430,7 +670,8 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         error_code=error_code,
         hint=hint,
         path=str(exc.path)
-        if isinstance(exc, (provision.ProvisionError, record.RecordError)) and exc.path
+        if isinstance(exc, (provision.ProvisionError, record.RecordError, ports.PortsError))
+        and exc.path
         else None,
         json_out=json_out,
     )
@@ -451,21 +692,37 @@ def _short_path(path: Path | str, repo: str) -> str:
 
 
 def _emit_result(
-    outcome: provision.Outcome, *, json_out: bool, print_only: bool, warnings: list[str]
+    outcome: provision.Outcome,
+    *,
+    json_out: bool,
+    print_only: bool,
+    warnings: list[str],
+    limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
     """Write the machine/script-facing result to stdout. ``warnings`` are the
-    run's warnings (an additive payload field: empty when nothing was skipped)."""
+    run's warnings (an additive payload field: empty when nothing was
+    skipped). ``drift`` (``enter`` only) is what config and template now give
+    for a limit the sandbox keeps: ``resources_drift``, every key present,
+    ``null`` = no drift."""
+    block = outcome.worktree.ports
     if json_out:
         payload = {
             "schemaVersion": SCHEMA_VERSION,
             "name": outcome.worktree.name,
             "worktree_path": str(outcome.worktree.path),
+            "id": outcome.worktree.id,
+            "port_base": block.base if block else None,
+            "port_count": block.count if block else None,
             "branch": outcome.worktree.branch,
             "base": outcome.worktree.base,
             "entry_command": outcome.entry_command,
             "created": outcome.created,
+            "resources": limits.to_json(),
             "warnings": warnings,
         }
+        if drift is not None:
+            payload["resources_drift"] = drift.to_json()
         _emit_json(payload)
     elif print_only:
         sys.stdout.write(" ".join(shlex.quote(p) for p in outcome.entry_command) + "\n")
@@ -483,6 +740,7 @@ def _dry_run(
     cold: bool,
     json_out: bool,
     checkout: str | None,
+    ignored_limits: list[str],
 ) -> None:
     """Render what ``create`` would do, executing nothing."""
     try:
@@ -509,6 +767,7 @@ def _dry_run(
                 "worktree_path": str(wt.path),
                 "branch": branch,
                 "commands": cmds,
+                "resources": cfg.resources.to_json(),
                 "warnings": reporter.warnings,
             }
         )
@@ -518,6 +777,9 @@ def _dry_run(
     reporter.summary("worktree", _short_path(wt.path, repo_path))
     reporter.summary("branch", branch)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if cfg.resources.names():
+        reporter.summary("limits", cfg.resources.describe())
+    _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
     for cmd in cmds:
         reporter.command(cmd)
@@ -578,6 +840,9 @@ def create(
         "Resolved from $TREEBOX_TEMPLATE_DIR or $TREEBOX_HOME/templates/<name> "
         "(default ~/.treebox/templates/<name>).",
     ),
+    cpus: str | None = typer.Option(None, "--cpus", help=_CPUS_HELP, metavar="CPUS"),
+    memory: str | None = typer.Option(None, "--memory", help=_MEMORY_HELP, metavar="SIZE"),
+    pids_limit: str | None = typer.Option(None, "--pids-limit", help=_PIDS_HELP, metavar="N"),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -616,6 +881,14 @@ def create(
     exit status, and the file with its output). The worktree is kept and
     marked unfinished; `treebox enter NAME` or the same create retries setup.
 
+    Setup and the agent get, for repo-owned service scripts: TREEBOX_NAME
+    (the worktree name), TREEBOX_ID (10 lowercase hex characters, unique on
+    this machine, derived from the worktree path), and TREEBOX_PORT_BASE and
+    TREEBOX_PORT_COUNT (a port block no other treebox worktree on the machine
+    has; the ports table of the user config sets the range). --print and
+    --json commands carry them too. A full range fails before anything is made
+    (exit 5, PORTS_EXHAUSTED); --dry-run reserves nothing.
+
     To start the agent on a task, put its args after NAME and --
     (create fix-auth -- -p "fix the login race"). A nameless create takes
     no agent args: give a NAME.
@@ -640,10 +913,16 @@ def create(
         template=template,
         json_out=json_out,
     )
-    if name is not None and name.startswith("-"):
-        # A dash-led NAME is never a valid branch (INVALID_BRANCH, as
-        # always), and it usually means `create -- ARGS`: the first agent arg
-        # took the name slot. Say how to pass agent args.
+    explicit_limits = _resource_flags(
+        reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
+    )
+    if checkout is None and name is not None and name.startswith("-"):
+        # Without --checkout, NAME is the branch, and a dash-led branch is
+        # never valid (INVALID_BRANCH, as always). It usually means
+        # `create -- ARGS`: the first agent arg took the name slot. Say how
+        # to pass agent args. With --checkout, NAME is only the worktree
+        # name, and a dash-led one is valid (`create --checkout B -- -auth`,
+        # the firewall recovery command for a `treebox/-auth` worktree).
         raise _die(
             reporter,
             f"Invalid branch name '{name}'.",
@@ -658,14 +937,15 @@ def create(
     if checkout is not None:
         _validate_branch(reporter, checkout, json_out=json_out)
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     if checkout is not None:
-        wt_name = flatten_branch(name) if name else derive_name(checkout)
+        wt_name = derive_name(name or checkout)
         target_branch = checkout
     elif name is not None:
         # An explicit name IS the branch: slashes stay in the branch, the
         # directory flattens them (feature/auth -> feature--auth).
-        wt_name = flatten_branch(name)
+        wt_name = derive_name(name)
         target_branch = name
         _validate_branch(reporter, target_branch, json_out=json_out)
     else:
@@ -687,6 +967,16 @@ def create(
         except (assets.TemplateNotFoundError, assets.TemplateInvalidError) as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
+    # Limits are final before anything is provisioned, and they are what the
+    # host-owned record will hold.
+    limits, ignored_limits = _creation_limits(
+        reporter, cfg, run, explicit_limits, json_out=json_out
+    )
+    cfg = cfg.with_overrides(
+        resources=limits, explicit_resources=frozenset(explicit_limits.names())
+    )
+    run = get_runner(cfg)
+
     if dry_run:
         _dry_run(
             reporter,
@@ -699,6 +989,7 @@ def create(
             cold=cold,
             json_out=json_out,
             checkout=checkout,
+            ignored_limits=ignored_limits,
         )
         return
 
@@ -712,8 +1003,11 @@ def create(
         reporter.summary("branch", f"{target_branch}  ·  placeholder — rename before push")
         reporter.summary("base", cfg.base)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if limits.names():
+        reporter.summary("limits", limits.describe())
     if cold:
         reporter.summary("cache", "cold (from source)")
+    _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
 
     # The boundary str was validated by _resolve_config; internal seams take
@@ -749,6 +1043,7 @@ def create(
         json_out=json_out,
         print_only=print_only,
         args=args or [],
+        limits=limits,
     )
 
 
@@ -780,6 +1075,15 @@ def enter(
         "(default ~/.treebox/templates/<name>).",
     ),
     cold: bool = typer.Option(False, "--cold", help="Bypass shared caches when re-syncing."),
+    cpus: str | None = typer.Option(
+        None, "--cpus", help=_CPUS_HELP + _ENTER_LIMIT_NOTE, metavar="CPUS"
+    ),
+    memory: str | None = typer.Option(
+        None, "--memory", help=_MEMORY_HELP + _ENTER_LIMIT_NOTE, metavar="SIZE"
+    ),
+    pids_limit: str | None = typer.Option(
+        None, "--pids-limit", help=_PIDS_HELP + _ENTER_LIMIT_NOTE, metavar="N"
+    ),
     print_only: bool = typer.Option(
         False, "--print", help="Prepare, then print the launch command (no launch)."
     ),
@@ -799,6 +1103,10 @@ def enter(
     An unfinished or failed setup runs again; if a setup step fails, enter
     fails too (exit 1, SETUP_FAILED) and the next enter retries it.
 
+    Setup and the agent get the same TREEBOX_NAME, TREEBOX_ID,
+    TREEBOX_PORT_BASE and TREEBOX_PORT_COUNT as at create; --print and --json
+    commands carry them too.
+
     When it launches (no --json, --print), enter exits with the agent's exit
     code; a non-zero one is named in the last stderr line ("treebox: agent
     exited with status N"). SIGINT, SIGTERM or SIGHUP to treebox stops the
@@ -815,7 +1123,12 @@ def enter(
         template=template,
         json_out=json_out,
     )
+    explicit_limits = _resource_flags(
+        reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
+    )
+    config_limits = cfg.resources
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
@@ -853,6 +1166,17 @@ def enter(
     subtitle = cand.name if cand.branch in (None, cand.name) else f"{cand.name}  ·  {cand.branch}"
     reporter.heading("enter", subtitle)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if rec.resources.names():
+        reporter.summary("limits", rec.resources.describe())
+    drift = _check_entry_resources(
+        reporter,
+        run,
+        rec,
+        branch=cand.branch,
+        explicit=explicit_limits,
+        config_limits=config_limits,
+        json_out=json_out,
+    )
     reporter.blank()
 
     def _provision() -> provision.Outcome:
@@ -877,6 +1201,8 @@ def enter(
         json_out=json_out,
         print_only=print_only,
         args=args or [],
+        limits=rec.resources,
+        drift=drift,
     )
 
 
@@ -890,6 +1216,8 @@ def _run_session(
     json_out: bool,
     print_only: bool,
     args: list[str],
+    limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
     the lock on the worktree at ``path``, the provisioning step, one exception
@@ -918,18 +1246,24 @@ def _run_session(
             _require_agent(run, harness, login=not _interactive())
         with locking.worktree_lock(path):
             outcome = provision_call()
-            if json_out or print_only:
-                # The launch path makes the sandbox entry-ready inside
-                # run.launch; the emit path must do the same, or a stopped
-                # container yields an entry_command that is dead on replay
-                # (and a manual `docker start` workaround would silently
-                # skip the firewall re-init).
-                run.prepare_entry(outcome.worktree)
+            # Every entry - launch and emit alike - makes the sandbox
+            # entry-ready first: a stopped container is started, and the
+            # firewall is re-applied even on a running one (`docker restart`
+            # outside treebox drops the rules). A failure here is classified
+            # and nothing launches or is emitted.
+            run.prepare_entry(outcome.worktree)
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
     if not launching:
-        _emit_result(outcome, json_out=json_out, print_only=print_only, warnings=reporter.warnings)
+        _emit_result(
+            outcome,
+            json_out=json_out,
+            print_only=print_only,
+            warnings=reporter.warnings,
+            limits=limits,
+            drift=drift,
+        )
         return
     reporter.blank()
     # Style-A closing line: green "Ready", dim "in <total> — launching <harness>".
@@ -983,22 +1317,19 @@ def _agent_binary_check(run: Runner, harness: Harness) -> DoctorCheck:
     )
 
 
-def _agent_login_check(run: Runner, harness: Harness, *, required: bool = True) -> DoctorCheck:
-    """The harness's subscription login, as the agent will see it: the host
-    login on the host; in a sandbox, the login file it gets a copy of."""
+def _agent_login_check(harness: Harness, *, required: bool = True) -> DoctorCheck:
+    """The harness's subscription login: the one an agent on the host uses
+    and a sandbox gets a copy of."""
     name = f"login: {harness.name}"
-    sandboxed = run.facts().sandboxed
-    found = harness.sandbox_login() if sandboxed else harness.host_login()
+    found = harness.login()
     if found:
         return DoctorCheck(name, True, found, required=required)
-    advisory = harness.login_hint()
-    if sandboxed:
-        advisory += (
-            f" A {run.name} sandbox gets a copy of {harness.login_file()}, so that "
-            "file must hold the login."
-        )
     return DoctorCheck(
-        name, False, f"no login at {harness.login_file()}", advisory, required=required
+        name,
+        False,
+        f"no login at {harness.login_file()}",
+        harness.login_hint(),
+        required=required,
     )
 
 
@@ -1013,7 +1344,7 @@ def _require_agent(run: Runner, harness: Harness, *, login: bool) -> None:
             binary.detail + ".", error_code="HARNESS_MISSING", hint=binary.advisory
         )
     if login:
-        check = _agent_login_check(run, harness)
+        check = _agent_login_check(harness)
         if not check.ok:
             raise PreflightError(
                 f"No {harness.name} login for an unattended launch: {check.detail}.",
@@ -1067,6 +1398,12 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         rows.append(
             WorktreeRow(
                 name=wt_path.name,
+                # Spelled like enter spells it (git may canonicalize a root alias
+                # such as /var -> /private/var), so list shows the id the
+                # worktree's setup and agent get.
+                id=worktree_id(
+                    Path(resolve.Candidate.registered(repo_path, cfg.root, rec.path, None).path)
+                ),
                 branch=rec.branch or "detached",
                 unnamed=is_placeholder(rec.branch),
                 missing=missing,
@@ -1076,10 +1413,13 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
                 base=policy.base if policy else "",
                 isolation=policy.isolation if policy else "",
                 harness=policy.harness if policy else "",
+                resources=policy.resources.to_json() if policy else None,
                 deps=deps,
                 env="present" if env_present else "absent",
                 health=health,
                 setup=policy.setup.status if policy else "",
+                port_base=policy.ports.base if policy and policy.ports else None,
+                port_count=policy.ports.count if policy and policy.ports else None,
             )
         )
 
@@ -1107,6 +1447,7 @@ def list_cmd(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     rows = _collect_rows(repo_path, cfg)
 
@@ -1413,8 +1754,9 @@ def teardown(
 
     An incomplete cleanup fails teardown (exit 1, TEARDOWN_INCOMPLETE): it
     names what remains (for example a container docker could not remove) and
-    keeps the worktree and its record, so the same command retries. A
-    worktree locked with `git worktree lock` is never removed.
+    keeps the worktree, its record and its port block, so the same command
+    retries. A complete teardown releases the port block. A worktree locked
+    with `git worktree lock` is never removed.
 
     Unattended (--json, --non-interactive, or no terminal) there is no
     prompt: pass --yes to confirm. --yes keeps the uncommitted-changes
@@ -1431,6 +1773,7 @@ def teardown(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     targets: list[resolve.Candidate] = []
     # Which targets also lose their local branch, by path. The chooser fills this
@@ -1507,16 +1850,22 @@ def teardown(
         blocked = [(c, why) for c in cands if (why := _teardown_block(repo_path, c, force))]
         if blocked and not from_chooser:
             cand, why = blocked[0]
+            if why == "dirty":
+                raise _die(
+                    reporter,
+                    f"Worktree '{cand.name}' has uncommitted changes.",
+                    code=EXIT_CONFLICT,
+                    error_code="DIRTY_WORKTREE",
+                    hint="Commit/stash the changes, or pass --force to remove anyway.",
+                    path=cand.path,
+                    json_out=json_out,
+                )
             raise _die(
                 reporter,
-                f"Worktree '{cand.name}' has uncommitted changes."
-                if why == "dirty"
-                else f"Worktree '{cand.name}' is locked by git (git worktree lock).",
+                f"Worktree '{cand.name}' is locked by git (git worktree lock).",
                 code=EXIT_CONFLICT,
-                error_code="DIRTY_WORKTREE" if why == "dirty" else "WORKTREE_LOCKED",
-                hint="Commit/stash the changes, or pass --force to remove anyway."
-                if why == "dirty"
-                else f"treebox never removes a locked worktree. Unlock it first: "
+                error_code="WORKTREE_LOCKED",
+                hint=f"treebox never removes a locked worktree. Unlock it first: "
                 f"git -C {repo_path} worktree unlock {cand.path}",
                 path=cand.path,
                 json_out=json_out,
@@ -1747,6 +2096,12 @@ def _teardown_one(
         reporter.note("worktree", f"kept · cleanup incomplete · {shown}")
     else:
         reporter.fail("worktree", f"kept · {shown}")
+    if result.port_error is not None:
+        reporter.warn(
+            f"port block not released now (the next create reclaims it): {result.port_error}"
+        )
+    elif result.released_ports is not None:
+        reporter.ok("ports", f"released {result.released_ports}")
     if not result.complete:
         reporter.note("record", "kept · the same teardown retries")
     elif result.branch_error is not None:
@@ -1832,7 +2187,7 @@ def doctor(
 
     checks.append(_agent_binary_check(run, selected))
     for h in HARNESSES:
-        checks.append(_agent_login_check(run, h, required=h is selected))
+        checks.append(_agent_login_check(h, required=h is selected))
 
     # Same resolver copy_env uses, so doctor reports the exact secrets source
     # provisioning will copy.
@@ -1988,8 +2343,7 @@ def template_init(
     """Copy a template into $TREEBOX_HOME/templates/<name> so you can edit it.
 
     This is the sanctioned replacement for hand-copying the shipped directory:
-    it works from any install and always yields a directory with the full
-    required file set. Then edit the Dockerfile and container.json and run
+    it works from any install. Then edit the Dockerfile and container.json and run
     `treebox create <name> --isolation docker --template <name>`.
     """
     reporter = Reporter(silent=json_out)
@@ -1999,6 +2353,14 @@ def template_init(
         raise _die(
             reporter,
             f"Invalid template name '{name}'. Use letters, digits, '.', '_', or '-'.",
+            code=EXIT_USAGE,
+            error_code="INVALID_NAME",
+            json_out=json_out,
+        )
+    if name == assets.STAGING_DIR:
+        raise _die(
+            reporter,
+            f"Invalid template name '{name}': treebox reserves it for its staging directory.",
             code=EXIT_USAGE,
             error_code="INVALID_NAME",
             json_out=json_out,
@@ -2050,17 +2412,19 @@ def template_init(
         elif target.is_symlink() or target.exists():
             target.unlink()
 
-    # Copy into a staging dir beside the destination and swap it into place, so
-    # a failed copy leaves any existing template untouched rather than deleting
-    # it up front — and no OSError escapes as a bare traceback.
-    staging = dest.parent / f".{name}.treebox-tmp"
+    # Keep the old template byte-for-byte until the new copy is installed, so
+    # rollback needs only a rename. Use a unique staging dir under STAGING_DIR:
+    # another process may still own a directory left by an earlier run.
+    staging_root = dest.parent / assets.STAGING_DIR
+    staging: Path | None = None
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        _remove(staging)
-        shutil.copytree(src, staging)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f"{name}.", dir=staging_root))
+        shutil.copytree(src, staging / "new")
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        if staging is not None:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
             f"Could not copy template into {dest}: {exc}.",
@@ -2070,15 +2434,17 @@ def template_init(
             json_out=json_out,
         ) from exc
 
+    old = staging / "old"
     if existing:
         try:
-            _remove(dest)
+            dest.rename(old)
         except OSError as exc:
             with contextlib.suppress(OSError):
                 _remove(staging)
             raise _die(
                 reporter,
-                f"Could not overwrite existing template at {dest}: {exc}.",
+                f"Could not overwrite existing template at {dest}: {exc}. "
+                "The existing template is unchanged.",
                 code=EXIT_ERROR,
                 error_code="OVERWRITE_FAILED",
                 path=str(dest),
@@ -2086,18 +2452,35 @@ def template_init(
             ) from exc
 
     try:
-        staging.rename(dest)
+        (staging / "new").rename(dest)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        kept = ""
+        if existing:
+            try:
+                old.rename(dest)
+            except OSError:
+                # Do not delete the staging dir: it holds the only copy of the
+                # old template now.
+                kept = f" The previous template is kept at {old}."
+        if not kept:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
-            f"Could not copy template into {dest}: {exc}.",
+            f"Could not copy template into {dest}: {exc}.{kept}",
             code=EXIT_ERROR,
             error_code="COPY_FAILED",
             path=str(dest),
             json_out=json_out,
         ) from exc
+
+    leftover = ""
+    try:
+        _remove(staging)
+    except OSError as exc:
+        leftover = (
+            f"could not remove the previous template copy at {staging} ({exc}); delete it by hand"
+        )
 
     missing = assets.missing_template_files(dest)
     if json_out:
@@ -2119,6 +2502,8 @@ def template_init(
         reporter.warn(
             f"copied from an incomplete source — missing required files: {', '.join(missing)}"
         )
+    if leftover:
+        reporter.warn(leftover)
     reporter.hint(
         "Edit the Dockerfile and container.json, then: "
         f"treebox create <name> --isolation docker --template {name}"

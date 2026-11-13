@@ -7,6 +7,7 @@ shells out to git directly. Functions raise ``GitError`` on failure.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import time
 from collections.abc import Iterator
@@ -838,23 +839,41 @@ def branch_for_path(repo: str | Path, path: str) -> str | None:
 
 
 def has_gitmodules(repo: str | Path) -> bool:
-    return (Path(repo) / ".gitmodules").is_file()
+    """Whether ``repo`` has a regular ``.gitmodules`` file. A symlink or a
+    directory at that name is not one: neither is ever read."""
+    try:
+        return stat.S_ISREG((Path(repo) / ".gitmodules").lstat().st_mode)
+    except OSError:
+        return False
 
 
 def submodule_paths(repo: str | Path) -> list[str]:
-    """Relative paths of configured submodules, from .gitmodules."""
+    """Relative paths of configured submodules, from the ``.gitmodules`` in
+    the working tree at ``repo`` (empty when there is no such regular file)."""
+    if not has_gitmodules(repo):
+        return []
+    return _submodule_paths_from(repo, ["-f", ".gitmodules"])
+
+
+def submodule_paths_at_revision(repo: str | Path, revision: str) -> list[str]:
+    """Relative paths of configured submodules in the ``.gitmodules`` that
+    ``revision`` tracks, without checkout: what ``submodule_paths`` reads in
+    a worktree that ``worktree add`` checks out at ``revision``.
+
+    As in ``has_gitmodules``, only a regular file counts: a symlink (mode
+    120000) or a directory at that name declares nothing.
+    """
+    out = _run(["-C", str(repo), "ls-tree", revision, "--", ".gitmodules"])
+    if not any(entry.split(" ", 1)[0] in {"100644", "100755"} for entry in out.splitlines()):
+        return []
+    return _submodule_paths_from(repo, ["--blob", f"{revision}:.gitmodules"])
+
+
+def _submodule_paths_from(repo: str | Path, source: list[str]) -> list[str]:
+    """The ``submodule.*.path`` values of one ``.gitmodules`` (a ``-f`` file
+    or a ``--blob``); empty when git cannot parse it."""
     try:
-        out = _run(
-            [
-                "-C",
-                str(repo),
-                "config",
-                "-f",
-                ".gitmodules",
-                "--get-regexp",
-                r"^submodule\..*\.path$",
-            ]
-        )
+        out = _run(["-C", str(repo), "config", *source, "--get-regexp", r"^submodule\..*\.path$"])
     except GitError:
         return []
     paths = []

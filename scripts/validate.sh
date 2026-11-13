@@ -13,7 +13,8 @@ echo "== mypy =="
 uv run --extra dev mypy
 
 echo "== shell assets =="
-shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/pre-push scripts/*.sh)
+shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/container/treebox-fetch
+  src/treebox/assets/container/treebox-online src/treebox/assets/pre-push scripts/*.sh)
 for f in "${shell_files[@]}"; do bash -n "$f"; done
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "${shell_files[@]}"
@@ -42,6 +43,9 @@ git clone -q "$SBX/origin.git" "$SBX/repo" 2>/dev/null  # silence the empty-repo
 )
 
 unset TREEBOX_CONFIG
+# create writes the machine-wide port-block ledger to the treebox home: keep it
+# in the sandbox, never in the real ~/.treebox.
+export TREEBOX_HOME="$SBX/treebox-home"
 out="$(uv run treebox create feature-smoke --repo "$SBX/repo" --root "$SBX/wts" --isolation host --print)"
 wt="$SBX/wts/feature-smoke"
 [[ -d "$wt/.venv" ]]                         || { echo "FAIL: no .venv"; exit 1; }

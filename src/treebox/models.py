@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 # Branches treebox generates carry this prefix. It marks the name as
 # machine-made: the pre-push guard refuses to push them, so a placeholder can
@@ -52,22 +53,16 @@ def is_placeholder(branch: str | None) -> bool:
 
 
 def derive_name(branch: str) -> str:
-    """The worktree name a branch implies: a placeholder's own slug
-    (``treebox/fix-auth`` -> ``fix-auth``), else the flattened branch
-    (``create --checkout feature/auth`` -> ``feature--auth``)."""
-    if is_placeholder(branch):
-        return branch.removeprefix(PLACEHOLDER_PREFIX)
-    return flatten_branch(branch)
+    """The worktree name a branch-shaped input implies. This is the one place
+    a name comes from a branch (``create NAME``, ``create --checkout``, the
+    teardown fallback for a branch without a worktree).
 
-
-def flatten_branch(branch: str) -> str:
-    """Derive a directory-safe name from a branch: slashes flattened to ``--``.
-
-    ``feature/auth`` -> ``feature--auth``. Only used to *derive* a worktree
-    name from a branch-shaped input (``create feature/auth``,
-    ``create --checkout <branch>``).
+    A placeholder drops its ``treebox/`` prefix, then every remaining slash
+    flattens to ``--``: ``treebox/fix-auth`` -> ``fix-auth``,
+    ``treebox/a/b`` -> ``a--b``, ``feature/auth`` -> ``feature--auth``. The
+    name is always one directory leaf, so treebox never nests a worktree.
     """
-    return branch.replace("/", "--")
+    return branch.removeprefix(PLACEHOLDER_PREFIX).replace("/", "--")
 
 
 def expand_user(path: str | Path) -> Path:
@@ -90,12 +85,56 @@ def worktree_path(repo: str, root: str, name: str) -> Path:
     return worktree_root(repo, root) / name
 
 
+# The variables treebox exports to setup and to the agent entry (see
+# ``Worktree.treebox_env``). Repo-owned scripts read them to run services in
+# parallel worktrees; treebox starts no service itself.
+ENV_NAME = "TREEBOX_NAME"
+ENV_ID = "TREEBOX_ID"
+ENV_PORT_BASE = "TREEBOX_PORT_BASE"
+ENV_PORT_COUNT = "TREEBOX_PORT_COUNT"
+
+# The ``worktree_id`` format is documented contract: exactly this many
+# lowercase hex characters. Repo scripts put it in database and Compose project
+# names, and the docker runner's sandbox names embed it, so it never changes.
+WORKTREE_ID_LENGTH = 10
+
+
+def worktree_id(path: Path) -> str:
+    """The machine-unique id of the worktree registered at ``path``:
+    ``WORKTREE_ID_LENGTH`` lowercase hex characters of the SHA-256 of the path.
+
+    Derived from the path, never from the name: a name repeats across repos
+    and nested roots, the registered path does not. This is the one
+    derivation of a worktree's hash: the docker runner's container and image
+    names embed it, so ``TREEBOX_ID`` and the sandbox name always agree."""
+    return hashlib.sha256(str(path).encode()).hexdigest()[:WORKTREE_ID_LENGTH]
+
+
 def same_path(left: str | Path, right: str | Path) -> bool:
     return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
 
 
 def path_is_under(path: str | Path, root: str | Path) -> bool:
     return Path(path).resolve(strict=False).is_relative_to(Path(root).resolve(strict=False))
+
+
+@dataclass(frozen=True)
+class PortBlock:
+    """A block of ``count`` consecutive TCP/UDP port numbers from ``base``,
+    reserved for one worktree by the machine-wide allocator (``ports.py``)."""
+
+    base: int
+    count: int
+
+    @property
+    def last(self) -> int:
+        return self.base + self.count - 1
+
+    def overlaps(self, other: PortBlock) -> bool:
+        return self.base <= other.last and other.base <= self.last
+
+    def __str__(self) -> str:
+        return f"{self.base}-{self.last}"
 
 
 DepsFreshness = Literal["fresh", "stale", "unknown"]
@@ -124,6 +163,7 @@ class WorktreeRow(TypedDict):
     """
 
     name: str
+    id: str  # TREEBOX_ID: models.worktree_id of the registered path
     branch: str
     unnamed: bool  # branch is a treebox/<name> placeholder
     # Kept for older consumers: true when ``health`` is directory_missing or
@@ -135,10 +175,17 @@ class WorktreeRow(TypedDict):
     base: str
     isolation: str
     harness: str
+    # The recorded limits ({cpus, memory, pids}, null = no treebox cap);
+    # null when the worktree has no valid host-owned record.
+    resources: dict[str, Any] | None
     deps: DepsFreshness
     env: Literal["present", "absent"]
     health: Health
     setup: SetupStatus | Literal[""]  # "" when the record is missing or invalid
+    # The reserved port block (TREEBOX_PORT_BASE / TREEBOX_PORT_COUNT); null when
+    # the record holds none (missing or invalid record, or not reserved yet).
+    port_base: int | None
+    port_count: int | None
 
 
 class TemplateRow(TypedDict):
@@ -180,6 +227,9 @@ class Worktree:
     branch: str
     base: str
     path: Path
+    # The reserved port block, once ``provision`` has it from the record;
+    # None for a worktree that has none yet (a dry run, a teardown).
+    ports: PortBlock | None = None
 
     @classmethod
     def at(cls, repo: str, path: Path, *, branch: str = "", base: str = "") -> Worktree:
@@ -198,3 +248,19 @@ class Worktree:
             base=base,
             path=worktree_path(repo, root, name),
         )
+
+    @property
+    def id(self) -> str:
+        """``TREEBOX_ID``: see ``worktree_id``."""
+        return worktree_id(self.path)
+
+    def treebox_env(self) -> dict[str, str]:
+        """The variables setup and the agent entry get, in both runners:
+        ``TREEBOX_NAME`` (the directory leaf, the name users type),
+        ``TREEBOX_ID``, and with a reserved block ``TREEBOX_PORT_BASE`` and
+        ``TREEBOX_PORT_COUNT``."""
+        env = {ENV_NAME: self.name, ENV_ID: self.id}
+        if self.ports is not None:
+            env[ENV_PORT_BASE] = str(self.ports.base)
+            env[ENV_PORT_COUNT] = str(self.ports.count)
+        return env

@@ -17,6 +17,7 @@ from .. import ecosystems
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter
+from ..resources import ResourceLimitError, ResourceLimits
 from ..system import SessionCancelled, have, run_agent, signal_name
 from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 
@@ -37,6 +38,8 @@ def _render_cache_env(command: str, env: dict[str, str]) -> str:
 
 class HostRunner:
     name = "host"
+    # No sandbox, so no cgroup to cap: the agent runs as the operator.
+    supported_resources: frozenset[str] = frozenset()
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -47,6 +50,17 @@ class HostRunner:
 
     def facts(self) -> RunnerFacts:
         return _FACTS
+
+    def template_resources(self) -> ResourceLimits:
+        return ResourceLimits()
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        # The CLI refuses explicit limits for this runner first; this keeps a
+        # direct caller from silently running uncapped.
+        if limits.names():
+            raise ResourceLimitError(
+                limits.names()[0], "The host runner cannot apply resource limits."
+            )
 
     def initialize(self, wt: Worktree) -> None:
         # The host runner owns no per-worktree resources outside the worktree.
@@ -81,6 +95,7 @@ class HostRunner:
                 continue
             env = dict(os.environ)
             env.update(step.env)
+            env.update(wt.treebox_env())
             detail = "from-source (cold)" if cold_root else "cache-backed"
             # A failing step raises StepError: a failed setup is a failed
             # create/enter (the setup model in lifecycle.py records it).
@@ -91,6 +106,7 @@ class HostRunner:
         ecosystems.ensure_cache_dirs(cache_env.values())
         env = dict(os.environ)
         env.update(cache_env)
+        env.update(wt.treebox_env())
         for i, command in enumerate(self.config.setup_hook or []):
             reporter.step(
                 f"setup · hook {i + 1}", "done", ["sh", "-c", command], cwd=str(wt.path), env=env
@@ -138,8 +154,15 @@ class HostRunner:
         # --print/--json emit must carry the worktree directory, or pasting it
         # launches a full-autonomy agent in whatever dir the user happens to be
         # in — typically the main checkout treebox exists to keep agents out of.
+        # The TREEBOX_* variables ride in the command too, so a replayed
+        # command gives the agent the same values as a direct launch.
         argv = harness.launch_argv(args)
-        return ["sh", "-c", f"cd {shlex.quote(str(wt.path))} && exec {shlex.join(argv)}"]
+        exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in wt.treebox_env().items())
+        return [
+            "sh",
+            "-c",
+            f"cd {shlex.quote(str(wt.path))} && export {exports} && exec {shlex.join(argv)}",
+        ]
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
         cmd = harness.launch_argv(args)
@@ -151,7 +174,7 @@ class HostRunner:
             )
         # A cancel signal to treebox is passed on to the agent (the child
         # process), which is killed if it has not exited after the grace time.
-        code, cancelled = run_agent(cmd, cwd=str(wt.path))
+        code, cancelled = run_agent(cmd, cwd=str(wt.path), env={**os.environ, **wt.treebox_env()})
         if cancelled is not None:
             name = signal_name(cancelled)
             raise SessionCancelled(

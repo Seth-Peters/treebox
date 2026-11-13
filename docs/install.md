@@ -49,28 +49,43 @@ curl -fsSL https://raw.githubusercontent.com/Seth-Peters/treebox/main/install.sh
 
 That's the whole table: docker isolation speaks plain `docker build` /
 `docker run` / `docker exec`, so there is no Node.js and no dev-container CLI
-to install. The default template installs the agent CLIs in the image; the host
+to install. See [sandbox build requirements](configuration.md#build-inputs)
+for network access and builder compatibility. The default template installs
+the agent CLIs in the image; the host
 supplies scoped subscription-login copies. The worktree and its git dir are
 mounted at their host paths, so in-container `git` just works — with no special
 git version requirement.
 
 Host isolation launches against your live `~/.claude` / `~/.codex`
 **subscription login**. Docker isolation stages scoped copies of those login
-files and never mounts the live dirs. The sandbox template docker isolation
-provisions is pinned to CPython 3.14.6, independent of whatever runs treebox
-itself.
+files and never mounts the live dirs. On macOS, Claude Code keeps its login in
+the Keychain (your user's `Claude Code-credentials` item), not in
+`~/.claude/.credentials.json`: when that file is absent, treebox reads the
+Keychain item and stages it as the sandbox's `.credentials.json`. If macOS
+asks whether `security` may read the item, allow it; a request that is denied
+or not answered within 30 seconds counts as no login. The sandbox template
+docker isolation provisions is pinned to CPython 3.14.6, independent of
+whatever runs treebox itself.
 
-Docker isolation refuses to run as root (uid 0). The sandbox user takes your
-uid, so as root the agent would be root inside the box and could remove its
-own firewall. `create`, `enter` and `doctor --isolation docker` stop with a
-`RUNNING_AS_ROOT` error before anything is provisioned. On a root-only machine,
-create a non-root user that can reach the Docker daemon and run treebox as
-that user:
+Docker isolation requires a non-root user (uid other than 0), even with
+`--no-firewall`. The default sandbox template gives the agent your uid.
+A root agent could remove its own firewall rules.
+
+For Docker isolation, `create` and `enter` check the uid before provisioning,
+including with `--print` or `--json`. They refuse uid 0 with
+[`RUNNING_AS_ROOT`](usage.md#scripting-against-treebox). A refused `create`
+makes no worktree, branch, or image. A refused `enter` leaves the existing
+worktree in place. `doctor --isolation docker` reports a failed isolation
+check and exits with code `1`.
+
+On Linux with a `docker` group, create a non-root user that can reach the
+Docker daemon:
 
 ```bash
 useradd --create-home --groups docker treebox
 ```
 
+Then run treebox as that user, for example with `su - treebox`.
 Host isolation still works as root.
 
 ## Verify

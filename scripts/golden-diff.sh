@@ -3,9 +3,9 @@
 #
 # Runs a fixed matrix of commands: doctor, create --print/--dry-run,
 # enter --print, list, and their --json forms, for both isolations, against a
-# hermetic throwaway repo, normalizes the machine-specific bits (paths,
-# uid/gid, git version, container-name digests), and diffs the result against
-# the committed snapshots in tests/golden/. Behavior-preserving changes must
+# hermetic throwaway repo, normalizes paths, fixture uid/gid, git version,
+# and container-name digests, then diffs against the committed snapshots in
+# tests/golden/. Behavior-preserving changes must
 # leave every snapshot byte-identical: the "output identical" gate is
 # mechanical, not eyeballed.
 #
@@ -34,9 +34,9 @@ ROOT="$(cd "$ROOT" && pwd -P)"
 WORK="$ROOT/out"
 trap 'rm -rf "$ROOT"' EXIT
 
-TREEBOX="$PWD/.venv/bin/treebox"
-[[ -x "$TREEBOX" ]] || uv sync --quiet
-[[ -x "$TREEBOX" ]] || { echo "FATAL: $TREEBOX not found after uv sync" >&2; exit 1; }
+VENV="$PWD/.venv"
+[[ -x "$VENV/bin/treebox" ]] || uv sync --quiet
+[[ -x "$VENV/bin/treebox" ]] || { echo "FATAL: $VENV/bin/treebox not found after uv sync" >&2; exit 1; }
 
 mkdir -p "$WORK" "$ROOT/tbhome" "$ROOT/home-empty"
 
@@ -98,6 +98,12 @@ for agent in claude codex; do
   chmod +x "$SHIM/$agent"
 done
 
+# --- macOS Keychain shim: no login item, so snapshots never read the real
+# Keychain and come out the same on macOS and Linux. 44 is security's
+# "item not found" status.
+printf '#!/bin/sh\nexit 44\n' > "$SHIM/security"
+chmod +x "$SHIM/security"
+
 # --- hermetic config: setup is a marker-writing hook, never a real installer -
 CFG="$ROOT/config.toml"
 printf 'setup_hook = ["echo ran >> setup.log"]\n' > "$CFG"
@@ -130,11 +136,24 @@ WTS="$ROOT/wts"
 GITVER="$(git --version | awk '{print $3}')"
 GITVER_PARSED="$(git --version | perl -lane 'my $s = $F[-1]; my @parts = split /\./, $s; my @nums; for my $p (@parts[0..2]) { $p //= ""; $p =~ s/\D//g; push @nums, length($p) ? $p : 0; } push @nums, 0 while @nums < 3; print join ".", @nums[0..2]')"
 export GD_ROOT="$ROOT" GD_PRIVROOT="/private$ROOT" GD_GITVER="$GITVER" GD_GITVER_PARSED="$GITVER_PARSED"
+# Use a fixed non-root identity so Docker cases also run when the process is root.
 # Literal (not pattern) uid/gid substitutions, so a regression that changed
 # one number into another is a snapshot diff, not silently normalized away.
-GD_UID="$(id -u)"
-GD_GID="$(id -g)"
+GD_UID=1000
+GD_GID=1000
 export GD_UID GD_GID
+
+TREEBOX=("$VENV/bin/python" -c '
+import os
+
+from treebox import system
+from treebox.cli import app
+
+system.identity = lambda: system.Identity(
+    uid=int(os.environ["GD_UID"]), gid=int(os.environ["GD_GID"])
+)
+app(prog_name="treebox")
+')
 
 normalize() {
   perl -0pe '
@@ -152,6 +171,9 @@ normalize() {
     s/\bUSER_GID=\Q$ENV{GD_GID}\E\b/USER_GID=__GID__/g;
     s/\b\Q$ENV{GD_UID}\E:\Q$ENV{GD_GID}\E\b/__UID__:__GID__/g;
     s/\btreebox-([a-z0-9._-]+)-[0-9a-f]{10}\b/treebox-$1-__HASH__/g;
+    # The worktree id is the same path hash (TREEBOX_ID, "id" in --json).
+    s/\bTREEBOX_ID=[0-9a-f]{10}\b/TREEBOX_ID=__HASH__/g;
+    s/"id": "[0-9a-f]{10}"/"id": "__HASH__"/g;
     # Canonicalize the whole 3-wide AGE cell, not just its digits: a 2-digit
     # age ("10s") fills the column while a 1-digit one right-aligns to " 3s",
     # so replacing only the digits leaves a timing-dependent byte of padding.
@@ -173,7 +195,7 @@ run_case() {
       -u NO_COLOR -u FORCE_COLOR -u CLICOLOR_FORCE \
       HOME="$home" TREEBOX_CONFIG="$CFG" TREEBOX_HOME="$ROOT/tbhome" \
       PATH="$SHIM:$PATH" COLUMNS=80 \
-      "$TREEBOX" "$@" >"$WORK/$name.stdout" 2>"$WORK/$name.stderr"
+      "${TREEBOX[@]}" "$@" >"$WORK/$name.stdout" 2>"$WORK/$name.stderr"
   rc=$?
   set -e
   {
@@ -224,6 +246,7 @@ run_case doctor-docker-json   "$HOME_FAKE" doctor "${R[@]}" --isolation docker -
 run_case doctor-docker-no-login "$ROOT/home-empty" doctor "${R[@]}" --isolation docker --json
 run_case create-dryrun-docker      "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run
 run_case create-dryrun-docker-json "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --dry-run --json
+run_case create-dryrun-docker-limits "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --cpus 2 --memory 4g --pids-limit 512 --dry-run
 run_case create-docker-print  "$HOME_FAKE" create golden-docker "${RW[@]}" --isolation docker --print
 run_case create-docker-json   "$HOME_FAKE" create golden-docker-json "${RW[@]}" --isolation docker --json
 run_case enter-docker-print   "$HOME_FAKE" enter golden-docker "${RW[@]}" --print

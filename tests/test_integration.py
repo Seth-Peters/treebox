@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -206,10 +207,101 @@ def test_create_slash_name_flattens_dir_and_keeps_branch(repo: Path, root: str, 
     assert git.branch_for_path(str(repo), str(wt)) == "feature/auth"
 
 
+def test_checkout_nested_placeholder_branch_gets_one_flat_name(
+    repo: Path, root: str, hermetic_config
+):
+    """--checkout treebox/a/b drops the placeholder prefix and flattens the
+    rest to a--b: one directory leaf that create, list, enter and teardown all
+    agree on - never a nested <root>/a/b that list shows as 'b' and that a
+    later `create b` makes ambiguous."""
+    assert _git(repo, "branch", "treebox/a/b").returncode == 0
+    base = ["--repo", str(repo), "--root", root]
+
+    created = _run(["create", "--checkout", "treebox/a/b", *base, "--json"])
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.stdout)
+    wt = Path(root) / "a--b"
+    assert payload["name"] == "a--b"
+    assert payload["branch"] == "treebox/a/b"
+    assert Path(payload["worktree_path"]) == wt
+    assert wt.is_dir()
+    assert not (Path(root) / "a").exists()  # nothing nested, no stray .locks
+
+    listed = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert [(row["name"], row["branch"]) for row in listed] == [("a--b", "treebox/a/b")]
+
+    # The leaf 'b' is free again: a second worktree named b never collides.
+    assert _run(["create", "b", *base, "--json"]).exit_code == 0
+    for ref in ("a--b", "treebox/a/b"):
+        entered = _run(["enter", ref, *base, "--json"])
+        assert entered.exit_code == 0, entered.output
+        assert json.loads(entered.stdout)["name"] == "a--b"
+    entered_b = _run(["enter", "b", *base, "--json"])
+    assert entered_b.exit_code == 0, entered_b.output
+    assert json.loads(entered_b.stdout)["name"] == "b"
+
+    removed = _run(["teardown", "a--b", *base, "--force", "--json"])
+    assert removed.exit_code == 0, removed.output
+    (record,) = json.loads(removed.stdout)["worktrees"]
+    assert record["name"] == "a--b" and record["removed"] is True
+    assert not wt.exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["create", "x", "--no-fetch", "--print"],
+        ["create", "x", "--no-fetch", "--dry-run"],
+        ["create", "--checkout", "main", "--no-fetch", "--print"],
+        ["enter", "x", "--print"],
+        ["list"],
+        ["teardown", "x", "--force"],
+        ["teardown"],
+    ],
+    ids=lambda c: " ".join(c),
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["file", "under-file"])
+@pytest.mark.parametrize("json_out", [False, True], ids=["human", "json"])
+def test_non_directory_root_is_a_classified_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config, command: list[str], nested: bool, json_out: bool
+):
+    """A --root that is a regular file (or lies under one) is exit 2 with
+    INVALID_ROOT on every command that takes --root - never a raw
+    NotADirectoryError traceback from the lock path."""
+    blocker = tmp_path / "root-file"
+    blocker.write_text("not a directory\n")
+    root = blocker / "wts" if nested else blocker
+    # A lingering local branch drives teardown's branch-without-worktree path.
+    assert _git(repo, "branch", "x").returncode == 0
+
+    res = _run([*command, "--repo", str(repo), "--root", str(root)] + (["--json"] * json_out))
+    assert res.exit_code == 2, res.output
+    assert res.stdout == ""
+    if json_out:
+        error = json.loads(res.stderr)["error"]
+        assert error["code"] == "INVALID_ROOT"
+        assert error["path"] == str(root)
+        assert "is not a directory" in error["message"]
+    else:
+        assert "is not a directory" in res.stderr
+        assert "Traceback" not in res.stderr
+    assert blocker.read_text() == "not a directory\n"
+
+
+def test_dangling_symlink_root_is_a_classified_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config
+):
+    root = tmp_path / "wts"
+    root.symlink_to(tmp_path / "gone")
+    res = _run(["create", "x", "--repo", str(repo), "--root", str(root), "--json"])
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_ROOT"
+
+
 def test_create_existing_branch_is_branch_exists_conflict(repo: Path, root: str, hermetic_config):
     """create NAME promises a fresh branch off origin/<base>: a branch that
     already exists (locally or on origin) is a loud exit 5 pointing at
-    --checkout — never a silent reuse of old work."""
+    --checkout - never a silent reuse of old work."""
     subprocess.run(["git", "-C", str(repo), "branch", "taken"], check=True)
     res = _run(["create", "taken", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5, res.output  # EXIT_CONFLICT
@@ -437,6 +529,261 @@ def test_gitmodules_directory_on_branch_is_kept_and_does_not_block_create_or_ent
     assert (kept / "keep.txt").read_text() == "must survive\n"
     # No tracked content was deleted or modified to make room.
     assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+
+# --- submodule copies follow the branch's own .gitmodules (issue #62) --------
+
+_FILE_PROTOCOL = ("-c", "protocol.file.allow=always")
+_IDENTITY = ("-c", "user.name=t", "-c", "user.email=t@e")
+
+
+def _push_branch_from_clone(repo: Path, tmp_path: Path, branch: str, *edits: list[str]) -> None:
+    """Push ``branch`` (from main) after running git ``edits`` in a scratch
+    clone, so the main checkout's own working tree stays exactly as it is."""
+    clone = tmp_path / f"clone-{branch}"
+    origin = _git(repo, "remote", "get-url", "origin").stdout.strip()
+    assert _git(tmp_path, "clone", "-q", origin, str(clone)).returncode == 0
+    assert _git(clone, "checkout", "-q", "-b", branch).returncode == 0
+    for edit in edits:
+        done = _git(clone, *_FILE_PROTOCOL, *edit)
+        assert done.returncode == 0, done.stderr
+    commit = _git(clone, *_IDENTITY, "commit", "-q", "-m", f"edit {branch}")
+    assert commit.returncode == 0, commit.stderr
+    assert _git(clone, "push", "-q", "origin", branch).returncode == 0
+    assert _git(repo, "fetch", "-q", "origin").returncode == 0
+
+
+def _sub_url(repo: Path) -> str:
+    return _git(repo, "config", "-f", ".gitmodules", "submodule.sub.url").stdout.strip()
+
+
+def _assert_pristine(wt: Path) -> None:
+    """The fresh worktree is exactly its branch: nothing modified and nothing
+    untracked but the hermetic setup hook's log (the copied ``.env`` is
+    force-ignored)."""
+    assert _git(wt, "status", "--porcelain", "-uall").stdout == "?? setup.log\n"
+
+
+def test_create_keeps_the_branchs_renamed_submodule_and_stays_clean(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """``main`` declares ``sub``; the branch renames it to ``libB``. The
+    worktree keeps the branch's ``.gitmodules``, gets no stray ``sub/``, and
+    ``libB`` (which the main checkout does not have) is skipped with a note."""
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "renamed"
+
+    created = _run(["create", "--checkout", "renamed", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    assert _git(wt, "config", "-f", ".gitmodules", "--get-regexp", "path").stdout == (
+        "submodule.sub.path libB\n"
+    )
+    assert not (wt / "sub").exists()
+    _assert_pristine(wt)
+    assert "skipped libB" in created.stderr
+    assert "copied 0" in created.stderr
+    # The main checkout is left exactly as it was.
+    assert _git(repo, "status", "--porcelain").stdout == ""
+    assert (repo / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+
+
+def test_renamed_submodule_note_keeps_json_stdout_pure(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """Under ``--json`` the skip note never reaches stdout, which stays one
+    parseable payload."""
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    created = _run(
+        ["create", "--checkout", "renamed", "--repo", str(repo), "--root", root, "--json"]
+    )
+    assert created.exit_code == 0, created.output
+    assert json.loads(created.stdout)["created"] is True
+    assert "libB" not in created.stdout
+    _assert_pristine(Path(root) / "renamed")
+
+
+def test_create_copies_only_submodules_both_sides_declare(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """A branch that adds a submodule the main checkout lacks still gets the
+    shared one copied; the new one is skipped and left as the branch has it."""
+    _push_branch_from_clone(
+        repo, tmp_path, "adds-extra", ["submodule", "add", "-q", _sub_url(repo), "extra"]
+    )
+    wt = Path(root) / "adds-extra"
+    created = _run(
+        ["create", "--checkout", "adds-extra", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert (wt / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+    assert not (wt / "sub" / ".git").exists()
+    assert (wt / "extra").is_dir()
+    assert list((wt / "extra").iterdir()) == []
+    assert "skipped extra" in created.stderr
+    assert "copied 1" in created.stderr
+    assert _git(wt, "show", "HEAD:.gitmodules").stdout == (wt / ".gitmodules").read_text()
+    _assert_pristine(wt)
+
+
+def test_branch_without_gitmodules_gets_nothing_from_the_main_checkout(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """The main checkout declares ``sub`` but the branch dropped every
+    submodule: no ``.gitmodules`` and no submodule tree may appear."""
+    _push_branch_from_clone(repo, tmp_path, "no-modules", ["rm", "-q", "sub", ".gitmodules"])
+    wt = Path(root) / "no-modules"
+    created = _run(
+        ["create", "--checkout", "no-modules", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert not (wt / ".gitmodules").exists()
+    assert not (wt / "sub").exists()
+    _assert_pristine(wt)
+
+
+def test_untracked_gitmodules_in_the_main_checkout_is_never_copied(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """An untracked ``.gitmodules`` in the main checkout (with its tree on
+    disk) declares nothing for a branch that tracks no ``.gitmodules``."""
+    _push_branch_from_clone(repo, tmp_path, "no-modules", ["rm", "-q", "sub", ".gitmodules"])
+    assert _git(repo, "checkout", "-q", "no-modules").returncode == 0
+    (repo / ".gitmodules").write_text('[submodule "vendor"]\n\tpath = vendor\n\turl = unused\n')
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "lib.txt").write_text("untracked vendor\n")
+    assert "?? .gitmodules" in _git(repo, "status", "--porcelain").stdout
+
+    wt = Path(root) / "probe"
+    created = _run(
+        ["create", "probe", "--base", "no-modules", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert not (wt / ".gitmodules").exists()
+    assert not (wt / "vendor").exists()
+    _assert_pristine(wt)
+
+
+def test_branch_gitmodules_without_one_in_the_main_checkout_is_kept(
+    repo: Path, root: str, hermetic_config
+):
+    """The branch declares ``sub`` but the main checkout has no
+    ``.gitmodules``: the branch's file is kept and ``sub`` is skipped."""
+    (repo / ".gitmodules").unlink()
+    wt = Path(root) / "feature-x"
+    created = _run(["create", "feature-x", "--repo", str(repo), "--root", root, "--print"])
+    assert created.exit_code == 0, created.output
+    assert _git(wt, "show", "HEAD:.gitmodules").stdout == (wt / ".gitmodules").read_text()
+    assert list((wt / "sub").iterdir()) == []
+    assert "skipped sub" in created.stderr
+    _assert_pristine(wt)
+
+
+def _add_second_submodule_to_main(repo: Path) -> None:
+    """Give ``main`` (and its checkout) a second submodule ``libC``, so a
+    branch can rename, add or drop one while another is still copied."""
+    added = _git(repo, *_FILE_PROTOCOL, "submodule", "add", "-q", _sub_url(repo), "libC")
+    assert added.returncode == 0, added.stderr
+    assert _git(repo, *_IDENTITY, "commit", "-q", "-m", "add libC").returncode == 0
+    assert _git(repo, "push", "-q", "origin", "main").returncode == 0
+
+
+def _dry_run_submodule_plan(commands: list[str]) -> tuple[list[str], list[str]]:
+    """The (copied, skipped) submodule paths a dry-run plan names."""
+    copied = [c.split()[3] for c in commands if c.startswith("# copy submodule ")]
+    skipped = [c.split()[3] for c in commands if c.startswith("# submodules: skipped ")]
+    return copied, skipped
+
+
+def _real_submodule_result(stderr: str, wt: Path) -> tuple[list[str], list[str]]:
+    """The (copied, skipped) submodule paths a real ``create --print`` did:
+    skipped from its notes, copied from the trees that now have content."""
+    skipped = re.findall(r"submodules\s+skipped (\S+) ·", stderr)
+    declared = _git(wt, "config", "-f", ".gitmodules", "--get-regexp", "path").stdout
+    paths = [line.split(" ", 1)[1] for line in declared.splitlines()] if declared else []
+    copied = [p for p in paths if (wt / p / "lib.txt").is_file()]
+    if paths:
+        assert f"copied {len(copied)}" in stderr
+    return copied, skipped
+
+
+_BRANCH_EDITS: dict[str, tuple[list[str], tuple[list[str], list[str]]]] = {
+    # branch edit -> the (copied, skipped) paths the real run gives
+    "renamed": (["mv", "sub", "libB"], (["libC"], ["libB"])),
+    "added": (["submodule", "add", "-q", "{url}", "extra"], (["sub", "libC"], ["extra"])),
+    "removed": (["rm", "-q", "libC"], (["sub"], [])),
+}
+
+
+@pytest.mark.parametrize("case", [*_BRANCH_EDITS, "no-gitmodules"])
+@pytest.mark.parametrize("entry", ["checkout", "named", "nameless"])
+def test_dry_run_submodule_plan_matches_the_real_run(
+    repo: Path, tmp_path: Path, root: str, hermetic_config, case: str, entry: str
+):
+    """``create --dry-run`` (human and ``--json``) names the same copied and
+    skipped submodule paths as the real ``create`` for the same branch, for
+    every create entry: ``--checkout``, a named new branch from
+    ``origin/<base>``, and a nameless create. The dry run changes nothing."""
+    _add_second_submodule_to_main(repo)
+    if case == "no-gitmodules":
+        edits = [["rm", "-q", "sub", "libC", ".gitmodules"]]
+        expected: tuple[list[str], list[str]] = ([], [])
+    else:
+        edit, expected = _BRANCH_EDITS[case]
+        edits = [[arg.replace("{url}", _sub_url(repo)) for arg in edit]]
+    _push_branch_from_clone(repo, tmp_path, case, *edits)
+
+    if entry == "checkout":
+        args = ["create", "--checkout", case]
+    elif entry == "named":
+        args = ["create", f"new-{case}", "--base", case]
+    else:
+        args = ["create", "--base", case]
+    args += ["--repo", str(repo), "--root", root]
+    before_worktrees = _git(repo, "worktree", "list", "--porcelain").stdout
+    before_status = _git(repo, "status", "--porcelain").stdout
+
+    planned = _run([*args, "--dry-run", "--json"])
+    assert planned.exit_code == 0, planned.output
+    commands = json.loads(planned.stdout)["commands"]
+    assert _dry_run_submodule_plan(commands) == expected
+    assert not any("copy submodule trees" in c for c in commands)
+    human = _run([*args, "--dry-run"])
+    assert human.exit_code == 0, human.output
+    for path in expected[0]:
+        assert f"# copy submodule {path} from {repo} into" in human.stderr
+    for path in expected[1]:
+        assert f"# submodules: skipped {path} · not checked out in {repo}" in human.stderr
+    # A dry run changes nothing on disk.
+    assert not Path(root).exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before_worktrees
+    assert _git(repo, "status", "--porcelain").stdout == before_status
+
+    created = _run([*args, "--print"])
+    assert created.exit_code == 0, created.output
+    (wt,) = [p for p in Path(root).iterdir() if (p / ".git").is_file()]
+    assert _real_submodule_result(created.stderr, wt) == expected
+    _assert_pristine(wt)
+
+
+def test_dry_run_of_a_resumed_worktree_plans_from_its_own_gitmodules(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """A resumed unprovisioned worktree is planned from the ``.gitmodules``
+    on its disk, the file the real run reads."""
+    _add_second_submodule_to_main(repo)
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    base = ["create", "--checkout", "renamed", "--repo", str(repo), "--root", root]
+    assert _run([*base, "--print"]).exit_code == 0
+    wt = Path(root) / "renamed"
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
+
+    planned = _run([*base, "--dry-run", "--json"])
+    assert planned.exit_code == 0, planned.output
+    assert _dry_run_submodule_plan(json.loads(planned.stdout)["commands"]) == (
+        ["libC"],
+        ["libB"],
+    )
 
 
 def test_managed_file_copy_refuses_a_directory_planted_mid_copy(tmp_path: Path, monkeypatch):
@@ -1425,7 +1772,7 @@ def _rewrite_recorded_runner(wt: Path, runner_name: str) -> None:
 
 
 def test_enter_prefers_recorded_runner(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """enter without --isolation must use the isolation mode the worktree was provisioned
     with, not the config default (host) — otherwise a docker-sandboxed worktree
@@ -1449,7 +1796,7 @@ def test_enter_prefers_recorded_runner(
 
 
 def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """enter --print/--json with an unchanged lockfile must still make the
     sandbox entry-ready (docker: restart a stopped container and re-lock
@@ -1482,6 +1829,42 @@ def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
     res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
     assert res.exit_code == 1, res.output
     assert res.stdout == ""
+
+
+def test_enter_firewall_failure_is_classified_and_never_launches(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed firewall init on entry is a classified, non-zero result on
+    every path (issue #59): --json carries FIREWALL_FAILED and emits no
+    payload, and the launch path never starts the agent with open egress."""
+    from treebox.runners import docker as dr
+    from treebox.runners.base import FirewallError
+
+    wt = Path(root) / "feature-auth"
+    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_recorded_runner(wt, "docker")
+
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+
+    def _fail(self: dr.DockerRunner, w: object) -> None:
+        raise FirewallError("firewall initialization failed: ERROR: boom", hint="re-create")
+
+    launched: list[object] = []
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", _fail)
+    monkeypatch.setattr(dr.DockerRunner, "launch", lambda self, w, **kw: launched.append(w) or 0)
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 1, res.output
+    assert res.stdout == ""
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "FIREWALL_FAILED"
+    assert "boom" in err["message"]
+    assert err["hint"] == "re-create"
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 1, res.output
+    assert launched == []
 
 
 def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, hermetic_config):
@@ -1528,7 +1911,7 @@ def test_enter_explicit_runner_mismatch_is_conflict(repo: Path, root: str, herme
 
 
 def test_enter_preflights_the_runner_so_a_stopped_daemon_is_not_a_lost_worktree(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """A stopped Docker daemon must surface on `enter` as the same clean
     DOCKER_UNAVAILABLE error create/doctor give — never the misleading "no
@@ -2993,6 +3376,7 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             "worktree_path",
             "branch",
             "commands",
+            "resources",
             "warnings",
         }
     )
@@ -3196,7 +3580,7 @@ def test_teardown_chooser_with_no_worktrees_says_so(
 
 
 def test_doctor_surfaces_runner_preflight_hint_as_advisory(
-    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """A failing isolation preflight must reach the doctor payload as a failed
     check plus its remediation hint in advisories — and exit 1 (hard check)."""

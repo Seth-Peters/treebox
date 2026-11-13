@@ -53,9 +53,10 @@ Conventions used below:
       Expect: exit 0; JSON on stdout with `ok`, `isolation`, `checks[]`,
       `advisories`; `ok` true iff every hard check passed.
 - [ ] **A4 doctor docker** — `tb doctor --repo "$REPO" --isolation docker --json`
-      Expect: exit 0 with `ok: true` when a docker daemon is available — this
-      result **gates phase H**; otherwise a docker hard-check failure and exit 1
-      (then mark H skipped, not failed).
+      Expect: exit 0 with `ok: true` when the
+      [Docker requirements](../../../../docs/install.md#what-each-isolation-mode-needs)
+      are met. This result **gates phase H**. If the Docker check fails, expect
+      exit 1 and mark H skipped, not failed.
 - [ ] **A5 bad isolation** — `tb doctor --isolation qemu`
       Expect: exit 2; message names the valid values.
 
@@ -331,6 +332,22 @@ one behind on purpose.
       record and `.containers/<name>/treebox-resources.json` stay. Without the
       wrapper the same teardown exits 0 and leaves no container, image, volume,
       manifest or record.
+
+- [ ] **H7 resource limits** - `tb create e2e-lim … --isolation docker --cpus 1
+      --memory 512m --pids-limit 64 --json`; then `tb enter e2e-lim … --memory 1g
+      --json`; then `tb create e2e-lim-host … --memory 4g --json` (host isolation)
+      Expect: create exit 0 with `resources: {cpus: 1, memory: "512m", pids: 64}`,
+      and `docker inspect` of the container shows `HostConfig.Memory` 536870912,
+      `NanoCpus` 1000000000, `PidsLimit` 64 (`list --json` shows the same
+      `resources`); the enter exits 5 `RESOURCE_MISMATCH` with re-create commands
+      in the hint; the host create exits 2 `RESOURCE_UNSUPPORTED` and leaves no
+      worktree. A bad value (`--memory lots`) exits 2 `INVALID_RESOURCE` with no
+      worktree, branch or image left behind. Drift: with `[resources] memory =
+      "2g"`, `create e2e-lim … --memory 4g`, then set `memory = "3g"`: `enter
+      --print` shows no `limits:` warning and `enter --json` has
+      `resources_drift` all `null` (a flag choice never drifts); a worktree whose
+      memory came from the config warns once per `enter` and `enter --json`
+      shows `resources_drift.memory: "3g"`.
 
 ## U. unattended mode
 
