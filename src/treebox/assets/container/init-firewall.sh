@@ -58,7 +58,7 @@ ALLOWED_HOST_PORTS=()
 # shellcheck source=src/treebox/assets/container/allowed-domains.sh
 source "$DOMAINS_FILE"
 [[ ${#ALLOWED_DOMAINS[@]} -gt 0 ]] || { echo "ERROR: ALLOWED_DOMAINS is empty"; exit 1; }
-for port in "${ALLOWED_HOST_PORTS[@]}"; do
+for port in ${ALLOWED_HOST_PORTS[@]+"${ALLOWED_HOST_PORTS[@]}"}; do
   if ! [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
     echo "ERROR: Invalid host port in ALLOWED_HOST_PORTS: $port"
     exit 1
@@ -137,7 +137,7 @@ done
 if [[ ${#ALLOWED_HOST_PORTS[@]} -gt 0 ]]; then
   HOST_IP=$(ip route | awk '/default/ {print $3; exit}')
   [[ -n "$HOST_IP" ]] || { echo "ERROR: Failed to detect host IP"; exit 1; }
-  for port in "${ALLOWED_HOST_PORTS[@]}"; do
+  for port in ${ALLOWED_HOST_PORTS[@]+"${ALLOWED_HOST_PORTS[@]}"}; do
     iptables -A OUTPUT -d "$HOST_IP" -p tcp --dport "$port" -j ACCEPT
   done
 fi
