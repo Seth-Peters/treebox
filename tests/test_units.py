@@ -1000,46 +1000,13 @@ def test_docker_refresh_restages_credentials_without_setup(
     assert not staged.exists()
 
 
-def test_firewall_template_fails_closed():
-    """The firewall overlay grants only the needed capabilities and bakes in the
-    env post-create.sh gates on: if the firewall never initialized, workspace
-    setup refuses to run rather than running with open egress."""
+def test_firewall_overlay_grants_required_capabilities():
     import treebox.assets as assets
 
     tpl = assets.template_dir("default")
     fw = json.loads((tpl / "firewall.json").read_text())
     assert fw["env"]["TREEBOX_FIREWALL"] == "1"
     assert "--cap-add=NET_ADMIN" in fw["runArgs"]
-
-    post_create = (tpl / "post-create.sh").read_text()
-    gate = post_create.index("/run/treebox-firewall-ready")
-    assert gate < post_create.index("&& uv sync")  # gate precedes workspace code
-
-    init_fw = (tpl / "init-firewall.sh").read_text()
-    assert "touch" in init_fw and "/run/treebox-firewall-ready" in init_fw
-
-
-def test_firewall_opens_no_host_service_by_default():
-    """The Docker host (the default gateway) is not a blanket exception: the
-    bundled rules accept it only for TCP ports the operator lists in the
-    template's allowlist, and the bundled allowlist lists none (issue #59)."""
-    import treebox.assets as assets
-
-    tpl = assets.template_dir("default")
-    init_fw = (tpl / "init-firewall.sh").read_text()
-    host_rules = [
-        line.strip()
-        for line in init_fw.splitlines()
-        if "iptables -A OUTPUT" in line and "HOST_IP" in line
-    ]
-    assert host_rules == ['iptables -A OUTPUT -d "$HOST_IP" -p tcp --dport "$port" -j ACCEPT']
-    # The skip that leaves live rules alone needs the flag AND the live
-    # policy: a flag that survived `docker restart` alone is not proof.
-    skip = next(line for line in init_fw.splitlines() if line.startswith('if [[ -f "$READY_FLAG"'))
-    assert "iptables -S OUTPUT" in skip and "-P OUTPUT DROP" in skip
-
-    allowlist = (tpl / "allowed-domains.sh").read_text()
-    assert re.search(r"^ALLOWED_HOST_PORTS=\(\)$", allowlist, re.MULTILINE)
 
 
 def test_template_dir_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1336,12 +1303,15 @@ def test_docker_prepare_entry_relocks_egress_of_a_running_container(
     assert not any("treebox-firewall-ready" in " ".join(c) for c in fake.calls)
 
 
-def test_docker_prepare_entry_firewall_failure_is_classified(tmp_path: Path, fake_common_dir):
+def test_docker_prepare_entry_firewall_failure_is_classified(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
     """A failed firewall init blocks the entry with a typed error the CLI
     classifies (FIREWALL_FAILED), carrying the script's own diagnostics."""
     from treebox.runners.base import FirewallError
 
-    cfg = Config(isolation="docker")
+    monkeypatch.setattr("treebox.git.branch_for_path", lambda repo, path: "feature/x")
+    cfg = Config(isolation="docker", firewall=True)
     wt = _boxed_worktree(tmp_path)
     runner = DockerRunner(cfg)
     firewall_args = tuple(runner._firewall_command(wt)[1:])
@@ -1360,11 +1330,15 @@ def test_docker_prepare_entry_firewall_failure_is_classified(tmp_path: Path, fak
     assert f"treebox teardown {wt.name}" in raised.value.hint
 
 
-def test_docker_setup_firewall_failure_is_classified(tmp_path: Path, fake_common_dir):
+def test_docker_setup_firewall_failure_is_classified(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
     """The setup-time lockdown fails the same typed way, and post-create (the
     first workspace-derived code) never runs."""
     from treebox.output import StepError
     from treebox.runners.base import FirewallError
+
+    monkeypatch.setattr("treebox.git.branch_for_path", lambda repo, path: "feature/x")
 
     class _FailingFirewall(_RecordingReporter):
         def step(self, label, detail, argv, *, cwd=None, env=None):

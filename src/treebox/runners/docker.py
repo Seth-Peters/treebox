@@ -730,15 +730,42 @@ class DockerRunner:
         lines = [line.strip() for line in log.splitlines() if line.strip()]
         detail = "; ".join([line for line in lines if line.startswith("ERROR")] or lines[-3:])
         message = f"Firewall initialization failed for worktree '{wt.name}'"
+        template_path = shlex.join(["treebox", "template", "path", self.config.template])
+        hint = (
+            "All sandbox traffic stays dropped and the agent was not launched. "
+            "Check the template's init-firewall.sh and allowed-domains.sh "
+            f"({template_path}). "
+        )
+        try:
+            branch = git.branch_for_path(wt.repo, str(wt.path))
+        except git.GitError:
+            branch = None
+        if branch:
+            location = ["--repo", wt.repo, "--root", str(wt.path.parent)]
+            teardown = shlex.join(["treebox", "teardown", wt.name, *location])
+            create = shlex.join(
+                [
+                    "treebox",
+                    "create",
+                    wt.name,
+                    "--checkout",
+                    branch,
+                    *location,
+                    "--isolation",
+                    self.name,
+                    "--template",
+                    self.config.template,
+                    "--firewall" if self.config.firewall else "--no-firewall",
+                    "--harness",
+                    self.config.harness,
+                ]
+            )
+            hint += f"Then re-create: {teardown} && {create}"
+        else:
+            hint += "Save current work on a branch before you re-create the sandbox."
         return FirewallError(
             f"{message}: {detail}" if detail else message,
-            hint=(
-                "All sandbox traffic stays dropped and the agent was not launched. "
-                "Check the template's init-firewall.sh and allowed-domains.sh "
-                f"(treebox template path {self.config.template}), then re-create: "
-                f"treebox teardown {wt.name} && "
-                f"treebox create {wt.name} --isolation {self.name} --firewall"
-            ),
+            hint=hint,
         )
 
     def _require_own_container(self, wt: Worktree, name: str) -> None:
