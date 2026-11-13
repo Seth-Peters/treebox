@@ -2,10 +2,20 @@ name: Release
 
 # Validate, build and publish treebox.
 #
-#   * Push a tag like `v0.4.0`            -> clean release version (0.4.0), publish to PyPI + GitHub Release.
-#   * Manually run via "Run workflow"     -> builds the selected commit as a dev version, publishes to TestPyPI.
+#   * Push a tag like `v0.4.0`  -> clean release version (0.4.0), publish to PyPI + GitHub Release.
+#   * "Run workflow" (manual)   -> publish to TestPyPI only. This is the default (index = testpypi).
+#     On a branch, the build is a dev version (0.4.1.devN).
+#   * "Run workflow" on a `v*` tag with index = pypi
+#                               -> publish that tag to PyPI + GitHub Release, on purpose.
+#     index = pypi on a ref that is not a `v*` tag fails in `build`; nothing is published.
 #
-# Both paths publish only after the `validate` job passes. That job runs the
+# A manual run never publishes to PyPI unless you select index = pypi in that
+# run. The publish-pypi condition compares the input with 'pypi', so an empty
+# or missing input never selects PyPI on a manual run (on a tag push, the
+# `inputs` context is empty and the tag push path does not read it). One run
+# publishes to one index only.
+#
+# Every path publishes only after the `validate` job passes. That job runs the
 # full CI validation (ci.yml, called as a reusable workflow) on the same commit
 # that `build` packages. The publish jobs stay in this file, because PyPI
 # Trusted Publishing does not accept a reusable workflow as the trusted
@@ -21,7 +31,16 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      index:
+        description: "Package index. pypi needs a v* tag ref and makes a public release that cannot be withdrawn."
+        type: choice
+        required: true
+        default: testpypi
+        options:
+          - testpypi
+          - pypi
 
 permissions:
   contents: read
@@ -35,6 +54,14 @@ jobs:
     name: Build distributions
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse a manual PyPI publish from a ref that is not a v* tag
+        if: github.event_name == 'workflow_dispatch' && inputs.index == 'pypi' && !startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::index = pypi needs a v* tag ref, but this run is on $REF. Select the tag in 'Use workflow from', or use index = testpypi."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # full history + tags so hatch-vcs can derive the version
@@ -56,7 +83,13 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: [validate, build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Tag push: always. Manual run: only when index = pypi was selected on
+    # purpose, on a v* tag. An empty or missing input never equals 'pypi'.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') && (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.index == 'pypi')
+      )
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -73,7 +106,9 @@ jobs:
   publish-testpypi:
     name: Publish dev build to TestPyPI
     needs: [validate, build]
-    if: github.event_name == 'workflow_dispatch'
+    # Manual run only, and only when PyPI was not selected (testpypi is the
+    # default, so an empty input also lands here, never on PyPI).
+    if: github.event_name == 'workflow_dispatch' && inputs.index != 'pypi'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:

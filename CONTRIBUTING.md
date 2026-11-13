@@ -97,8 +97,20 @@ all of that passes.
   The workflow validates that commit, builds version `0.4.0`, publishes it to
   PyPI, and then creates the GitHub Release.
 - **Dev build to TestPyPI:** in the Actions tab, open "Release", select "Run
-  workflow" and the branch. The workflow validates the head commit of that
-  branch, builds it as a dev version, and publishes it to TestPyPI.
+  workflow", select the branch in "Use workflow from", and keep "Package
+  index" at its default, `testpypi`. The workflow validates the head commit of
+  that branch, builds it as a dev version, and publishes it to TestPyPI only.
+  With the GitHub CLI: `gh workflow run release.yml --ref <branch>` (no `-f`
+  needed: the default is `testpypi`).
+- **Manual release to PyPI (on purpose only):** a manual run publishes to PyPI
+  only if you select it in that run. Select the `v*` tag in "Use workflow
+  from" and set "Package index" to `pypi`. The workflow validates the tagged
+  commit, publishes it to PyPI only (not to TestPyPI), and creates the GitHub
+  Release. With the GitHub CLI: `gh workflow run release.yml --ref v0.4.0 -f
+  index=pypi`. If you select `pypi` on a ref that is not a `v*` tag, the
+  `build` job fails and nothing is published. A version on PyPI cannot be
+  withdrawn or uploaded again, so make this choice with care (for example, to
+  retry a tag release whose tag push run did not publish).
 
 If the validation fails, nothing is published. Fix the problem, then tag the
 fixed commit.
