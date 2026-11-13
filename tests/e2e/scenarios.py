@@ -6,9 +6,10 @@ prose (command, intent, pass criterion) and this one the checks, so the two
 never duplicate each other's text. ``tests/test_e2e_map.py`` keeps the ids,
 the feature map and the source in step.
 
-Every group runs on a fresh fixture. Scenarios inside a group run in file
-order and may build on each other, as scenarios.md says. Docker scenarios
-name their worktrees ``e2e-...`` (see ``harness.DOCKER_PREFIX``).
+Every scenario runs on a fresh fixture with its group setup. Each scenario
+creates the state it needs, so selecting one id never requires an earlier
+scenario. Docker scenarios name their worktrees ``e2e-...`` (see
+``harness.DOCKER_PREFIX``).
 """
 
 from __future__ import annotations
@@ -321,6 +322,7 @@ def b5(ctx: Ctx) -> None:
 
 @scenario("B6", "BRANCH_EXISTS conflict")
 def b6(ctx: Ctx) -> None:
+    created(ctx, "fix-auth")
     other = ctx.sbx / "wts2"
     run = ctx.tb("create", "fix-auth", *ctx.wt_args(other), "--json")
     ctx.exit_is(run, 5)
@@ -331,6 +333,7 @@ def b6(ctx: Ctx) -> None:
 
 @scenario("B7", "SLUG_CONFLICT on re-create")
 def b7(ctx: Ctx) -> None:
+    created(ctx, "fix-auth")
     run = ctx.tb("create", "fix-auth", *ctx.wt_args(), "--json")
     ctx.exit_is(run, 5)
     err = ctx.json_err(run, "SLUG_CONFLICT")
@@ -378,6 +381,7 @@ def b10(ctx: Ctx) -> None:
 
 @scenario("B10b", "--dry-run preflights like a real create")
 def b10b(ctx: Ctx) -> None:
+    created(ctx, "fix-auth")
     before = ctx.git("worktree", "list", "--porcelain")
     other = ctx.sbx / "wts2"
     cases = [
@@ -415,6 +419,7 @@ def b12(ctx: Ctx) -> None:
 
 @scenario("B13", "pre-push guard blocks treebox/* refs only")
 def b13(ctx: Ctx) -> None:
+    created(ctx, "fix-auth")
     path = wt(ctx, "fix-auth")
     ctx.git("branch", "treebox/scratch", cwd=path)
     push = ctx.sh("git", "-C", str(path), "push", "origin", "treebox/scratch", check=False)
@@ -473,6 +478,7 @@ def b16(ctx: Ctx) -> None:
 
 @scenario("B17", "BRANCH_IN_USE for a checked-out branch")
 def b17(ctx: Ctx) -> None:
+    created(ctx, "fix-auth")
     run = ctx.tb("create", "dup", "--checkout", "fix-auth", *ctx.wt_args(), "--json")
     ctx.exit_is(run, 5)
     ctx.json_err(run, "BRANCH_IN_USE")
@@ -804,6 +810,7 @@ def e2(ctx: Ctx) -> None:
 
 @scenario("E3", "forced removal keeps the branch")
 def e3(ctx: Ctx) -> None:
+    ctx.exit_is(ctx.tb("teardown", "fix-auth", *ctx.wt_args(), "--force", "--json"), 0)
     path = wt(ctx, "fix-auth")
     ctx.check(not path.exists(), "directory gone")
     ctx.check(not worktree_registered(ctx, path), "registration gone")
@@ -962,6 +969,7 @@ def f3(ctx: Ctx) -> None:
 
 @scenario("F4", "init conflict and --force")
 def f4(ctx: Ctx) -> None:
+    ctx.exit_is(ctx.tb("template", "init", "mytpl", "--json"), 0)
     dest = ctx.fx.treebox_home / "templates" / "mytpl"
     marker = dest / "MARKER"
     marker.write_text("keep\n")
@@ -976,6 +984,7 @@ def f4(ctx: Ctx) -> None:
 
 @scenario("F5", "init --from copies another template")
 def f5(ctx: Ctx) -> None:
+    ctx.exit_is(ctx.tb("template", "init", "mytpl", "--json"), 0)
     src = ctx.fx.treebox_home / "templates" / "mytpl" / "Dockerfile"
     src.write_text(src.read_text() + "\n# from-mytpl-marker\n")
     run = ctx.tb("template", "init", "copytpl", "--from", "mytpl", "--json")
@@ -1002,6 +1011,7 @@ def f7(ctx: Ctx) -> None:
 
 @scenario("F8", "init refuses bad names and a self-copy")
 def f8(ctx: Ctx) -> None:
+    ctx.exit_is(ctx.tb("template", "init", "mytpl", "--json"), 0)
     bad = ctx.tb("template", "init", "../escape", "--json")
     ctx.exit_is(bad, 2)
     ctx.json_err(bad, "INVALID_NAME")
@@ -1013,6 +1023,7 @@ def f8(ctx: Ctx) -> None:
 
 @scenario("F9", "init reports copy and overwrite failures", requires=("non-root",))
 def f9(ctx: Ctx) -> None:
+    ctx.exit_is(ctx.tb("template", "init", "copytpl", "--json"), 0)
     tpl_root = ctx.fx.treebox_home / "templates"
     tpl_root.chmod(0o555)
     try:
@@ -1280,6 +1291,7 @@ def h1(ctx: Ctx) -> None:
 
 @scenario("H2", "sandbox config and staged logins live outside the mount")
 def h2(ctx: Ctx) -> None:
+    created(ctx, "e2e-dockered", *docker_args(ctx)[2:])
     cfg = ctx.root / ".containers" / "e2e-dockered"
     path = wt(ctx, "e2e-dockered")
     ctx.check((cfg / "container.json").is_file(), "rendered container.json beside the worktree")
@@ -1316,6 +1328,7 @@ def h3(ctx: Ctx) -> None:
 
 @scenario("H4", "recorded docker isolation is reused")
 def h4(ctx: Ctx) -> None:
+    created(ctx, "e2e-dockered", *docker_args(ctx)[2:])
     run = ctx.tb("enter", "e2e-dockered", *ctx.wt_args(), "--print")
     ctx.exit_is(run, 0)
     ctx.eq(printed_argv(run)[:2], ["docker", "exec"], "still docker")
@@ -1323,6 +1336,7 @@ def h4(ctx: Ctx) -> None:
 
 @scenario("H5", "a stopped container is revived before the command is printed")
 def h5(ctx: Ctx) -> None:
+    created(ctx, "e2e-dockered", *docker_args(ctx)[2:])
     name, _ = container(ctx, "e2e-dockered")
     ctx.sh("docker", "stop", "-t", "1", name)
     ctx.eq(container(ctx, "e2e-dockered")[1], "exited", "stopped")
@@ -1337,6 +1351,7 @@ def h5(ctx: Ctx) -> None:
 
 @scenario("H6", "docker teardown, --remove-volumes, --skip-container")
 def h6(ctx: Ctx) -> None:
+    created(ctx, "e2e-dockered", *docker_args(ctx)[2:])
     run = ctx.tb("teardown", "e2e-dockered", *ctx.wt_args(), "--force", "--json")
     ctx.exit_is(run, 0)
     rec = ((ctx.json_out(run) or {}).get("worktrees") or [{}])[0]
@@ -1385,6 +1400,7 @@ def h7(ctx: Ctx) -> None:
 
 @scenario("H8", "in-container git works; shared hooks are read-only")
 def h8(ctx: Ctx) -> None:
+    created(ctx, "e2e-launch", *docker_args(ctx)[2:])
     name, _ = container(ctx, "e2e-launch")
     path = str(wt(ctx, "e2e-launch"))
     branch = ctx.sh(
@@ -1435,6 +1451,8 @@ def h9(ctx: Ctx) -> None:
 
 @scenario("H10", "injected engine failure: teardown is best-effort", evidence="boundary")
 def h10(ctx: Ctx) -> None:
+    created(ctx, "e2e-gone", *docker_args(ctx)[2:])
+    ctx.sh("docker", "rm", "-f", container(ctx, "e2e-gone")[0])
     docker = shutil.which("docker", path=ctx.env["PATH"]) or ""
     env = dict(ctx.env, TREEBOX_E2E_DOCKER_FAIL="rm", TREEBOX_E2E_REAL_DOCKER=docker)
     env["PATH"] = os.pathsep.join([str(ctx.fx.stub_bin), str(FAKES_DIR), ctx.env["PATH"]])
@@ -1450,6 +1468,7 @@ def h10(ctx: Ctx) -> None:
 
 @scenario("H11", "enter --template overrides the recorded template for one session")
 def h11(ctx: Ctx) -> None:
+    created(ctx, "e2e-launch", *docker_args(ctx)[2:])
     run = ctx.tb("enter", "e2e-launch", *ctx.wt_args(), "--template", OFFLINE_TEMPLATE, "--print")
     ctx.exit_is(run, 0)
     ghost = ctx.tb("enter", "e2e-launch", *ctx.wt_args(), "--template", "ghost", "--json")
@@ -1799,6 +1818,7 @@ def r45(ctx: Ctx) -> None:
 
 @scenario("R45b", "an unreadable submodule source is SUBMODULE_COPY_FAILED", requires=("non-root",))
 def r45b(ctx: Ctx) -> None:
+    add_submodule(ctx)
     secret = ctx.repo / "sub" / "unreadable.txt"
     secret.write_text("no read\n")
     secret.chmod(0o000)

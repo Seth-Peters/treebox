@@ -22,12 +22,10 @@ Conventions used below:
   integer `schemaVersion` (currently `1`), and diagnostics must all be on stderr.
 - "JSON error" — in `--json` mode a failure prints one object on **stderr** with
   `error.code` / `error.message` (usually `error.hint`).
-- Each group starts on a fresh fixture, with the setup named under its heading;
-  scenarios within a group may build on each other in order. **Watch for hidden preconditions**: a scenario that needs a
-  *clean* worktree or *≥2 matching* worktrees will silently exercise the wrong
-  branch if earlier scenarios changed that state (e.g. C3 dirties `fix-auth`
-  before E1 wants it clean). Where a precondition matters it is called out inline;
-  set it up rather than reusing leftover state.
+- Each scenario starts on a fresh fixture with the setup under its group
+  heading. Create all additional state within that scenario. Selecting an id
+  with `--only` must produce the same result as selecting the whole group.
+  Start a new fixture for each scenario in a manual sweep too.
 - Assert JSON fields with a field extractor, not by eyeballing — `list --json` and
   `doctor --json` payloads are long and easy to truncate. Pipe to
   `python3 -c 'import sys,json; d=json.load(sys.stdin); ...'` and check the field.
@@ -98,6 +96,10 @@ Conventions used below:
       `origin/dev`'s head.
 - [ ] **B5 --checkout existing branch** — `tb create review-dev --checkout dev --repo "$REPO" --root "$ROOT" --json`
       Expect: exit 0; worktree is on branch `dev` (no new branch created).
+
+First create `fix-auth` within B6, B7, B10b, B13 and B17. Each scenario
+owns this setup; none needs B1 to run first.
+
 - [ ] **B6 BRANCH_EXISTS conflict** — `tb create fix-auth --repo "$REPO" --root "$SBX/wts2" --json`
       Expect: exit 5; JSON error with a branch-exists conflict code; hint points
       at `--checkout` as the resume path; `$SBX/wts2/fix-auth` not created.
@@ -121,7 +123,7 @@ Conventions used below:
       `$ROOT/plan-x` does not exist.
 - [ ] **B10b --dry-run preflights like a real create** -
       `tb create fix-auth --repo "$REPO" --root "$SBX/wts2" --dry-run --json`
-      (branch `fix-auth` exists from B1)
+      (first create the `fix-auth` worktree)
       Expect: exit 5; JSON error `BRANCH_EXISTS` on stderr, stdout empty;
       `$SBX/wts2/fix-auth` not created and `git -C "$REPO" worktree list`
       unchanged - a dry run fails with the same error a real create would,
@@ -256,11 +258,11 @@ a registration treebox never provisioned (`git -C "$REPO" worktree add -b d-raw
 ## E. teardown
 
 Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
-`fix/auth-renamed` (as C4).
+`fix/auth-renamed`.
 
-- [ ] **E1 non-TTY refusal** — precondition: a **clean** worktree (create a
-      throwaway `e2e-clean-td`; do *not* reuse `fix-auth`, which C3 left dirty — a
-      dirty tree takes the uncommitted-changes branch below and hides this path).
+- [ ] **E1 non-TTY refusal** - precondition: a **clean** worktree. Use the
+      fresh `e2e-clean-td` from this scenario's group setup. A dirty tree takes
+      the uncommitted-changes path instead.
       `tb teardown e2e-clean-td --repo "$REPO" --root "$ROOT"` (no `--force`, stdin
       not a TTY)
       Expect: exit 5; worktree untouched; message says confirmation/`--force` is
@@ -268,7 +270,8 @@ Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
 - [ ] **E2 dirty worktree needs --force** — `touch "$ROOT/fix-auth/junk.txt"`,
       teardown without `--force`
       Expect: exit 5 (dirty), worktree intact; then with `--force`: removed.
-- [ ] **E3 force removes, branch survives** — after E2's forced removal
+- [ ] **E3 force removes, branch survives** - force-remove this scenario's
+      `fix-auth` worktree with `tb teardown fix-auth … --force --json`
       Expect: exit 0; directory gone; `git -C "$REPO" worktree list` no longer
       mentions it; the branch (`fix/auth-renamed`) still exists — branches are
       kept by default.
@@ -278,9 +281,9 @@ Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
       `del-me` gone.
 - [ ] **E5 multiple refs** — create two throwaways, tear both down in one call
       Expect: exit 0; both directories removed; JSON lists both.
-- [ ] **E6 teardown resolves original name after rename** — covered by tearing
-      down `fix-auth` (E1–E3) *after* C4 renamed its branch: the original name
-      must still resolve.
+- [ ] **E6 teardown resolves original name after rename** - create `e6-name`,
+      rename its branch to `e6/renamed`, then tear down `e6-name`.
+      Expect: exit 0; the original name resolves and the record names `e6/renamed`.
 - [ ] **E7 corrupt worktree is not "dirty"** - create a throwaway `e2e-corrupt`,
       remove its pointer file (`rm "$ROOT/e2e-corrupt/.git"`), dirty the main
       checkout (`touch "$REPO/main-dirt.txt"`), then teardown without `--force`
@@ -306,7 +309,9 @@ Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
 
 ## F. template
 
-Uses the scratch `$TREEBOX_HOME` — must never write to the real `~/.treebox`.
+Uses the scratch `$TREEBOX_HOME` - must never write to the real `~/.treebox`.
+F4, F5 and F8 each create their own `mytpl` before the check. F9 creates its
+own `copytpl` before testing permissions.
 
 - [ ] **F1 list bundled default** — `tb template list` (and `--json`)
       Expect: exit 0; the bundled `default` appears with its source and
@@ -382,7 +387,7 @@ Each writes `$TREEBOX_CONFIG`, runs, then restores the empty file (`: > "$TREEBO
       build carries `--build-arg TZ=Europe/Helsinki`. (`TREEBOX_HOME` is F3,
       `TREEBOX_CONFIG` is G1.)
 
-## H. docker isolation (run only if A4 passed)
+## H. docker isolation (requires a reachable engine and the base image)
 
 Setup: install the offline template (`tests/e2e/offline-template`) as
 `$TREEBOX_HOME/templates/e2e-offline` (the fixture does this; by hand:
@@ -406,7 +411,11 @@ one behind on purpose.
       launch command targets the container (`docker exec …`), not a bare host
       shell. (Dependency setup in a docker sandbox is the template's
       post-create; the offline template does not run `uv sync`.)
-- [ ] **H2 sandbox config outside the mount** — after H1
+
+H2, H4, H5 and H6 each create `e2e-dockered` before their checks. H8 and H11
+each create `e2e-launch`. These scenarios need no earlier H scenario.
+
+- [ ] **H2 sandbox config outside the mount** - create `e2e-dockered`
       Expect: the rendered container config/build context (and staged credential
       copies) live under `$ROOT/.containers/<branch>/`, **not** inside the worktree
       — the boxed agent must not be able to edit its own sandbox definition.
@@ -458,7 +467,9 @@ one behind on purpose.
       `tb enter e2e-gone … --json`
       Expect: exit 1, `ERROR`, message `No container exists …` (never a dead
       `docker exec` command).
-- [ ] **H10 injected engine failure** (boundary) - put `tests/e2e/fakes` first on
+- [ ] **H10 injected engine failure** (boundary) - create `e2e-gone`, remove
+      its container, and verify teardown still succeeds. Create `e2e-fail-rm`.
+      Put `tests/e2e/fakes` first on
       `PATH` with `TREEBOX_E2E_DOCKER_FAIL=rm` and `TREEBOX_E2E_REAL_DOCKER` set;
       `tb teardown e2e-fail-rm … --force --json`
       Expect: exit 0; `container: "failed"`; the worktree removed anyway.
@@ -537,7 +548,8 @@ Each fails on `e8a7fa1` (before the fixes) and passes after them.
       Expect: exit 5 `DESTINATION_CONFLICT` with `error.path` at the link; the
       outside file untouched; after removing the link, a retry exits 0 and
       copies the submodule.
-- [ ] **R45b unreadable submodule source** (non-root) - `chmod 000` a file in
+- [ ] **R45b unreadable submodule source** (non-root) - add submodule `sub`
+      within this scenario, then `chmod 000` a file in
       `$REPO/sub`, `tb create r45b … --json`
       Expect: exit 1 `SUBMODULE_COPY_FAILED`; no traceback.
 - [ ] **R46 merged badge (#46)** (boundary: fake `gh`) - `reused` and

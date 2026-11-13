@@ -41,8 +41,9 @@ criterion; `tests/e2e/scenarios.py` holds the checks, by the same id.
 - **A skip is never a pass.** A missing prerequisite (no docker engine, no
   base image, root user, no shell detection) makes the scenario SKIP with the
   reason, and the report must say what went unexercised.
-- Run scenarios **sequentially** within a group: they share a fixture. Run
-  manual sweeps from **bash** (the fixture is bash and is `source`d).
+- Each scenario uses a fresh fixture and its group setup. A selected id owns
+  its required state. Run manual sweeps from **bash** and start a fresh fixture
+  for each scenario (the fixture is bash and is `source`d).
 - Docker names: name every docker worktree `e2e-…`, so its container, image and
   volume are `treebox-e2e-*` and the reaper finds them. The reaper removes
   those prefixes only, never by substring, never anything else.
@@ -64,17 +65,20 @@ continue (unless the package does not import).
 ```bash
 uv run python tests/e2e/run.py evidence --out "$TMPDIR/treebox-evidence-$(date +%s)"
 #   --groups B,E        only these groups (X invariants run only in a full run)
-#   --only R44,H7       only these scenarios (their group setup still runs)
+#   --only R44,H7       only these scenarios (each gets its group setup)
 #   --require docker    a missing prerequisite fails the run instead of skipping
 #   --inject-failure    adds Z1, which always fails (proves the failure path)
 ```
 
-Each group runs on a fresh fixture. `--out` must be outside the repository and
-empty; bundles are never committed. The bundle survives a failed scenario and
-a crash (it is written after every scenario):
+Each scenario runs on a fresh fixture, so `--only` needs no earlier scenario.
+The fixture shares host tool binaries and the pinned base image; mutable repo,
+worktree and template state is private to that scenario. `--out` must be outside
+the repository and empty; bundles are never committed. The bundle survives a
+failed scenario and a crash (it is written after every scenario):
 
 - `manifest.json` - commit, treebox version, platform, prerequisites with
-  details, what was skipped and why, known bugs, exit status.
+  details, what was skipped and why, known bugs, exit status. Group setup runs
+  have a separate `<scenario-id>-setup` evidence entry.
 - `results.json` - per scenario: id, verdict, evidence kind, every check, and
   every run's argv, exit status and output files.
 - `summary.md` - the pass / fail / skip / known-bug table per group.

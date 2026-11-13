@@ -1058,7 +1058,7 @@ class Bundle:
         self.write_results()
 
     def add_setup(self, setup_id: str, ctx: Ctx, error: str) -> dict[str, Any]:
-        """A group's fresh-fixture setup: its runs are evidence too, but it
+        """A scenario's group setup: its runs are evidence too, but it
         is not a scenario and never counts as a pass."""
         entry = {
             "id": setup_id,

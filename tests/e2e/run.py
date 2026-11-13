@@ -209,20 +209,20 @@ def evidence(args: argparse.Namespace) -> int:
                 for sc in members:
                     bundle.add(_skip(sc, f"missing prerequisite ({reason})"), None)
                 continue
-            fx = Fixture.create(tb_bin=tb_bin, base_env=base_env)
-            fixture_dirs.append(fx.sbx)
-            try:
-                setup_error = ""
-                if group.setup is not None:
-                    setup_id = f"{letter}-setup"
-                    ctx = Ctx(fx, functools.partial(_collect, all_runs, setup_id))
-                    try:
-                        group.setup(ctx)
-                    except Exception as exc:
-                        setup_error = f"group setup failed: {type(exc).__name__}: {exc}"
-                        ctx.note(harness.format_exception())
-                    setups.append(bundle.add_setup(setup_id, ctx, setup_error))
-                for sc in members:
+            for sc in members:
+                fx = Fixture.create(tb_bin=tb_bin, base_env=base_env)
+                fixture_dirs.append(fx.sbx)
+                try:
+                    setup_error = ""
+                    if group.setup is not None:
+                        setup_id = f"{sc.id}-setup"
+                        ctx = Ctx(fx, functools.partial(_collect, all_runs, setup_id))
+                        try:
+                            group.setup(ctx)
+                        except Exception as exc:
+                            setup_error = f"group setup failed: {type(exc).__name__}: {exc}"
+                            ctx.note(harness.format_exception())
+                        setups.append(bundle.add_setup(setup_id, ctx, setup_error))
                     if setup_error:
                         bundle.add(_fail(sc, setup_error), None)
                         continue
@@ -230,12 +230,12 @@ def evidence(args: argparse.Namespace) -> int:
                     mark = result.verdict.upper()
                     print(f"   {mark} {sc.id} {sc.title}: {result.reason}", file=sys.stderr)
                     bundle.add(result, state)
-            finally:
-                if prereqs["docker"].available:
-                    found = harness.reap_docker(fx.env)
-                    if any(found.values()):
-                        leftovers[letter] = found
-                fx.remove()
+                finally:
+                    if prereqs["docker"].available:
+                        found = harness.reap_docker(fx.env)
+                        if any(found.values()):
+                            leftovers[sc.id] = found
+                    fx.remove()
     except KeyboardInterrupt:
         interrupted = True
 
@@ -362,7 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ev.add_argument("--groups", help="comma-separated group letters (default: all)")
     ev.add_argument(
         "--only",
-        help="comma-separated scenario ids; their groups' setups still run (default: all)",
+        help="scenario ids, each with a fresh fixture and its group setup (default: all)",
     )
     ev.add_argument(
         "--require",
