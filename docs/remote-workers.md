@@ -79,13 +79,16 @@ worker. It does not identify a task across workers or repositories.
 | **Worker** | coordinator | The SSH destination (or the coordinator's own worker id). |
 | **Repository on the worker** | coordinator | A clone path on the worker, for example `~/repos/<repo-id>`. |
 | **Worktree name** | coordinator, derived | A pure function of the task id, for example `t-<task-id>`. It is also the **branch** that `create NAME` makes and that the agent pushes, so it must be unique on the shared remote: derive it from the globally unique task id, never reuse it for another task. |
-| **Worktree** | treebox | Its registered **path** on the worker (`worktree_path` in `create --json`, `path` in `list --json`). This is treebox's identity for the worktree ([paths are identity](how-it-works.md#names-are-identity-branches-are-mutable)). |
-| **Runner resources** | treebox | Derived from the worktree path: container and image `treebox-<name>-<hash of path>`, label `treebox.workspace=<path>`. |
+| **Worktree** | treebox | Its registered **path** on the worker (`worktree_path` in `create --json`, `path` in `list --json`). This is treebox's identity for the worktree ([paths are identity](how-it-works.md#names-are-identity-branches-are-mutable)). Its `id` ([`TREEBOX_ID`](usage.md#services-in-parallel-worktrees), 10 hex characters derived from the path) is unique on the worker. |
+| **Runner resources** | treebox | Derived from the worktree path: container and image `treebox-<name>-<TREEBOX_ID>`, label `treebox.workspace=<path>`. |
+| **Port block** | treebox | `port_base` and `port_count` in `create --json` and `list --json` (`TREEBOX_PORT_BASE` / `TREEBOX_PORT_COUNT` inside the worktree): a [block of ports](usage.md#port-blocks) reserved for this worktree in a ledger shared by every repository and profile of the worker user. |
 
 The mapping is: task id → (worker, repository clone path, worktree name)
-→ worktree path on that worker → its runner resources. The coordinator
-stores the worker and the worktree path for each task and addresses every
-later request by that path.
+→ worktree path on that worker → its runner resources and port block. The
+coordinator stores the worker and the worktree path for each task and
+addresses every later request by that path. It can also store `id`, for
+example to name a task's services or to find the task in `list --json`; the
+path stays the ref.
 
 Keep worktree names unique **per worker**, also across repositories: a
 template's per-workspace volumes are named from the worktree name
@@ -105,12 +108,21 @@ The worker operator does this once per machine:
    mounts that repository's git token (see [below](#the-repo-scoped-git-token)).
 4. Per repository, a **profile**: a treebox config file, for example
    `~/profiles/<repo-id>.toml`, that sets `isolation = "docker"`,
-   `firewall = true` and `template = "<the repository's template>"`. The
-   coordinator selects it with `TREEBOX_CONFIG` on every call for that
+   `firewall = true`, `template = "<the repository's template>"` and
+   [`[resources]`](configuration.md#resource-limits) limits (`cpus`,
+   `memory`, `pids`), so one task cannot starve the others on the worker.
+   The coordinator selects it with `TREEBOX_CONFIG` on every call for that
    repository. (This is the normal config file; treebox reads no other
-   per-repository file, and never one from the repository itself.)
+   per-repository file, and never one from the repository itself.) Keep
+   `TREEBOX_HOME` the same for all profiles: the port ledger and the
+   templates live there, and the ports of all tasks on the worker come from
+   that one ledger. Use the same [`[ports]`](configuration.md#port-blocks)
+   range in every profile, or leave it out.
 5. The agent's subscription login for the worker user (`~/.claude` or
-   `~/.codex`). treebox stages copies of it into each sandbox, as on a laptop.
+   `~/.codex`; on a macOS worker, Claude's login can also be the user's
+   Keychain item `Claude Code-credentials`). treebox stages copies of it
+   into each sandbox, as on a laptop. A launch without a usable login is
+   `LOGIN_MISSING`.
 6. A git credential for the worker user's own `git clone` and `git fetch`
    (treebox's `create` fetches `origin`). A read-only token is enough.
 
@@ -132,11 +144,11 @@ Pass the repository with `--repo <clone path>` and the profile with
 
 | Request | Command on the worker | Done when | Retry of the same request |
 | ------- | --------------------- | --------- | ------------------------- |
-| create | `treebox create <name> --repo <clone> --json` | exit `0`; store `worktree_path` | Exit `0` (a half-built worktree is finished), or `SLUG_CONFLICT` (exit `5`): the task exists - read its row from `list --json` by name (`health: healthy`, `setup: done`). `LOCK_HELD`: the first request still runs - wait and retry. Never a second worktree: the name is the task's. |
+| create | `treebox create <name> --repo <clone> --json` | exit `0`; store `worktree_path` | Exit `0` (a half-built worktree, setup `pending` or `failed`, is finished), or `SLUG_CONFLICT` (exit `5`): the task exists - read its row from `list --json` by name (`health: healthy`, `setup: done`). `SETUP_FAILED` (exit `1`): a setup step failed, `error.path` is its log; the worktree is kept, and the same `create` runs setup again. `LOCK_HELD`: the first request still runs - wait and retry. Never a second worktree: the name is the task's. |
 | run | `treebox enter <path> --repo <clone> -- <agent args>`, detached (below) | the run's exit status | The coordinator starts one run per run id; a duplicate run id is not started again. |
-| status | `treebox list --repo <clone> --json` (row with `path`), plus the coordinator's run state | - | Read-only. |
+| status | `treebox list --repo <clone> --json` (row with `path`: `health`, `setup`, `id`, `port_base`), plus the coordinator's run state | - | Read-only. |
 | cancel | `SIGTERM` (or `SIGINT`, `SIGHUP`) to that run's treebox process | the run ends `CANCELLED`, exit `128 + signal` | Signal again; a finished run ignores it. |
-| teardown | `treebox teardown <path> --repo <clone> --yes --json` | exit `0` | `NOT_FOUND` (exit `3`): already removed. `TEARDOWN_INCOMPLETE` (exit `1`): the worktree and record are kept - retry the same command. `DIRTY_WORKTREE` (exit `5`): the agent left uncommitted work - decide, then `--force`. |
+| teardown | `treebox teardown <path> --repo <clone> --yes --json` | exit `0`; the port block is free again | `NOT_FOUND` (exit `3`): already removed. `TEARDOWN_INCOMPLETE` (exit `1`): the worktree and record are kept - retry the same command. `DIRTY_WORKTREE` (exit `5`): the agent left uncommitted work - decide, then `--force`. |
 
 **Address existing worktrees by path.** A name or branch ref falls back to a
 unique substring: if `t-1` is already removed, `teardown t-1` removes `t-12`.
@@ -197,7 +209,9 @@ process is **lost**.
   `remaining` with `--json`) and keeps the worktree, its record and the
   runner's resource manifest, so the same `teardown <path>` retries. Cleanup
   removes only resources the host-owned manifest of that one worktree names:
-  a retry never removes another task's container, image or volume.
+  a retry never removes another task's container, image or volume. The
+  worktree keeps its port block until its cleanup is complete, so no other
+  task gets those ports while the retry is due.
 
 ## The repo-scoped git token
 
@@ -289,16 +303,19 @@ Use docker isolation, with the firewall on, for tasks you do not trust. Host
 worktrees share the worker's permissions and network: use them only for
 trusted tasks.
 
-## Known open risk: git settings in the shared git dir (#58)
+## Known open risk: git settings in the shared git dir (#58, #88)
 
 A sandboxed task can still plant git configuration in the repository's
 shared git dir (for example `core.fsmonitor`, `remote.origin.uploadpack`, a
 filter in `.git/info/attributes`, or a rewritten `commondir`) that git on the
 worker then runs: `treebox create` or `doctor`, or a manual `git` in the
 clone. That is code execution as the worker user, who can use the Docker
-engine (root on the worker) and read every task's staged token. A fix is open
-in [#58](https://github.com/Seth-Peters/treebox/issues/58); its first design
-did not hold. Until it is fixed, a worker operator can:
+engine (root on the worker) and read every task's staged token. The issue is
+open in [#58](https://github.com/Seth-Peters/treebox/issues/58); its first
+design did not hold, and
+[#88](https://github.com/Seth-Peters/treebox/issues/88) replaces that design
+with a git dir of its own for each sandbox. Until it is fixed, a worker
+operator can:
 
 - treat a worker as one trust domain: run only tasks of the same trust level
   on it, and keep nothing on it that a task must not reach;
@@ -309,23 +326,27 @@ did not hold. Until it is fixed, a worker operator can:
 - give the worker user only the repo-scoped tokens it needs, with a short
   expiry, and a read-only token for its own fetches.
 
-## Related changes
+## Related features
 
-These open changes are not part of this contract yet. The contract above
-works without them, and each one makes a worker stronger when it merges:
+The contract above uses these treebox features as they are now:
 
-- [#66](https://github.com/Seth-Peters/treebox/issues/66)
-  ([PR #85](https://github.com/Seth-Peters/treebox/pull/85)) adds
-  `TREEBOX_ID`, a machine-unique id derived from the registered worktree path,
-  and port blocks. Then a coordinator can store the worker and `TREEBOX_ID`
-  with each task; the path stays the ref.
-- [#59](https://github.com/Seth-Peters/treebox/issues/59)
-  ([PR #73](https://github.com/Seth-Peters/treebox/pull/73)) re-applies the
-  firewall on every entry. The firewall stays off by default; the remote
-  profile above turns it on. Add the git host to the template's allowlist.
-- [#67](https://github.com/Seth-Peters/treebox/issues/67)
-  ([PR #84](https://github.com/Seth-Peters/treebox/pull/84)) adds
-  per-worktree CPU, memory and pids limits, so one task cannot starve the
-  others on a worker.
-- [PR #82](https://github.com/Seth-Peters/treebox/pull/82) adds an
-  end-to-end evidence suite; a remote-worker scenario belongs there.
+- **Worktree id and port blocks.** `TREEBOX_ID` and the port block of each
+  worktree are in the agent's environment and in `create --json` /
+  `list --json` ([services in parallel worktrees](usage.md#services-in-parallel-worktrees)).
+  Repository services that use them do not collide between tasks on one
+  worker.
+- **Firewall on every entry.** With `firewall = true`, every `create` and
+  `enter` applies the egress lockdown again before the agent starts, also
+  after a container restart. The firewall is off by default; the profile
+  above turns it on. Add the git host to the template's allowlist
+  ([the `container.json` schema](configuration.md#the-containerjson-schema)).
+- **Resource limits.** `--cpus`, `--memory` and `--pids-limit` (or
+  `[resources]` in the profile) cap each sandbox, fixed when it is created
+  ([resource limits](configuration.md#resource-limits)).
+- **Setup and cleanup models.** `SETUP_FAILED`, `TEARDOWN_INCOMPLETE` and
+  `health` make each step's result explicit
+  ([lifecycle](how-it-works.md#lifecycle-setup-and-cleanup)).
+
+An open change adds to this:
+[PR #82](https://github.com/Seth-Peters/treebox/pull/82) adds an end-to-end
+evidence suite; a remote-worker scenario belongs there.

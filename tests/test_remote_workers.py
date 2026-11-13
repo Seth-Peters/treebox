@@ -111,6 +111,27 @@ def test_path_ref_matches_the_registered_path_exactly(repo: Path, root: str, cle
         assert json.loads(miss.stderr)["error"]["code"] == "NOT_FOUND"
 
 
+def test_path_ref_agrees_with_the_root_spelling(repo: Path, tmp_path: Path, clean_setup):
+    """A root reached through an alias (macOS ``/var`` -> ``/private/var``):
+    git registers the canonical path, the caller holds the root's spelling.
+    A path ref in either spelling selects the worktree, and the selected
+    worktree keeps the root's spelling, the same as ``create`` returned."""
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    root = str(alias / "wts")
+    path = _create(repo, root, "task-5")
+    _create(repo, root, "task-55")
+    assert path == str(alias / "wts" / "task-5")
+
+    for ref in (path, str(real / "wts" / "task-5")):
+        res = _run(["enter", ref, "--repo", str(repo), "--root", root, "--json"])
+        assert res.exit_code == 0, (ref, res.stderr)
+        out = json.loads(res.stdout)
+        assert (out["name"], out["worktree_path"]) == ("task-5", path), ref
+
+
 def test_path_ref_finds_a_worktree_whose_directory_is_gone(repo: Path, root: str, clean_setup):
     """A partial cleanup can leave a registration without its directory: the
     same path ref still finds it, so the retried teardown finishes it."""
