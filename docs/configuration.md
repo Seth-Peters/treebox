@@ -97,6 +97,7 @@ A template is a directory. Copy it out (below) and these become yours:
 | `container.json`                    | How the container runs — most edits touch only `postCreate` here. Schema below.   |
 | `post-create.sh`                    | The default setup script `postCreate` runs. Edit inline or point elsewhere.       |
 | `init-firewall.sh` · `allowed-domains.sh` | Egress rules, applied only when the firewall is on.                         |
+| `treebox-fetch` · `treebox-online`  | Build helpers the default `Dockerfile` copies in. Optional: a template needs them only if its `Dockerfile` copies them. |
 | `firewall.json`                     | Overrides merged onto `container.json` when the firewall is on.                    |
 
 ### 1. Scaffold a template
@@ -188,6 +189,78 @@ to apply the change. Existing operator templates keep their own scripts;
 treebox does not replace them with updated bundled scripts. Any container
 config in the target repo itself is deliberately ignored. See
 [how it works](how-it-works.md#the-sandbox-config-lives-outside-the-box).
+
+### Build inputs
+
+The image is not published: each machine builds it from the template. The
+bundled `Dockerfile` pins every input, so two builds of it a week apart
+install the same tools:
+
+- The base image is pinned by its multi-arch index digest
+  (`python:3.14.6-slim-trixie@sha256:…`), so it is the same on amd64 and arm64.
+- Each download has an exact version and a SHA-256 for each architecture
+  (`*_SHA256_AMD64`, `*_SHA256_ARM64`). The helper `treebox-fetch` downloads
+  and checks it; a wrong checksum stops the build. No installer script is
+  piped into a shell.
+- Each npm package has an exact version.
+- Debian packages come from the signed Debian archive of the base image's
+  release (trixie). They are not pinned to a version: they take Debian's
+  security updates, so these package versions can change between builds.
+
+| Tool | Pin (`ARG`) | Source of the checksum |
+| ---- | ----------- | ---------------------- |
+| Base image | `FROM …@sha256:` | Docker Hub index digest (`docker buildx imagetools inspect`) |
+| Node.js 22 | `NODE_VERSION` | `SHASUMS256.txt` of the release on nodejs.org |
+| GitHub CLI | `GH_VERSION` | `gh_<version>_checksums.txt` of the GitHub release |
+| delta | `GIT_DELTA_VERSION` | SHA-256 of the release asset (upstream publishes none) |
+| AWS CLI v2 | `AWS_CLI_VERSION` | SHA-256 of the versioned zip, after its AWS PGP signature passed |
+| uv | `UV_VERSION` | `<asset>.sha256` of the GitHub release |
+| Claude Code | `CLAUDE_CODE_VERSION` | `manifest.json` of the release on downloads.claude.ai |
+| Codex CLI | `CODEX_CLI_VERSION` | exact npm version |
+| Playwright | `PLAYWRIGHT_VERSION`, `PLAYWRIGHT_CLI_VERSION` | exact npm versions (each pins its browser build) |
+
+**Update policy for the agent CLIs.** `CLAUDE_CODE_VERSION` is the release
+that the Claude Code `stable` channel
+(`https://downloads.claude.ai/claude-code-releases/stable`) gives when it is
+bumped. `CODEX_CLI_VERSION` is the npm `latest` dist-tag of `@openai/codex`
+when it is bumped. treebox bumps both on purpose, in a dedicated change, at
+least once a month and soon after an upstream security fix. A bump changes
+the version and both checksums together, from the upstream source in the table.
+The build never installs a version it did not pin. To run a different version in your own template, change the
+version and its checksums in your template's `Dockerfile`. Do not pass the
+version as a `build.args` entry in `container.json`: the checksums would no
+longer match, and the build stops.
+
+**Hosts the build needs.** A build needs outbound HTTPS to these hosts (Debian
+uses HTTP):
+
+| Host | For |
+| ---- | --- |
+| `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | the base image (only if it is not already pulled) |
+| `deb.debian.org` | Debian packages, and the Chromium libraries Playwright installs |
+| `nodejs.org` | Node.js |
+| `github.com`, `release-assets.githubusercontent.com` | GitHub CLI, delta, uv (GitHub redirects release downloads) |
+| `awscli.amazonaws.com` | AWS CLI |
+| `downloads.claude.ai` | Claude Code |
+| `registry.npmjs.org` | Codex CLI, Playwright |
+| `cdn.playwright.dev` | the Playwright browsers |
+
+If the build cannot reach one of them, the step fails with a message that
+names the host, for example:
+
+```text
+treebox: cannot download https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz (curl exit 7).
+treebox: this build needs network access to nodejs.org.
+```
+
+The egress firewall (`--firewall`) does not apply to the build: it only
+limits the running container.
+
+**Builders.** The bundled `Dockerfile` uses no BuildKit-only syntax (no
+heredocs, no `COPY --chmod`, no `RUN --mount`, no `# syntax=` line). So it
+builds with BuildKit and also with Docker's legacy builder, which is what
+`docker build` uses on a host without the buildx plugin (for example Debian or
+Ubuntu `docker.io` without `docker-buildx`) or with `DOCKER_BUILDKIT=0`.
 
 ## Environment variables
 
