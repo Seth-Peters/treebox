@@ -1598,7 +1598,7 @@ def test_docker_enter_as_root_is_refused_and_leaves_the_worktree_alone(
 ):
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
     calls = _as_root(monkeypatch)
 
     res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])

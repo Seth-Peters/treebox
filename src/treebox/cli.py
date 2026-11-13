@@ -1900,27 +1900,36 @@ def _teardown_one(
             reporter.warn(f"isolation teardown: {exc}")
             cleanup.keep(f"{run.name} resources", str(exc))
 
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
     removed = False
-    if not cleanup.complete:
-        reporter.note("worktree", f"kept · cleanup incomplete · {_short_path(wt.path, repo_path)}")
-    else:
-        removed = _remove_worktree(reporter, cleanup, wt, repo_path, force=force, json_out=json_out)
-
     branch_deleted = False
-    if cleanup.complete:
-        # The host-owned record goes last, with the worktree it describes.
-        record.remove(wt.path)
-        if delete_branch and branch_name:
-            try:
-                git.delete_branch(repo_path, branch_name)
-                branch_deleted = True
-                reporter.ok("branch", f"deleted {branch_name}")
-            except git.GitError as exc:
-                reporter.warn(f"could not delete branch: {exc}")
-        elif branch_name:
-            reporter.note("branch", f"kept {branch_name}")
-    else:
-        reporter.note("record", "kept · the same teardown retries")
+    with locking.repo_lock(repo_path):
+        if not cleanup.complete:
+            reporter.note(
+                "worktree", f"kept · cleanup incomplete · {_short_path(wt.path, repo_path)}"
+            )
+        else:
+            removed = _remove_worktree(
+                reporter, cleanup, wt, repo_path, force=force, json_out=json_out
+            )
+
+        if cleanup.complete:
+            # The host-owned record goes last, with the worktree it describes.
+            record.remove(wt.path)
+            if delete_branch and branch_name:
+                try:
+                    git.delete_branch(repo_path, branch_name)
+                    branch_deleted = True
+                    reporter.ok("branch", f"deleted {branch_name}")
+                except git.GitError as exc:
+                    reporter.warn(f"could not delete branch: {exc}")
+            elif branch_name:
+                reporter.note("branch", f"kept {branch_name}")
+        else:
+            reporter.note("record", "kept · the same teardown retries")
 
     return TeardownRecord(
         name=cand.name,

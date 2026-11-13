@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from . import ecosystems, git, lifecycle, record
+from . import ecosystems, git, lifecycle, locking, record
 from .config import Config
 from .harnesses import Harness
 from .models import Health, Worktree, expand_user, is_placeholder, same_path, worktree_root
@@ -216,7 +216,10 @@ def install_push_guard(wt: Worktree, reporter: Reporter) -> None:
     hook = hooks / "pre-push"
     hook.write_text(script, encoding="utf-8")
     hook.chmod(0o755)
-    git.enable_worktree_config(wt.path)
+    # The extension flag lives in the config every worktree shares; the hooks
+    # path below is this worktree's own file and needs no repository lock.
+    with locking.repo_lock(wt.path):
+        git.enable_worktree_config(wt.path)
     git.set_worktree_hooks_path(wt.path, hooks)
     reporter.ok("push guard", _guard_detail(wt.branch))
 
@@ -354,13 +357,15 @@ def _ensure_excluded(tree: str | Path, patterns: tuple[str, ...]) -> None:
     except git.GitError:
         return  # not a git worktree; nothing git could ever track
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    content = exclude.read_text() if exclude.is_file() else ""
-    lines = content.splitlines()
-    if any(p in lines for p in patterns):
-        return
-    if content and not content.endswith("\n"):
-        content += "\n"
-    exclude.write_text(content + patterns[0] + "\n")
+    # A read-modify-write of a file every worktree of the repository shares.
+    with locking.repo_lock(tree):
+        content = exclude.read_text() if exclude.is_file() else ""
+        lines = content.splitlines()
+        if any(p in lines for p in patterns):
+            return
+        if content and not content.endswith("\n"):
+            content += "\n"
+        exclude.write_text(content + patterns[0] + "\n")
 
 
 def _ensure_env_ignored(worktree: Path) -> None:
@@ -701,51 +706,27 @@ def _check_base_exists(repo: str, *, base: str, existing_branch: bool) -> None:
         raise exc
 
 
-def create(
-    config: Config,
-    runner: Runner,
-    *,
+def _announce_repo_wait(reporter: Reporter) -> None:
+    reporter.info("waiting for another treebox operation on this repository…")
+
+
+def _add_worktree(
     repo: str,
+    wt: Worktree,
+    *,
     name: str,
     branch: str,
     base: str,
-    harness: Harness,
-    cold: bool,
     fetch: bool,
     interactive: bool,
+    existing_branch: bool,
     reporter: Reporter,
-    existing_branch: bool = False,
-    args: list[str] | None = None,
-) -> Outcome:
-    """Provision the worktree ``name`` on ``branch`` and prepare it via ``runner``.
-
-    ``branch`` is one of three things: the ``treebox/<name>`` placeholder a
-    nameless ``create`` generates, a user-chosen branch created fresh from
-    origin/``base`` (an explicit ``create NAME`` — the branch must not exist
-    yet), or, with ``existing_branch``, an exact branch that must already
-    exist locally or on origin (the ``create --checkout`` path). Every path
-    installs the pre-push guard; only placeholders are affected by it.
-    ``args`` are extra agent args, part of the returned entry command.
-    """
-    wt = Worktree.locate(repo, config.root, name, branch, base)
-    policy = _creation_record(config, runner, wt, harness.name)
-
-    # An existing target directory is a conflict except when a prior run created
-    # it on this exact branch and setup did not finish (pending or failed in the
-    # host-owned record). Launching into that half-built tree would be the
-    # "said Ready, then failed" bug; finish it.
-    if wt.path.exists():
-        # Resume ONLY a genuinely half-built treebox worktree: healthy,
-        # registered with git on the exact expected branch, setup unfinished.
-        # Anything else is a conflict.
-        if _is_resumable_unprovisioned_worktree(repo, wt, branch):
-            rec, _ = _record_policy(wt, policy)
-            reporter.note("worktree", "exists but setup unfinished - finishing setup")
-            return _finish_setup(
-                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter, args=args
-            )
-        raise _slug_conflict_for_existing_path(repo, wt)
-
+    policy: record.WorktreeRecord,
+) -> record.WorktreeRecord:
+    """Fetch, validate the branch request against the fresh refs, write the
+    host-owned record, and add the worktree. Returns the record. The caller
+    holds ``locking.repo_lock``: everything here reads or writes git state
+    shared by every worktree of the repository."""
     # Freshness is the whole point: a fetch is REQUIRED by default and fails
     # loudly (never silently falls back to stale local refs). The only escape is
     # an explicit --no-fetch, or a repo with no origin (nothing to be fresh
@@ -822,6 +803,72 @@ def create(
         if wrote:
             record.remove(wt.path)  # nothing exists yet that the record could describe
         raise
+
+    return rec
+
+
+def create(
+    config: Config,
+    runner: Runner,
+    *,
+    repo: str,
+    name: str,
+    branch: str,
+    base: str,
+    harness: Harness,
+    cold: bool,
+    fetch: bool,
+    interactive: bool,
+    reporter: Reporter,
+    existing_branch: bool = False,
+    args: list[str] | None = None,
+) -> Outcome:
+    """Provision the worktree ``name`` on ``branch`` and prepare it via ``runner``.
+
+    ``branch`` is one of three things: the ``treebox/<name>`` placeholder a
+    nameless ``create`` generates, a user-chosen branch created fresh from
+    origin/``base`` (an explicit ``create NAME`` - the branch must not exist
+    yet), or, with ``existing_branch``, an exact branch that must already
+    exist locally or on origin (the ``create --checkout`` path). Every path
+    installs the pre-push guard; only placeholders are affected by it.
+    ``args`` are extra agent args, part of the returned entry command.
+    """
+    wt = Worktree.locate(repo, config.root, name, branch, base)
+    policy = _creation_record(config, runner, wt, harness.name)
+
+    # An existing target directory is a conflict except when a prior run created
+    # it on this exact branch and setup did not finish (pending or failed in the
+    # host-owned record). Launching into that half-built tree would be the
+    # "said Ready, then failed" bug; finish it.
+    if wt.path.exists():
+        # Resume ONLY a genuinely half-built treebox worktree: healthy,
+        # registered with git on the exact expected branch, setup unfinished.
+        # Anything else is a conflict.
+        if _is_resumable_unprovisioned_worktree(repo, wt, branch):
+            rec, _ = _record_policy(wt, policy)
+            reporter.note("worktree", "exists but setup unfinished - finishing setup")
+            return _finish_setup(
+                config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter, args=args
+            )
+        raise _slug_conflict_for_existing_path(repo, wt)
+
+    # Every step from the fetch to `git worktree add` writes git state the whole
+    # repository shares, so creates of *different* names queue here (they hold
+    # different worktree locks). Setup - the slow part - runs after the lock is
+    # released, concurrently.
+    with locking.repo_lock(repo, on_wait=lambda: _announce_repo_wait(reporter)):
+        rec = _add_worktree(
+            repo,
+            wt,
+            name=name,
+            branch=branch,
+            base=base,
+            fetch=fetch,
+            interactive=interactive,
+            existing_branch=existing_branch,
+            reporter=reporter,
+            policy=policy,
+        )
 
     return _finish_setup(
         config, runner, wt, rec, harness=harness, cold=cold, reporter=reporter, args=args

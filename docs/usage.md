@@ -671,7 +671,7 @@ you want it live.
 | `WORKTREE_LOCKED` | `5` | Teardown target is locked with `git worktree lock`; treebox never removes it (also with `--force`). Unlock it first. |
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
-| `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. |
+| `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. Also raised, rarely, when the repository lock that parallel `create` / `teardown` calls queue on has been held for over five minutes: another operation is stuck, not merely busy. |
 | `UNKNOWN_ISOLATION` | `5` | Recorded isolation mode is unknown (a record from another treebox version, or hand-edited). |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
 | `RECORD_MISSING` | `5` | The worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (created by an older treebox, or the record was deleted) - `treebox adopt <name> --isolation <mode>`, or `teardown <name> --isolation <mode>`. |
