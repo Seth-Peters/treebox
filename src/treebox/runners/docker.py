@@ -80,7 +80,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from .. import assets, git, system
 from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
-from ..models import Worktree, expand_user
+from ..models import Worktree, derive_name, expand_user
 from ..output import Reporter, StepError
 from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
 
@@ -743,11 +743,12 @@ class DockerRunner:
         if branch:
             location = ["--repo", wt.repo, "--root", str(wt.path.parent)]
             teardown = shlex.join(["treebox", "teardown", wt.name, *location])
+            name_args = [] if derive_name(branch) == wt.name else [wt.name]
             create = shlex.join(
                 [
                     "treebox",
                     "create",
-                    wt.name,
+                    *name_args,
                     "--checkout",
                     branch,
                     *location,

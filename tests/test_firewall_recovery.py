@@ -85,8 +85,14 @@ def _git(path: Path, *args: str) -> str:
 
 @pytest.mark.parametrize("firewall", [False, True])
 @pytest.mark.parametrize(
-    ("branch", "renamed"),
-    [("fix-auth", None), ("feature/auth", None), ("feature/auth", "fix/renamed'auth")],
+    ("create_args", "branch", "renamed"),
+    [
+        (["fix-auth"], "fix-auth", None),
+        (["feature/auth"], "feature/auth", None),
+        (["feature/auth"], "feature/auth", "fix/renamed'auth"),
+        (["--checkout", "Feature/Auth"], "Feature/Auth", None),
+        (["custom-name", "--checkout", "Feature/Auth"], "Feature/Auth", None),
+    ],
 )
 def test_firewall_recovery_restores_existing_work_and_choices(
     repo: Path,
@@ -95,6 +101,7 @@ def test_firewall_recovery_restores_existing_work_and_choices(
     docker_cli: Path,
     monkeypatch: pytest.MonkeyPatch,
     firewall: bool,
+    create_args: list[str],
     branch: str,
     renamed: str | None,
 ):
@@ -109,10 +116,12 @@ def test_firewall_recovery_restores_existing_work_and_choices(
     monkeypatch.delenv("TREEBOX_TEMPLATE_DIR", raising=False)
     root = tmp_path / "worktrees with spaces"
     location = ["--repo", str(repo), "--root", str(root)]
+    if "--checkout" in create_args:
+        _git(repo, "branch", branch)
     created = _run(
         [
             "create",
-            branch,
+            *create_args,
             *location,
             "--isolation",
             "docker",
