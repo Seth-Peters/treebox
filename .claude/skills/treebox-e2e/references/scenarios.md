@@ -315,7 +315,12 @@ one behind on purpose.
       `resources`); the enter exits 5 `RESOURCE_MISMATCH` with re-create commands
       in the hint; the host create exits 2 `RESOURCE_UNSUPPORTED` and leaves no
       worktree. A bad value (`--memory lots`) exits 2 `INVALID_RESOURCE` with no
-      worktree, branch or image left behind.
+      worktree, branch or image left behind. Drift: with `[resources] memory =
+      "2g"`, `create e2e-lim … --memory 4g`, then set `memory = "3g"`: `enter
+      --print` shows no `limits:` warning and `enter --json` has
+      `resources_drift` all `null` (a flag choice never drifts); a worktree whose
+      memory came from the config warns once per `enter` and `enter --json`
+      shows `resources_drift.memory: "3g"`.
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 

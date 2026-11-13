@@ -249,8 +249,10 @@ removing the conflict.
 The sandbox keeps the CPU, memory and process limits it was created with
 (they are in the record). `enter --cpus` / `--memory` / `--pids-limit` only
 restates them: a different value exits `5` (`RESOURCE_MISMATCH`) with the
-exact re-create commands, and a config or template value that now differs is a
-warning with the same commands. See
+exact re-create commands. A limit that came from config or the template, and
+that they now give differently, is a warning with the same commands (in
+`--json` mode: the `resources_drift` field). A limit a `create` flag chose never
+gives this warning. See
 [resource limits](configuration.md#resource-limits).
 
 A container that stopped since setup (host reboot, manual `docker stop`)
@@ -528,7 +530,7 @@ Current success payloads:
 
 | Command | Top-level fields |
 | ------- | ---------------- |
-| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created`, `resources` |
+| `create --json`, `enter --json` | `schemaVersion`, `name`, `worktree_path`, `branch`, `base`, `entry_command`, `created`, `resources`, `resources_drift` (`enter` only) |
 | `create --dry-run --json` | `schemaVersion`, `dry_run`, `name`, `worktree_path`, `branch`, `commands`, `resources` |
 | `list --json` | `schemaVersion`, `worktrees` |
 | `teardown --json` | `schemaVersion`, `worktrees` |

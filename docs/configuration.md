@@ -125,9 +125,17 @@ container's limits cannot change in place, so:
   (exit `5`, `RESOURCE_MISMATCH`) whose hint gives the exact re-create commands
   (`treebox teardown <name> && treebox create <name> --checkout <branch> ...`).
   Restating the recorded value is fine.
-- A `[resources]` or template value that now differs from the record is a
-  warning on every `enter`, with the same re-create commands. The sandbox keeps
-  its recorded limits.
+- The record also keeps which limits a `create` flag chose. A limit that came
+  from `[resources]` or the template, and that they now give differently, is
+  drift: a warning on every `enter`, with the same re-create commands. The
+  sandbox keeps its recorded limits. `enter --json` prints no warning; its
+  `resources_drift` object (`cpus`, `memory`, `pids`; `null` = no drift) holds
+  the new values instead.
+- A limit a flag chose never drifts: `create --memory 4g` under
+  `memory = "2g"` is a choice, so `enter` is silent, also after the config
+  default changes. A limit that `enter` restates by flag does not drift either.
+- The re-create commands restate the limits a flag chose. The other limits
+  come from `[resources]` and the template again, as on any `create`.
 
 **Raw `runArgs` limits.** A template may already set `--cpus`, `--memory` /
 `-m` or `--pids-limit` in `runArgs`. That keeps working: treebox reads it as the
