@@ -1538,43 +1538,48 @@ def _teardown_one(
             container = "failed"
             reporter.warn(f"isolation teardown: {exc}")
 
-    if exists:
-        try:
-            git.worktree_remove(repo_path, wt.path, force=force)
-        except git.GitError:
-            # Last-resort cleanup for corrupt *linked* worktrees git refuses to
-            # remove. It must never run against the main working tree (git's
-            # refusal is also a GitError): that would delete the whole repo.
-            if same_path(wt.path, repo_path):
-                raise _die(
-                    reporter,
-                    f"Refusing to remove the main working tree '{cand.name}'.",
-                    code=EXIT_CONFLICT,
-                    error_code="MAIN_WORKTREE",
-                    hint="treebox only manages linked worktrees; "
-                    "the repo itself is never a target.",
-                    path=str(wt.path),
-                    json_out=json_out,
-                ) from None
-            import shutil as _sh
-
-            _sh.rmtree(wt.path, ignore_errors=True)
-            git.worktree_prune(repo_path)
-        reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
-    else:
-        git.worktree_prune(repo_path)
-        reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
-
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
     branch_deleted = False
-    if delete_branch and branch_name:
-        try:
-            git.delete_branch(repo_path, branch_name)
-            branch_deleted = True
-            reporter.ok("branch", f"deleted {branch_name}")
-        except git.GitError as exc:
-            reporter.warn(f"could not delete branch: {exc}")
-    elif branch_name:
-        reporter.note("branch", f"kept {branch_name}")
+    with locking.repo_lock(repo_path):
+        if exists:
+            try:
+                git.worktree_remove(repo_path, wt.path, force=force)
+            except git.GitError:
+                # Last-resort cleanup for corrupt *linked* worktrees git refuses to
+                # remove. It must never run against the main working tree (git's
+                # refusal is also a GitError): that would delete the whole repo.
+                if same_path(wt.path, repo_path):
+                    raise _die(
+                        reporter,
+                        f"Refusing to remove the main working tree '{cand.name}'.",
+                        code=EXIT_CONFLICT,
+                        error_code="MAIN_WORKTREE",
+                        hint="treebox only manages linked worktrees; "
+                        "the repo itself is never a target.",
+                        path=str(wt.path),
+                        json_out=json_out,
+                    ) from None
+                import shutil as _sh
+
+                _sh.rmtree(wt.path, ignore_errors=True)
+                git.worktree_prune(repo_path)
+            reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
+        else:
+            git.worktree_prune(repo_path)
+            reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
+
+        if delete_branch and branch_name:
+            try:
+                git.delete_branch(repo_path, branch_name)
+                branch_deleted = True
+                reporter.ok("branch", f"deleted {branch_name}")
+            except git.GitError as exc:
+                reporter.warn(f"could not delete branch: {exc}")
+        elif branch_name:
+            reporter.note("branch", f"kept {branch_name}")
 
     return TeardownRecord(
         name=cand.name,

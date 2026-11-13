@@ -113,6 +113,16 @@ Module map:
   output carrying a `schemaVersion` that only gains fields within a version —
   a breaking reshape bumps it (git-porcelain discipline). Agents
   branch on these, so don't change their meanings casually.
+- **`locking.py`** holds the two cross-process locks, on two keys.
+  `worktree_lock(path)` is per worktree and non-blocking: a second operation
+  on the *same* worktree fails fast (`LOCK_HELD`). `repo_lock(path)` is per
+  repository (keyed by the git common dir, so every root and linked worktree
+  shares it) and *waits*: `create` holds it from the fetch through
+  `git worktree add`, `teardown` around `worktree remove`/`prune`/branch
+  delete, and the small writers of shared files (`extensions.worktreeConfig`,
+  `info/exclude`) take it too. Anything that writes git state shared by the
+  whole repository belongs under it; setup, container work, and the agent
+  session never do. Lock order is always worktree, then repo.
 - **`ecosystems.py`** detects package managers (uv, npm, pnpm, go, cargo),
   drives their cache-backed setup, and defines which manifest files feed the
   SHA-256 hash. "Warmth" lives in shared host caches, not the tree. Its
@@ -232,6 +242,11 @@ needs path translation today, so building it would be indirection).
   exits `4` loudly. `--no-fetch` is the only (explicit) escape.
 - **Subscription auth only.** Agents launch via `~/.claude` / `~/.codex` logins;
   `ANTHROPIC_API_KEY` is never used.
+- **Parallel dispatch is safe.** Creates and teardowns of different worktrees
+  in one repo may run concurrently: shared git state is written only under
+  `locking.repo_lock`, and a failed `git worktree add` rolls back the branch
+  it created (`git.worktree_add` is all-or-nothing), so a retry never
+  dead-ends on `BRANCH_EXISTS`.
 - **Non-interactive friendly.** Data → stdout, diagnostics → stderr; color and
   spinners degrade when stderr is not a TTY; `--json` / `--print` / `--dry-run`
   exist for scripting and must keep working.

@@ -2027,7 +2027,9 @@ def test_git_argv_uses_end_of_options_separator(monkeypatch: pytest.MonkeyPatch)
     git.worktree_add("/r", "/wt", git.BranchPlan("new", "b", "--detach"))
     git.delete_branch("/r", "b")
 
-    local, new, delete = calls
+    resolve, *_ = [c for c in calls if "rev-parse" in c]
+    assert resolve[-2:] == ["--end-of-options", "--detach^{commit}"]
+    local, new, delete = [c for c in calls if "rev-parse" not in c]
     assert local[-3:] == ["--", "/wt", "b"]
     assert new[-5:] == ["-b", "b", "--", "/wt", "--detach"]
     assert delete[-2:] == ["--", "b"]
