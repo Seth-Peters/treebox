@@ -144,16 +144,6 @@ treebox teardown fix-auth brave-otter --delete-branch
 treebox teardown                        # pick interactively
 ```
 
-**Adopt.** Each worktree's creation policy (isolation, firewall, template,
-harness) lives in a host-owned record outside every sandbox mount, so a boxed
-agent can never pick its next sandbox. A worktree made by an older treebox has
-no record yet: `enter` and `teardown` refuse it with `RECORD_MISSING` until you
-state how it was created:
-
-```bash
-treebox adopt fix-auth --isolation docker --firewall
-```
-
 treebox is built to be scripted, including by agents: the worktree commands and
 `doctor` take `--json` (data to stdout, diagnostics to stderr, a schema that
 only gains fields within a version), `--dry-run` prints a stable command plan

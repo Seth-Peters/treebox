@@ -78,7 +78,6 @@ _TEARDOWN_OPTS = (
     _COMMON_LIST
     | _VERBOSITY
     | {
-        "--isolation",
         "--delete-branch",
         "--remove-volumes",
         "--force",
@@ -112,12 +111,6 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
         | _VERBOSITY
         | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"},
         ["ref", "args"],
-    ),
-    "adopt": (
-        {"--repo", "--root", "--json", "--quiet", "-q"}
-        | {"--isolation", "--harness", "-H", "--firewall", "--no-firewall"}
-        | {"--template", "--base", "--force"},
-        ["ref"],
     ),
     "list": (_COMMON_LIST, []),
     "teardown": (_TEARDOWN_OPTS, ["refs"]),
@@ -324,8 +317,8 @@ def test_exit_and_error_code_matrix(
     (Path(root) / "fix-auth" / "dirty.txt").write_text("x")
     authz = Path(root) / "fix-authz"
     record.save(dataclasses.replace(record.load(authz), isolation="bogus"))
-    assert _run(["create", "legacy", *r, "--print"]).exit_code == 0
-    record.remove(Path(root) / "legacy")  # a worktree from before host-owned records
+    assert _run(["create", "norecord", *r, "--print"]).exit_code == 0
+    record.remove(Path(root) / "norecord")  # e.g. made by another treebox version
     assert _run(["create", "moved", *r, "--print"]).exit_code == 0
     moved = record.record_path(Path(root) / "moved")
     moved.write_text(moved.read_text().replace(str(Path(root) / "moved"), "/elsewhere/moved"))
@@ -346,7 +339,7 @@ def test_exit_and_error_code_matrix(
         (["teardown", "fix-auth", *r, "--json"], EXIT_CONFLICT, "DIRTY_WORKTREE"),
         (["teardown", "taken", *r, "--json"], EXIT_CONFLICT, "NEEDS_CONFIRMATION"),
         (["teardown", *r, "--json"], EXIT_CONFLICT, "NEEDS_CONFIRMATION"),
-        (["enter", "fix-authz", *r, "--json"], EXIT_CONFLICT, "UNKNOWN_ISOLATION"),
+        (["enter", "fix-authz", *r, "--json"], EXIT_CONFLICT, "RECORD_INVALID"),
         (
             ["enter", "taken", "--isolation", "docker", *r, "--json"],
             EXIT_CONFLICT,
@@ -355,10 +348,8 @@ def test_exit_and_error_code_matrix(
         (["create", "--isolation", "nope", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
         (["create", "--template", "/etc", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
         (["enter", "--template", "../x", "taken", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
-        (["enter", "legacy", *r, "--json"], EXIT_CONFLICT, "RECORD_MISSING"),
+        (["enter", "norecord", *r, "--json"], EXIT_CONFLICT, "RECORD_MISSING"),
         (["enter", "moved", *r, "--json"], EXIT_CONFLICT, "RECORD_INVALID"),
-        (["teardown", "legacy", "--force", *r, "--json"], EXIT_CONFLICT, "RECORD_MISSING"),
-        (["adopt", "taken", "--isolation", "host", *r, "--json"], EXIT_CONFLICT, "RECORD_EXISTS"),
     ]
     for args, want_exit, want_code in matrix:
         res = _run(args)
