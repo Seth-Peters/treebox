@@ -25,6 +25,6 @@ ALLOWED_DOMAINS=(
 )
 
 # TCP ports the sandbox may reach on the Docker host (the container's default
-# gateway). Empty: no host service is reachable, even one bound to 0.0.0.0.
+# gateway). Empty: no additional host ports are opened.
 # Open only what the agent needs, for example: ALLOWED_HOST_PORTS=(5432 8080)
 ALLOWED_HOST_PORTS=()

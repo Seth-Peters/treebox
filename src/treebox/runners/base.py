@@ -152,14 +152,13 @@ class Runner(Protocol):
         ...
 
     def prepare_entry(self, wt: Worktree) -> None:
-        """Make the sandbox entry-ready before the agent (or an emitted
-        ``entry_command``) enters it: the docker runner restarts a stopped
-        container and re-establishes the firewall on every entry (raising
-        ``FirewallError`` when it cannot); a no-op on the host. The CLI calls
-        it on every entry, before ``launch`` and before emitting
-        ``--print``/``--json`` output - so an emitted ``entry_command`` is
-        never dead on arrival, a restart (by treebox or by hand) never leaves
-        egress silently open, and a failure launches nothing."""
+        """Prepare the sandbox before launch or entry-command emission.
+
+        The CLI calls this method on every entry, before ``launch`` or
+        ``--print``/``--json`` output. Docker starts a stopped container and
+        checks its enabled firewall even when the container is already running.
+        A failed firewall initialization raises ``FirewallError`` and blocks
+        launch and command emission. This method is a no-op on the host."""
         ...
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:

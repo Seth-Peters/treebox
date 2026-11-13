@@ -155,9 +155,8 @@ treebox assumes the caller is often another program:
   without parsing prose.
 - **`--json` with a `schemaVersion`** that only gains fields within a version
   (git-porcelain discipline), plus `--print` and `--dry-run` for scripts that
-  want the commands, not the side effects. An emitted entry command is
-  entry-ready: a stopped docker sandbox is restarted and the firewall is
-  re-applied before the command is printed, never dead on replay.
+  want the commands, not the side effects. Before it emits an entry command,
+  treebox completes the [Docker entry checks](usage.md#docker-entry-and-firewall-recovery).
 - **Per-worktree locking**, held by `create`, `enter`, and `teardown` alike,
   so concurrent operations on the same worktree conflict (exit `5`). Separate
   worktrees with the same name have separate locks. Explicit batch teardown

@@ -723,10 +723,9 @@ class DockerRunner:
         return self._exec_command(wt, list(_FIREWALL_GUARDED), user="root")
 
     def _firewall_error(self, wt: Worktree, log: str) -> FirewallError:
-        """A failed firewall init, told with the script's own ``ERROR`` lines
-        (else its last lines), never a bare exit code. The script fails
-        closed, and its allowlist fetch needs the egress it just dropped, so
-        recovery is a fresh container, not another entry."""
+        """Recovery needs a fresh container because fail-closed rules block
+        the allowlist fetch. Offer teardown only when the public CLI can
+        restore the same path and live branch."""
         lines = [line.strip() for line in log.splitlines() if line.strip()]
         detail = "; ".join([line for line in lines if line.startswith("ERROR")] or lines[-3:])
         message = f"Firewall initialization failed for worktree '{wt.name}'"
