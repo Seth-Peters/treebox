@@ -1,0 +1,12 @@
+#!/bin/sh
+# treebox-online HOST[,HOST...] COMMAND...: run COMMAND, which downloads from
+# package registries; if it fails, name the hosts it needs.
+# Build helper of the bundled Dockerfile, installed at /usr/local/bin.
+set -u
+hosts=$1
+shift
+"$@" && exit 0
+rc=$?
+echo "treebox: $1 failed (exit $rc)." >&2
+echo "treebox: this step needs network access to $hosts." >&2
+exit "$rc"

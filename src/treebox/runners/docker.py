@@ -3,11 +3,10 @@ Docker container with shared caches + scoped copies of the login credentials
 mounted in.
 
 Buys isolation + a pinned toolchain + an optional firewall, so it is opt-in.
-Docker is the only dependency: the container is built, started, and entered
-with plain ``docker build`` / ``docker run`` / ``docker exec``. The image's
-baked-in ``post-create.sh`` is the setup hook for this runner; shared caches
-are wired in as bind mounts so containerized setup resolves from the same
-store as the host.
+Container operations use plain ``docker build``, ``docker run``, and
+``docker exec``. The image's baked-in ``post-create.sh`` is the setup hook
+for this runner; shared caches are wired in as bind mounts so containerized
+setup resolves from the same store as the host.
 
 Lockdown invariant: the files that *define* the sandbox (container.json and
 its build context) are materialized in a host-side directory **outside** the
@@ -53,7 +52,11 @@ Firewall invariant: when the operator enables the firewall, default-deny
 egress must exist before any workspace-derived code runs. ``setup`` execs
 ``init-firewall.sh`` before ``post-create.sh``, and ``post-create.sh`` fails
 closed on the readiness flag if that ordering is ever lost. Rules don't
-survive a container restart, so every restart re-runs the (idempotent) init.
+survive a container restart, and a container can be restarted outside
+treebox (``docker restart``), so every entry re-runs the (idempotent) init,
+running container or not, and a failed init blocks the entry. The script
+skips the rebuild only when its ready flag AND the live DROP policy are both
+present; treebox never reads the flag itself.
 Capabilities can't be added to an existing container, so asking for the
 firewall on a container created without it is a loud error, never a silent
 open-egress run.
@@ -76,9 +79,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from .. import assets, git, system
 from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
-from ..models import Worktree, expand_user
-from ..output import Reporter
-from .base import PreflightError, RunnerFacts, RunnerTeardownResult
+from ..models import Worktree, derive_name, expand_user, is_valid_name
+from ..output import Reporter, StepError
+from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -155,6 +158,13 @@ def has_resource_manifest(worktree: Path) -> bool:
     any docker resource exists, so teardown uses it to tell a docker worktree
     from a host one when the worktree's record is missing or invalid."""
     return os.path.lexists(worktree.parent / _CONFIG_ROOT / worktree.name / _RESOURCE_MANIFEST)
+
+
+_ROOT_HINT = (
+    "Run treebox as a non-root user that can reach the Docker daemon. Create one "
+    "with `useradd --create-home --groups docker treebox`, then run treebox as "
+    "that user (`su - treebox`). Host isolation still works as root."
+)
 
 
 def _install_hint() -> str:
@@ -307,6 +317,17 @@ class DockerRunner:
     # --- preflight -----------------------------------------------------------
 
     def preflight(self, reporter: Reporter) -> None:
+        # Checked first: no docker setup fixes it. The sandbox user takes the
+        # invoking uid (see _inject), so as uid 0 it would be root inside the
+        # box and free to delete its own firewall rules (and the template's
+        # `useradd -u 0` fails mid-build). Refuse before any provisioning.
+        if system.identity().uid == 0:
+            raise PreflightError(
+                "docker isolation cannot run as root (uid 0): the sandbox user "
+                "would be root and could remove its own firewall.",
+                error_code="RUNNING_AS_ROOT",
+                hint=_ROOT_HINT,
+            )
         if not system.have("docker"):
             raise PreflightError(
                 "docker runner needs docker on PATH.",
@@ -565,6 +586,10 @@ class DockerRunner:
             if not src.is_file():
                 raise RuntimeError(f"{f} not found in template dir: {tpl}")
             shutil.copy(src, dc / f)
+        for f in assets.TEMPLATE_HELPER_FILES:
+            src = tpl / f
+            if src.is_file():
+                shutil.copy(src, dc / f)
         for script in ("post-create.sh", "init-firewall.sh"):
             p = dc / script
             if p.exists():
@@ -709,7 +734,10 @@ class DockerRunner:
         # untrusted workspace (uv sync executes the repo's build backend), and
         # post-create.sh fails closed if this ordering is ever lost.
         if firewall:
-            reporter.step("firewall", "egress locked down", self._firewall_command(wt))
+            try:
+                reporter.step("firewall", "egress locked down", self._firewall_command(wt))
+            except StepError as exc:
+                raise self._firewall_error(wt, exc.log) from exc
         post_create = config.get("postCreate")
         if post_create:
             reporter.step(
@@ -721,8 +749,59 @@ class DockerRunner:
     def _firewall_command(self, wt: Worktree) -> list[str]:
         return self._exec_command(wt, list(_FIREWALL_GUARDED), user="root")
 
+    def _firewall_error(self, wt: Worktree, log: str) -> FirewallError:
+        """Recovery needs a fresh container because fail-closed rules block
+        the allowlist fetch. Offer teardown only when the public CLI can
+        restore the same path and live branch."""
+        lines = [line.strip() for line in log.splitlines() if line.strip()]
+        detail = "; ".join([line for line in lines if line.startswith("ERROR")] or lines[-3:])
+        message = f"Firewall initialization failed for worktree '{wt.name}'"
+        template_path = shlex.join(["treebox", "template", "path", self.config.template])
+        hint = (
+            "All sandbox traffic stays dropped and the agent was not launched. "
+            "Check the template's init-firewall.sh and allowed-domains.sh "
+            f"({template_path}). "
+        )
+        try:
+            branch = git.branch_for_path(wt.repo, str(wt.path))
+        except git.GitError:
+            branch = None
+        if branch and (derive_name(branch) == wt.name or is_valid_name(wt.name)):
+            location = ["--repo", wt.repo, "--root", str(wt.path.parent)]
+            teardown = shlex.join(["treebox", "teardown", *location, "--", wt.name])
+            name_args = [] if derive_name(branch) == wt.name else ["--", wt.name]
+            create = shlex.join(
+                [
+                    "treebox",
+                    "create",
+                    "--checkout",
+                    branch,
+                    *location,
+                    "--isolation",
+                    self.name,
+                    "--template",
+                    self.config.template,
+                    "--firewall" if self.config.firewall else "--no-firewall",
+                    "--harness",
+                    self.config.harness,
+                    *name_args,
+                ]
+            )
+            hint += f"Then re-create: {teardown} && {create}"
+        elif branch:
+            hint += (
+                "Keep the worktree and its data intact. The CLI cannot re-create "
+                f"'{wt.path}' on branch '{branch}'. Repair the sandbox manually."
+            )
+        else:
+            hint += "Save current work on a branch before you re-create the sandbox."
+        return FirewallError(
+            f"{message}: {detail}" if detail else message,
+            hint=hint,
+        )
+
     def _require_own_container(self, wt: Worktree, name: str) -> None:
-        """Refuse to use a container this runner didn't create: its name,
+        """Refuse to use a container this runner did not create: its name,
         mounts, and user don't match what exec expects, so entering it would
         misbehave."""
         if name != self._slug(wt):
@@ -790,13 +869,15 @@ class DockerRunner:
         )
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
-        self.prepare_entry(wt)
         return subprocess.run(self.entry_command(wt, harness=harness, args=args)).returncode
 
     def prepare_entry(self, wt: Worktree) -> None:
         """Start the container if it stopped since setup (host reboot, manual
-        stop) and re-establish the firewall — iptables rules don't survive a
-        restart, and the guarded init is a no-op when no firewall was baked in."""
+        stop), then re-establish the firewall on every entry: iptables rules
+        don't survive a restart, and a ``docker restart`` outside treebox
+        leaves a *running* container with open egress. The guarded init is a
+        no-op when no firewall was baked in, and skips the rebuild when the
+        rules are live. A failed init raises ``FirewallError``."""
         ids = self._container_ids(wt)
         if not ids:
             raise RuntimeError(
@@ -807,7 +888,9 @@ class DockerRunner:
         self._require_own_container(wt, name)
         if not running:
             self._engine_check(["start", ids[0]])
-            self._run_engine(self._firewall_command(wt))
+        proc = self._engine(self._firewall_command(wt)[1:])
+        if proc.returncode != 0:
+            raise self._firewall_error(wt, f"{proc.stdout}\n{proc.stderr}")
 
     def _template_volumes(self, wt: Worktree) -> list[str]:
         """The volumes this operator template explicitly makes per-workspace.

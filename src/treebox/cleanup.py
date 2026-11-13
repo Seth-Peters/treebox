@@ -2,7 +2,8 @@
 
 Callers resolve the runner, validate the batch and hold the worktree lock.
 This module owns runner resources, worktree removal and ownership record
-removal. Runner adapters retain ownership of their resource manifests.
+removal, and takes the repository lock (after the worktree lock) for the git
+steps. Runner adapters retain ownership of their resource manifests.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Literal
 
-from . import git, provision, record
+from . import git, locking, provision, record
 from .models import Worktree, same_path
 from .output import Reporter
 from .runners import Runner
@@ -79,7 +80,20 @@ def cleanup_one(
             resources, "cleanup_incomplete", branch, resources.remaining, runner_error=runner_error
         )
 
-    removal, remaining = _remove_worktree(wt, force=force)
+    # Removing a worktree, pruning, and deleting a branch all rewrite git state
+    # the whole repository shares (`.git/worktrees/`, refs, the branch's config
+    # section), so they queue behind any create or teardown doing the same.
+    # The runner's own cleanup above stays outside: it can be slow.
+    branch_deleted = False
+    branch_error = None
+    with locking.repo_lock(wt.repo):
+        removal, remaining = _remove_worktree(wt, force=force)
+        if not remaining and delete_branch and branch:
+            try:
+                git.delete_branch(wt.repo, branch)
+                branch_deleted = True
+            except git.GitError as exc:
+                branch_error = str(exc)
     if remaining:
         return CleanupResult(
             resources,
@@ -89,15 +103,11 @@ def cleanup_one(
             runner_error=runner_error,
         )
 
+    # The host-owned record goes last, after the worktree it describes: a
+    # failure above leaves it in place, so a retried teardown still knows the
+    # mode. It is not shared git state, so it stays outside the repo lock; the
+    # worktree lock the caller holds already covers it.
     record.remove(wt.path)
-    branch_deleted = False
-    branch_error = None
-    if delete_branch and branch:
-        try:
-            git.delete_branch(wt.repo, branch)
-            branch_deleted = True
-        except git.GitError as exc:
-            branch_error = str(exc)
     return CleanupResult(
         resources,
         removal,

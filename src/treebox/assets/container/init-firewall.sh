@@ -7,8 +7,9 @@ IFS=$'\n\t'
 READY_FLAG=/run/treebox-firewall-ready
 
 # The runner execs this BOTH at setup (so default-deny egress exists before any
-# workspace-derived code runs in post-create.sh) and on every container restart
-# (rules don't survive a restart). When this boot already locked down
+# workspace-derived code runs in post-create.sh) and on every treebox entry
+# (rules don't survive a restart, and `docker restart` outside treebox leaves a
+# running container with open egress). When this boot already locked down
 # successfully, skip the rebuild rather than tearing live rules down
 # mid-session. Requires the flag AND the live policy: policy DROP alone also
 # matches the fail_closed end state, and the flag alone could be stale if /run
@@ -52,9 +53,17 @@ echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null
 
 DOMAINS_FILE=/usr/local/share/allowed-domains.sh
 [[ -f "$DOMAINS_FILE" ]] || { echo "ERROR: $DOMAINS_FILE missing"; exit 1; }
+# An allowlist written before host ports existed opens none.
+ALLOWED_HOST_PORTS=()
 # shellcheck source=src/treebox/assets/container/allowed-domains.sh
 source "$DOMAINS_FILE"
 [[ ${#ALLOWED_DOMAINS[@]} -gt 0 ]] || { echo "ERROR: ALLOWED_DOMAINS is empty"; exit 1; }
+for port in ${ALLOWED_HOST_PORTS[@]+"${ALLOWED_HOST_PORTS[@]}"}; do
+  if ! [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
+    echo "ERROR: Invalid host port in ALLOWED_HOST_PORTS: $port"
+    exit 1
+  fi
+done
 
 # Default-deny before any rules are rebuilt: flushing alone would leave the
 # inherited ACCEPT policies in place, so an abort mid-setup would fail open.
@@ -122,9 +131,16 @@ for domain in "${ALLOWED_DOMAINS[@]}"; do
   done < <(echo "$ips")
 done
 
-HOST_IP=$(ip route | awk '/default/ {print $3; exit}')
-[[ -n "$HOST_IP" ]] || { echo "ERROR: Failed to detect host IP"; exit 1; }
-iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT
+# The Docker host (the default gateway) is NOT a blanket exception: every
+# service it binds on 0.0.0.0 would be reachable. Only the TCP ports the
+# operator lists in the template's ALLOWED_HOST_PORTS are opened there.
+if [[ ${#ALLOWED_HOST_PORTS[@]} -gt 0 ]]; then
+  HOST_IP=$(ip route | awk '/default/ {print $3; exit}')
+  [[ -n "$HOST_IP" ]] || { echo "ERROR: Failed to detect host IP"; exit 1; }
+  for port in ${ALLOWED_HOST_PORTS[@]+"${ALLOWED_HOST_PORTS[@]}"}; do
+    iptables -A OUTPUT -d "$HOST_IP" -p tcp --dport "$port" -j ACCEPT
+  done
+fi
 
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
