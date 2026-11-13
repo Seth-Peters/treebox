@@ -13,7 +13,8 @@ echo "== mypy =="
 uv run --extra dev mypy
 
 echo "== shell assets =="
-shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/pre-push scripts/*.sh
+shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/container/treebox-fetch
+  src/treebox/assets/container/treebox-online src/treebox/assets/pre-push scripts/*.sh
   .claude/skills/treebox-e2e/fixture.sh tests/e2e/stub-agent tests/e2e/fakes/*
   tests/e2e/offline-template/init-firewall.sh tests/e2e/offline-template/allowed-domains.sh)
 for f in "${shell_files[@]}"; do bash -n "$f"; done
@@ -44,6 +45,9 @@ git clone -q "$SBX/origin.git" "$SBX/repo" 2>/dev/null  # silence the empty-repo
 )
 
 unset TREEBOX_CONFIG
+# create writes the machine-wide port-block ledger to the treebox home: keep it
+# in the sandbox, never in the real ~/.treebox.
+export TREEBOX_HOME="$SBX/treebox-home"
 out="$(uv run treebox create feature-smoke --repo "$SBX/repo" --root "$SBX/wts" --isolation host --print)"
 wt="$SBX/wts/feature-smoke"
 [[ -d "$wt/.venv" ]]                         || { echo "FAIL: no .venv"; exit 1; }
@@ -62,8 +66,10 @@ rc=0; git -C "$wt" -c push.negotiate=false push -q origin treebox/scratch 2>"$SB
 [[ $rc -ne 0 ]]                              || { echo "FAIL: treebox/* push was allowed"; exit 1; }
 grep -q "placeholder branch" "$SBX/push.err" || { echo "FAIL: guard message missing"; cat "$SBX/push.err"; exit 1; }
 git -C "$wt" -c push.negotiate=false push -q origin feature-smoke    || { echo "FAIL: named branch could not push"; exit 1; }
-# Re-creating an existing branch is a BRANCH_EXISTS conflict (exit 5).
-rc=0; uv run treebox create feature-smoke --repo "$SBX/repo" --root "$SBX/wts2" 2>/dev/null || rc=$?
+# Re-creating an existing branch is a BRANCH_EXISTS conflict (exit 5). --json:
+# never a launch (a launch checks the agent first: HARNESS_MISSING on a host
+# without one).
+rc=0; uv run treebox create feature-smoke --repo "$SBX/repo" --root "$SBX/wts2" --json 2>/dev/null || rc=$?
 [[ $rc -eq 5 ]]                              || { echo "FAIL: existing branch != exit 5 (got $rc)"; exit 1; }
 # Renames stay legal and tracked: teardown (below) resolves the NAME after one.
 git -C "$wt" branch -m smoke-named

@@ -1,5 +1,6 @@
 """A resolved worktree path must remain the identity through every operation."""
 
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from treebox import locking, state
+from treebox import lifecycle, locking, record
 from treebox.cli import app
 
 
@@ -38,7 +39,7 @@ def nested_worktrees(repo: Path, root: str, hermetic_config) -> tuple[Path, Path
 def test_enter_nested_root_keeps_resolved_path(repo: Path, root: str, nested_worktrees):
     direct, nested = nested_worktrees
     (repo / ".env").write_text("SECRET=rotated\n")
-    before = state.load(direct)
+    before = record.load(direct)
     result = _run(["enter", "nested-branch", "--repo", str(repo), "--root", root, "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
@@ -47,7 +48,7 @@ def test_enter_nested_root_keeps_resolved_path(repo: Path, root: str, nested_wor
     assert str(nested) in payload["entry_command"][-1]
     assert (nested / ".env").read_text() == "SECRET=rotated\n"
     assert (direct / ".env").read_text() == "SECRET=canonical\n"
-    assert state.load(direct) == before
+    assert record.load(direct) == before
 
 
 def test_teardown_nested_root_keeps_resolved_path(repo: Path, root: str, nested_worktrees):
@@ -168,18 +169,20 @@ def test_nested_runner_and_state_use_selected_path(
     from treebox.runners.host import HostRunner
 
     direct, nested = nested_worktrees
-    selected = state.load(nested)
-    assert selected is not None
-    selected.harness = "codex"
-    selected.lockfile_hash = "stale"
-    state.save(nested, selected)
-    before = state.load(direct)
+    record.save(
+        dataclasses.replace(
+            record.load(nested), harness="codex", setup=lifecycle.SetupResult.done("stale")
+        )
+    )
+    before_record = record.load(direct)
     result = _run(["enter", "nested-branch", "--repo", str(repo), "--root", root, "--json"])
     assert result.exit_code == 0, result.output
     assert "codex" in json.loads(result.stdout)["entry_command"][-1]
-    after = state.load(nested)
-    assert after is not None and after.harness == "codex" and after.lockfile_hash != "stale"
-    assert state.load(direct) == before
+    after = record.load(nested)
+    assert after.setup.status == "done" and after.setup.lockfile_hash != "stale"
+    assert after.harness == "codex"
+    assert record.load(direct) == before_record
+    assert record.record_path(direct) != record.record_path(nested)
     actual_teardown = HostRunner.teardown
     observed = []
 

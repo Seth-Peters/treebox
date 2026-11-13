@@ -1,5 +1,6 @@
 """Exercise entry credential refresh with sandbox-controlled destinations."""
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from treebox import state
+from treebox import record
 from treebox.cli import app
 from treebox.config import Config
 from treebox.harnesses import Harness
@@ -49,7 +50,7 @@ def _fixture(tmp_path: Path):
     (live / "auth.json").write_text("synthetic token")
     dest = tmp_path / "host-owned" / "mounted"
     dest.mkdir(parents=True)
-    return Harness("test", ("test",), str(live), ("auth.json",)), live, dest
+    return Harness("test", ("test",), str(live), ("auth.json",), "auth.json"), live, dest
 
 
 @pytest.mark.parametrize("logged_in", [True, False])
@@ -131,10 +132,7 @@ def test_enter_refresh_uses_safe_credentials_and_classified_errors(
     created = cli.invoke(app, ["create", *args], catch_exceptions=False)
     assert created.exit_code == 0, created.output
     wt_path = root / "safe-auth"
-    recorded = state.load(wt_path)
-    assert recorded is not None
-    recorded.isolation = "docker"
-    state.save(wt_path, recorded)
+    record.save(dataclasses.replace(record.load(wt_path), isolation="docker"))
     # Only the engine is simulated. Entry, state, Git, and credential I/O are real.
     monkeypatch.setattr(DockerRunner, "preflight", lambda self, reporter: None)
     monkeypatch.setattr(DockerRunner, "prepare_entry", lambda self, wt: None)

@@ -7,7 +7,9 @@ shells out to git directly. Functions raise ``GitError`` on failure.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,11 +176,60 @@ def last_commit(worktree: str | Path) -> LastCommit:
         return LastCommit("", 0)
 
 
+# git takes the lock on a config file without waiting: a second writer fails at
+# once with this message instead of queueing (refs have a lock timeout; config
+# has none). Matched under LC_ALL=C so a translated git cannot hide it.
+_CONFIG_LOCK_MARK = "could not lock config file"
+# A config write holds its lock for microseconds, so a short retry outlasts any
+# live writer (an agent's `git push -u` or `git branch -m` in another worktree);
+# only a lock file a crashed git left behind survives all the attempts.
+_CONFIG_LOCK_ATTEMPTS = 6
+_CONFIG_LOCK_BACKOFF = 0.1
+
+
+def _c_locale() -> dict[str, str]:
+    return {**os.environ, "LC_ALL": "C", "LANGUAGE": "C"}
+
+
+def _config_lock_busy(exc: GitError) -> bool:
+    return _CONFIG_LOCK_MARK in str(exc)
+
+
+def _stale_config_lock(exc: GitError) -> GitError:
+    return GitError(
+        f"{exc}\nThe shared git config stayed locked across {_CONFIG_LOCK_ATTEMPTS} "
+        "attempts. If no git command is running in this repository, a crashed git "
+        "left a `config.lock` file in the git dir - remove it and retry."
+    )
+
+
 def enable_worktree_config(worktree: str | Path) -> None:
     """Turn on ``extensions.worktreeConfig`` so per-worktree config (and thus a
-    per-worktree ``core.hooksPath``) exists at all. Writes the shared config;
-    idempotent."""
-    _run(["-C", str(worktree), "config", "extensions.worktreeConfig", "true"])
+    per-worktree ``core.hooksPath``) exists at all.
+
+    This is a write to the *shared* config, so it happens once per repository,
+    not once per worktree: when the extension is already on there is nothing to
+    write and no lock to contend for. Callers hold ``locking.repo_lock``; the
+    retry covers writers treebox does not control.
+    """
+    probe = _spawn(
+        _git(["-C", str(worktree), "config", "--type=bool", "--get", "extensions.worktreeConfig"]),
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return
+    args = ["-C", str(worktree), "config", "extensions.worktreeConfig", "true"]
+    for attempt in range(1, _CONFIG_LOCK_ATTEMPTS + 1):
+        try:
+            _run(args, env=_c_locale())
+            return
+        except GitError as exc:
+            if not _config_lock_busy(exc):
+                raise
+            if attempt == _CONFIG_LOCK_ATTEMPTS:
+                raise _stale_config_lock(exc) from exc
+            time.sleep(_CONFIG_LOCK_BACKOFF * attempt)
 
 
 def set_worktree_hooks_path(worktree: str | Path, hooks_dir: str | Path) -> None:
@@ -319,10 +370,16 @@ def _batch_env() -> dict[str, str]:
 
     The single definition of 'non-interactive' shared by the fetch cascade and
     doctor's reachability probe — they must agree on what never-prompts means.
+    Forced, never defaulted: an exported ``GIT_TERMINAL_PROMPT=1`` or a custom
+    ``GIT_SSH_COMMAND`` must not turn a silent attempt into a prompt on the
+    terminal (git and ssh ask on ``/dev/tty``, so even a closed stdin would
+    not stop them). Git Credential Manager is told not to open its dialogs.
     """
     env = dict(os.environ)
-    env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    env.setdefault("GIT_SSH_COMMAND", env.get("GIT_SSH_COMMAND") or "ssh -o BatchMode=yes")
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    ssh = env.get("GIT_SSH_COMMAND") or "ssh"
+    env["GIT_SSH_COMMAND"] = f"{ssh} -o BatchMode=yes"
     return env
 
 
@@ -380,6 +437,7 @@ def _silent_fetch(repo: str | Path, attempt: _SilentAttempt) -> tuple[int, str]:
             ]
         ),
         env=_batch_env(),
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -387,15 +445,23 @@ def _silent_fetch(repo: str | Path, attempt: _SilentAttempt) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "").strip()
 
 
-def _fetch_prompt(repo: str | Path) -> int:
+def _fetch_prompt(repo: str | Path) -> tuple[int, str]:
     """Terminal-attached ``git fetch origin`` so ssh/git can prompt.
 
-    Inherits stdio so an SSH key passphrase or HTTPS credential prompt reaches
-    the user, then continues — exactly like a manual ``git pull``.
+    git and ssh ask for an SSH key passphrase or HTTPS credentials on the
+    terminal itself (``/dev/tty``), then continue - exactly like a manual
+    ``git pull``. Its output is captured, like the silent attempts', so a
+    failure reaches the caller as the error detail and never as raw text on
+    stderr (where ``--json`` keeps exactly one error object).
     """
-    return _spawn(
-        _git(["-C", str(repo), "fetch", "origin", "--quiet"]), env=dict(os.environ)
-    ).returncode
+    proc = _spawn(
+        _git(["-C", str(repo), "fetch", "origin", "--quiet"]),
+        env=dict(os.environ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc.returncode, (proc.stdout or "").strip()
 
 
 def fetch_origin(repo: str | Path, *, required: bool, interactive: bool = False) -> bool:
@@ -424,8 +490,11 @@ def fetch_origin(repo: str | Path, *, required: bool, interactive: bool = False)
             return True
         detail = out or detail
 
-    if interactive and _fetch_prompt(repo) == 0:
-        return True
+    if interactive:
+        code, out = _fetch_prompt(repo)
+        if code == 0:
+            return True
+        detail = out or detail
 
     if required:
         detail = detail.strip().rstrip(".")
@@ -458,6 +527,7 @@ def origin_reachable(repo: str | Path) -> bool | None:
                 ]
             ),
             env=_batch_env(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -605,13 +675,67 @@ def files_at_revision(
 
 
 def worktree_add(repo: str | Path, worktree: str | Path, plan: BranchPlan) -> None:
+    """Add the worktree for ``plan`` - all or nothing.
+
+    ``git worktree add -b`` is not atomic: it creates the branch, then writes
+    the branch's upstream section to the shared ``.git/config``, then builds
+    the worktree. If the config write loses git's try-once lock, git exits
+    non-zero having already created the branch - an orphan with no worktree
+    that makes a retried ``create`` fail with BRANCH_EXISTS. So a failed add
+    takes back the branch it created, and a busy config lock is retried.
+    """
     args = ["-C", str(repo), "worktree", "add"]
     # "--" so a flag-shaped path/ref is always parsed as an operand.
     if plan.kind == "local":
         args += ["--", str(worktree), plan.name]
+        created_at = None
     else:
         args += ["-b", plan.name, "--", str(worktree), plan.start_point or ""]
-    _run(args)
+        created_at = _commit_oid(repo, plan.start_point or "")
+    for attempt in range(1, _CONFIG_LOCK_ATTEMPTS + 1):
+        # Only a branch that was absent right before this attempt can be one
+        # the attempt created; anything already there is someone else's.
+        ours = created_at is not None and not local_branch_exists(repo, plan.name)
+        try:
+            _run(args, env=_c_locale())
+            return
+        except GitError as exc:
+            if ours:
+                _discard_branch_of_failed_add(repo, plan.name, worktree, created_at)
+            if not _config_lock_busy(exc):
+                raise
+            if attempt == _CONFIG_LOCK_ATTEMPTS:
+                raise _stale_config_lock(exc) from exc
+            time.sleep(_CONFIG_LOCK_BACKOFF * attempt)
+
+
+def _commit_oid(repo: str | Path, ref: str) -> str | None:
+    # --end-of-options: ``ref`` comes from the caller and may be flag-shaped.
+    args = ["-C", str(repo), "rev-parse", "--verify", "--quiet", "--end-of-options"]
+    try:
+        return _run([*args, f"{ref}^{{commit}}"]).strip() or None
+    except GitError:
+        return None
+
+
+def _discard_branch_of_failed_add(
+    repo: str | Path, branch: str, worktree: str | Path, created_at: str | None
+) -> None:
+    """Delete the branch a failed ``worktree add -b`` left behind.
+
+    Only the exact ref this call created: the worktree must not be registered
+    (nothing has the branch checked out) and the ref must still sit on the
+    commit it was created at - ``update-ref -d <ref> <old>`` refuses otherwise,
+    so a branch that already existed, or one that moved, is never touched.
+    Deliberately not ``branch -D``, which rewrites the config that just failed.
+    """
+    if created_at is None or worktree_registered(repo, str(worktree)):
+        return
+    _spawn(
+        _git(["-C", str(repo), "update-ref", "-d", f"refs/heads/{branch}", created_at]),
+        capture_output=True,
+        text=True,
+    )
 
 
 def worktree_prune(repo: str | Path) -> None:
@@ -673,6 +797,7 @@ class WorktreeRecord:
     path: str
     branch: str | None
     prunable: bool = False  # git's own signal that the working dir is gone
+    locked: bool = False  # `git worktree lock`: git refuses to remove or prune it
 
 
 def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
@@ -681,11 +806,13 @@ def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
     path: str | None = None
     branch: str | None = None
     prunable = False
+    locked = False
     for line in [*out.splitlines(), ""]:
         if line.startswith("worktree "):
             path = line[len("worktree ") :]
             branch = None
             prunable = False
+            locked = False
         elif line.startswith("branch "):
             ref = line[len("branch ") :]
             branch = ref.removeprefix("refs/heads/")
@@ -693,11 +820,14 @@ def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
             # A registration whose working dir was removed out from under git
             # (e.g. a manual rm, or a stale nested tree from an old create bug).
             prunable = True
+        elif line == "locked" or line.startswith("locked "):
+            locked = True
         elif line == "" and path is not None:
-            records.append(WorktreeRecord(path, branch, prunable))
+            records.append(WorktreeRecord(path, branch, prunable, locked))
             path = None
             branch = None
             prunable = False
+            locked = False
     return records
 
 
@@ -709,23 +839,41 @@ def branch_for_path(repo: str | Path, path: str) -> str | None:
 
 
 def has_gitmodules(repo: str | Path) -> bool:
-    return (Path(repo) / ".gitmodules").is_file()
+    """Whether ``repo`` has a regular ``.gitmodules`` file. A symlink or a
+    directory at that name is not one: neither is ever read."""
+    try:
+        return stat.S_ISREG((Path(repo) / ".gitmodules").lstat().st_mode)
+    except OSError:
+        return False
 
 
 def submodule_paths(repo: str | Path) -> list[str]:
-    """Relative paths of configured submodules, from .gitmodules."""
+    """Relative paths of configured submodules, from the ``.gitmodules`` in
+    the working tree at ``repo`` (empty when there is no such regular file)."""
+    if not has_gitmodules(repo):
+        return []
+    return _submodule_paths_from(repo, ["-f", ".gitmodules"])
+
+
+def submodule_paths_at_revision(repo: str | Path, revision: str) -> list[str]:
+    """Relative paths of configured submodules in the ``.gitmodules`` that
+    ``revision`` tracks, without checkout: what ``submodule_paths`` reads in
+    a worktree that ``worktree add`` checks out at ``revision``.
+
+    As in ``has_gitmodules``, only a regular file counts: a symlink (mode
+    120000) or a directory at that name declares nothing.
+    """
+    out = _run(["-C", str(repo), "ls-tree", revision, "--", ".gitmodules"])
+    if not any(entry.split(" ", 1)[0] in {"100644", "100755"} for entry in out.splitlines()):
+        return []
+    return _submodule_paths_from(repo, ["--blob", f"{revision}:.gitmodules"])
+
+
+def _submodule_paths_from(repo: str | Path, source: list[str]) -> list[str]:
+    """The ``submodule.*.path`` values of one ``.gitmodules`` (a ``-f`` file
+    or a ``--blob``); empty when git cannot parse it."""
     try:
-        out = _run(
-            [
-                "-C",
-                str(repo),
-                "config",
-                "-f",
-                ".gitmodules",
-                "--get-regexp",
-                r"^submodule\..*\.path$",
-            ]
-        )
+        out = _run(["-C", str(repo), "config", *source, "--get-regexp", r"^submodule\..*\.path$"])
     except GitError:
         return []
     paths = []

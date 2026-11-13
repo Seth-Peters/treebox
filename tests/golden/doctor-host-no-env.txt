@@ -7,8 +7,9 @@
     ✓ git               __GITVER__
     ✓ repo              __ROOT__/repo-no-env
     ✓ uid/gid           __UID__:__GID__
-    ✓ login: claude     __ROOT__/home/.claude
-    ✓ login: codex      __ROOT__/home/.codex
+    ✓ agent: claude     __ROOT__/shim/claude
+    ✓ login: claude     __ROOT__/home/.claude/.credentials.json
+    ✓ login: codex      __ROOT__/home/.codex/auth.json
     · .env              __ROOT__/repo-no-env/.env · optional
     ✓ git auth          no remote (local-only; freshness N/A)
     ✓ isolation: host   no container dependencies

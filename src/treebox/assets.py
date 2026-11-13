@@ -16,6 +16,10 @@ one per run with ``--template``. Resolution order for ``name``:
 A named template that resolves to none of these is an error, not a silent
 fallback to the default: asking for ``--template hardened`` and quietly getting
 the stock box would defeat the point.
+
+A name is an identifier, never a path (``models.is_valid_template_name``): an
+absolute path or a ``..`` segment would let the name escape the operator-owned
+locations above, so ``template_dir`` refuses it with ``TemplateNameError``.
 """
 
 from __future__ import annotations
@@ -30,9 +34,22 @@ from pathlib import Path
 from typing import Any
 
 from .config import treebox_home
-from .models import expand_user
+from .models import expand_user, is_valid_template_name
 
 DEFAULT_TEMPLATE = "default"
+
+
+class TemplateNameError(ValueError):
+    """A template name that is not an identifier (a path, ``..``, or a
+    character outside ``models.TEMPLATE_NAME_RE``). Typed so the CLI
+    classifies it as a usage error on every path."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"Invalid template name '{name}'. A template name is one identifier "
+            "(letters, digits, '.', '_', '-'), never a path."
+        )
+        self.name = name
 
 
 class TemplateNotFoundError(RuntimeError):
@@ -68,11 +85,10 @@ DEFAULT_TEMPLATE_HIGHLIGHTS = (
     "Python 3.14 + uv",
     "Node.js 22 + npm",
     "Claude Code & Codex agent CLIs",
-    "Playwright CLI + Chromium browser",
+    "Playwright CLI + Chromium (headless shell)",
     "GitHub CLI (gh)",
-    "AWS CLI",
-    "git with delta diffs",
-    "ripgrep, fd, fzf, jq, yq",
+    "git, gcc, g++, make",
+    "ripgrep, fd, jq, yq",
     "Egress firewall (iptables/ipset)",
 )
 
@@ -87,6 +103,11 @@ TEMPLATE_FILES = (
     "init-firewall.sh",
     "allowed-domains.sh",
 )
+# Build helpers the bundled Dockerfile COPYs. The docker runner renders them
+# into the build context when the template has them. They are not required: a
+# template whose Dockerfile does not use them (one scaffolded before they
+# existed, or written from scratch) stays valid.
+TEMPLATE_HELPER_FILES = ("treebox-fetch", "treebox-online")
 FIREWALL_FILE = "firewall.json"
 
 # ``resources.as_file`` may materialize the bundled template to a temporary
@@ -106,6 +127,13 @@ def _bundled_template_dir() -> Path:
     return Path(p)
 
 
+# A reserved directory under ``user_templates_root()`` where ``template init``
+# builds a new template and parks the old one during a ``--force`` swap. It is
+# not a template: ``available_templates`` skips it and ``template init`` refuses
+# the name, so a leftover from an interrupted run never shows up as one.
+STAGING_DIR = ".treebox-tmp"
+
+
 def user_templates_root() -> Path:
     """Where named, user-authored templates live: ``$TREEBOX_HOME/templates``
     (default ``~/.treebox/templates``). ``treebox template init`` scaffolds
@@ -118,6 +146,8 @@ def template_dir(name: str = DEFAULT_TEMPLATE) -> Path:
 
     Never reads from the target repo — see the module docstring for why.
     """
+    if not is_valid_template_name(name):
+        raise TemplateNameError(name)
     explicit = os.environ.get("TREEBOX_TEMPLATE_DIR")
     if explicit:
         return expand_user(explicit)
@@ -206,12 +236,20 @@ def invalid_template_json_files(path: Path) -> list[str]:
 
 
 def available_templates() -> list[str]:
-    """Sorted names of selectable templates: the built-in ``default`` plus
-    every directory under ``user_templates_root()``. ``$TREEBOX_TEMPLATE_DIR``
-    is a single explicit dir that overrides *any* name rather than a named
-    collection, so it does not enumerate here — callers surface it separately."""
+    """Sorted template names for ``template list`` and ``template init --from``.
+
+    ``$TREEBOX_TEMPLATE_DIR`` is a single explicit dir that overrides *any*
+    name rather than a named collection, so it does not enumerate here.
+    Callers show it separately.
+    """
     names = {DEFAULT_TEMPLATE}
     root = user_templates_root()
     if root.is_dir():
-        names.update(p.name for p in root.iterdir() if p.is_dir())
+        # Only identifiers are selectable, so only they are listed. The
+        # reserved staging directory is not a template.
+        names.update(
+            p.name
+            for p in root.iterdir()
+            if p.is_dir() and is_valid_template_name(p.name) and p.name != STAGING_DIR
+        )
     return sorted(names)

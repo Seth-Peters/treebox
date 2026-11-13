@@ -12,7 +12,10 @@ porcelain discipline, removing/renaming a ``--json`` field means bumping
 
 from __future__ import annotations
 
+import ast
+import dataclasses
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,7 +23,7 @@ import pytest
 import typer.main
 from typer.testing import CliRunner
 
-from treebox import locking, state
+from treebox import locking, record
 from treebox.cli import (
     EXIT_CONFLICT,
     EXIT_ERROR,
@@ -77,10 +80,11 @@ _TEARDOWN_OPTS = (
     _COMMON_LIST
     | _VERBOSITY
     | {
-        "--isolation",
         "--delete-branch",
         "--remove-volumes",
         "--force",
+        "--yes",
+        "-y",
         "--skip-container",
     }
 )
@@ -100,21 +104,25 @@ EXPECTED_SURFACE: dict[str, tuple[set[str], list[str]]] = {
             "--firewall",
             "--no-firewall",
             "--template",
+            "--cpus",
+            "--memory",
+            "--pids-limit",
             "--dry-run",
             "-n",
             "--print",
         },
-        ["name"],
+        ["name", "args"],
     ),
     "enter": (
         _COMMON_LIST
         | _VERBOSITY
-        | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"},
+        | {"--isolation", "--harness", "-H", "--template", "--cold", "--print"}
+        | {"--cpus", "--memory", "--pids-limit"},
         ["ref", "args"],
     ),
     "list": (_COMMON_LIST, []),
     "teardown": (_TEARDOWN_OPTS, ["refs"]),
-    "doctor": ({"--repo", "--isolation", "--json"}, []),
+    "doctor": ({"--repo", "--isolation", "--harness", "-H", "--json"}, []),
     # `template` is a sub-app (group), so its own param surface is empty; its
     # subcommands are pinned in test_template_subcommand_surface_is_pinned.
     "template": (set(), []),
@@ -191,14 +199,31 @@ CREATE_KEYS = {
     "schemaVersion",
     "name",
     "worktree_path",
+    "id",
+    "port_base",
+    "port_count",
     "branch",
     "base",
     "entry_command",
     "created",
+    "resources",
+    "warnings",
 }
-DRY_RUN_KEYS = {"schemaVersion", "dry_run", "name", "worktree_path", "branch", "commands"}
+# enter also says which limits config or template now give differently.
+ENTER_KEYS = CREATE_KEYS | {"resources_drift"}
+DRY_RUN_KEYS = {
+    "schemaVersion",
+    "dry_run",
+    "name",
+    "worktree_path",
+    "branch",
+    "commands",
+    "resources",
+    "warnings",
+}
 LIST_ROW_KEYS = {
     "name",
+    "id",
     "branch",
     "unnamed",
     "missing",
@@ -208,8 +233,13 @@ LIST_ROW_KEYS = {
     "base",
     "isolation",
     "harness",
+    "resources",
     "deps",
     "env",
+    "health",
+    "setup",
+    "port_base",
+    "port_count",
 }
 TEARDOWN_RECORD_KEYS = {
     "name",
@@ -219,6 +249,8 @@ TEARDOWN_RECORD_KEYS = {
     "branch_deleted",
     "container",
     "volumes_removed",
+    "complete",
+    "remaining",
 }
 CONTAINER_VALUES = {"cleaned", "skipped", "failed"}
 DOCTOR_KEYS = {"schemaVersion", "ok", "isolation", "checks", "advisories"}
@@ -239,12 +271,13 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
         _run(["create", "shape", "--repo", str(repo), "--root", root, "--json"]).stdout
     )
     assert set(created) == CREATE_KEYS
+    assert created["warnings"] == []  # additive: empty when nothing was skipped
     assert isinstance(created["entry_command"], list)
     assert created["created"] is True
     entered = json.loads(
         _run(["enter", "shape", "--repo", str(repo), "--root", root, "--json"]).stdout
     )
-    assert set(entered) == CREATE_KEYS
+    assert set(entered) == ENTER_KEYS
     assert entered["created"] is False
 
     # list
@@ -259,7 +292,7 @@ def test_json_payload_shapes_are_pinned(repo: Path, root: str, hermetic_config):
     torn = json.loads(
         _run(["teardown", "shape", "--repo", str(repo), "--root", root, "--force", "--json"]).stdout
     )
-    assert set(torn) == {"schemaVersion", "worktrees"}
+    assert set(torn) == {"schemaVersion", "worktrees", "warnings"}
     (record,) = torn["worktrees"]
     assert set(record) == TEARDOWN_RECORD_KEYS
     assert record["container"] in CONTAINER_VALUES
@@ -297,7 +330,12 @@ def test_json_error_shape_is_pinned(repo: Path, root: str, hermetic_config):
 
 
 def test_exit_and_error_code_matrix(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    repo: Path,
+    root: str,
+    hermetic_config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    non_root_identity,
 ):
     """One table for the whole scripting contract: scenario → (exit, error.code).
     Every case runs in --json mode so the code agents branch on is asserted too."""
@@ -311,10 +349,13 @@ def test_exit_and_error_code_matrix(
     assert _run(["create", "fix-auth", *r, "--print"]).exit_code == 0
     assert _run(["create", "fix-authz", *r, "--print"]).exit_code == 0
     (Path(root) / "fix-auth" / "dirty.txt").write_text("x")
-    st = state.load(Path(root) / "fix-authz")
-    assert st is not None
-    st.isolation = "bogus"
-    state.save(Path(root) / "fix-authz", st)
+    authz = Path(root) / "fix-authz"
+    record.save(dataclasses.replace(record.load(authz), isolation="bogus"))
+    assert _run(["create", "norecord", *r, "--print"]).exit_code == 0
+    record.remove(Path(root) / "norecord")  # e.g. made by another treebox version
+    assert _run(["create", "moved", *r, "--print"]).exit_code == 0
+    moved = record.record_path(Path(root) / "moved")
+    moved.write_text(moved.read_text().replace(str(Path(root) / "moved"), "/elsewhere/moved"))
     subprocess.run(["git", "-C", str(repo), "branch", "spare"], check=True)
 
     matrix: list[tuple[list[str], int, str]] = [
@@ -332,13 +373,17 @@ def test_exit_and_error_code_matrix(
         (["teardown", "fix-auth", *r, "--json"], EXIT_CONFLICT, "DIRTY_WORKTREE"),
         (["teardown", "taken", *r, "--json"], EXIT_CONFLICT, "NEEDS_CONFIRMATION"),
         (["teardown", *r, "--json"], EXIT_CONFLICT, "NEEDS_CONFIRMATION"),
-        (["enter", "fix-authz", *r, "--json"], EXIT_CONFLICT, "UNKNOWN_ISOLATION"),
+        (["enter", "fix-authz", *r, "--json"], EXIT_CONFLICT, "RECORD_INVALID"),
         (
             ["enter", "taken", "--isolation", "docker", *r, "--json"],
             EXIT_CONFLICT,
             "ISOLATION_MISMATCH",
         ),
         (["create", "--isolation", "nope", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
+        (["create", "--template", "/etc", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
+        (["enter", "--template", "../x", "taken", *r, "--json"], EXIT_USAGE, "INVALID_CONFIG"),
+        (["enter", "norecord", *r, "--json"], EXIT_CONFLICT, "RECORD_MISSING"),
+        (["enter", "moved", *r, "--json"], EXIT_CONFLICT, "RECORD_INVALID"),
     ]
     for args, want_exit, want_code in matrix:
         res = _run(args)
@@ -388,3 +433,129 @@ def test_exit_and_error_code_matrix(
     assert res.exit_code == EXIT_ERROR
     err = json.loads(res.stderr)["error"]
     assert err["code"] == "MISSING_DEPENDENCY" and "hint" in err
+
+
+def test_app_level_non_interactive_option():
+    """The global unattended switch: an option on the app (before the
+    command) with an environment-variable twin, both documented contract."""
+    group = typer.main.get_command(app)
+    param = next(p for p in group.params if "--non-interactive" in p.opts)
+    assert param.envvar == "TREEBOX_NON_INTERACTIVE"
+    assert _run(["--non-interactive", "version"]).exit_code == 0
+
+
+# --- the error.code table in docs/usage.md --------------------------------------
+
+_REPO = Path(__file__).resolve().parents[1]
+_SRC = _REPO / "src" / "treebox"
+_USAGE_DOC = _REPO / "docs" / "usage.md"
+_TABLE_HEADER = "| `error.code` | Exit | Common trigger |"
+_TABLE_ROW = re.compile(r"^\| `([A-Z][A-Z0-9_]*)` \|")
+
+
+def _codes_in(source: str) -> tuple[set[str], list[str]]:
+    """The error codes one module can put into ``error.code``, from its syntax tree.
+
+    A code reaches an error through three forms only: an ``error_code=``
+    keyword (``_die``, ``PreflightError``), the second argument of
+    ``_ErrorInfo`` (what ``_classify`` returns), and the default of an
+    ``error_code`` parameter. In those places a value that is not a string
+    literal must pass on a code that is already collected (``error_code`` or
+    ``exc.error_code``). Any other value is returned as unresolved, so a new
+    way to build a code cannot hide from the drift test."""
+    codes: set[str] = set()
+    unresolved: list[str] = []
+
+    def take(node: ast.expr | None) -> None:
+        if node is None:
+            return
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            codes.add(node.value)
+        elif not (
+            (isinstance(node, ast.Name) and node.id == "error_code")
+            or (isinstance(node, ast.Attribute) and node.attr == "error_code")
+        ):
+            unresolved.append(f"line {node.lineno}: {ast.unparse(node)}")
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "error_code":
+                    take(kw.value)
+            is_info = isinstance(node.func, ast.Name) and node.func.id == "_ErrorInfo"
+            if is_info and len(node.args) >= 2:
+                take(node.args[1])
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            a = node.args
+            positional = [*a.posonlyargs, *a.args]
+            defaults: list[ast.expr | None] = [None] * (len(positional) - len(a.defaults))
+            for arg, default in [
+                *zip(positional, [*defaults, *a.defaults], strict=True),
+                *zip(a.kwonlyargs, a.kw_defaults, strict=True),
+            ]:
+                if arg.arg == "error_code":
+                    take(default)
+    return codes, unresolved
+
+
+def _emitted_error_codes() -> set[str]:
+    codes: set[str] = set()
+    unresolved: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        found, loose = _codes_in(path.read_text(encoding="utf-8"))
+        codes |= found
+        unresolved += [f"{path.relative_to(_REPO)} {where}" for where in loose]
+    assert not unresolved, (
+        "error codes this test cannot read; pass a string literal "
+        f"as error_code (or pass one on unchanged): {unresolved}"
+    )
+    return codes
+
+
+def _documented_error_codes() -> list[str]:
+    lines = _USAGE_DOC.read_text(encoding="utf-8").splitlines()
+    assert lines.count(_TABLE_HEADER) == 1, f"one error.code table expected in {_USAGE_DOC}"
+    rows = lines[lines.index(_TABLE_HEADER) + 2 :]
+    codes: list[str] = []
+    for line in rows:
+        if not line.startswith("|"):
+            break
+        match = _TABLE_ROW.match(line)
+        assert match, f"unreadable error.code table row: {line}"
+        codes.append(match.group(1))
+    return codes
+
+
+def test_codes_in_reads_every_emit_form():
+    """The collector sees each way a code is written today, and flags any other."""
+    source = """
+def _die(reporter, message, *, code=1, error_code="ERROR"): ...
+class PreflightError(RuntimeError):
+    def __init__(self, message, *, error_code="MISSING_DEPENDENCY"): ...
+def f(exc, error_code):
+    _die(r, "m", error_code="NOT_FOUND")
+    PreflightError("m", error_code="DOCKER_UNAVAILABLE")
+    _ErrorInfo(EXIT_ERROR, "LOCK_HELD", None)
+    _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    _die(r, "m", error_code=error_code)
+    _die(r, "m", error_code=PICKED)
+"""
+    codes, unresolved = _codes_in(source)
+    assert codes == {"ERROR", "MISSING_DEPENDENCY", "NOT_FOUND", "DOCKER_UNAVAILABLE", "LOCK_HELD"}
+    assert unresolved == ["line 11: PICKED"]
+
+
+def test_error_code_table_matches_emitted_codes():
+    """docs/usage.md lists every error.code the CLI can emit, and no other.
+
+    A new code needs one new table row; a removed code needs its row removed."""
+    documented = _documented_error_codes()
+    duplicates = sorted({c for c in documented if documented.count(c) > 1})
+    assert not duplicates, f"error.code table rows that repeat: {duplicates}"
+    emitted = _emitted_error_codes()
+    undocumented = sorted(emitted - set(documented))
+    assert not undocumented, (
+        f"emitted but missing from the error.code table in docs/usage.md: {undocumented}"
+    )
+    stale = sorted(set(documented) - emitted)
+    assert not stale, f"in the error.code table in docs/usage.md but never emitted: {stale}"

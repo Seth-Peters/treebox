@@ -10,14 +10,17 @@ for enter/teardown.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from treebox import state
+from treebox import lifecycle, record
 from treebox.cli import SCHEMA_VERSION, app
 from treebox.models import worktree_path
 
@@ -114,9 +117,13 @@ def test_create_provisions_everything(repo: Path, root: str, hermetic_config):
     assert status.returncode == 0, status.stderr
     # Setup hook ran exactly once.
     assert (wt / "setup.log").read_text().strip() == "ran"
-    # Lockfile hash recorded.
-    st = state.load(wt)
-    assert st and st.lockfile_hash and st.base == "dev" and st.isolation == "host"
+    # Setup result recorded host-side, with the lockfile hash.
+    setup = record.load(wt).setup
+    assert setup.status == "done" and setup.lockfile_hash
+    # The creation policy is in the host-owned record, outside the worktree.
+    rec = record.load(wt)
+    assert (rec.base, rec.isolation, rec.harness) == ("dev", "host", "claude")
+    assert not record.record_path(wt).is_relative_to(wt)
     # Launch command printed to stdout.
     assert "claude" in res.stdout
     # The pre-push guard is wired per-worktree, into the private git dir.
@@ -200,10 +207,101 @@ def test_create_slash_name_flattens_dir_and_keeps_branch(repo: Path, root: str, 
     assert git.branch_for_path(str(repo), str(wt)) == "feature/auth"
 
 
+def test_checkout_nested_placeholder_branch_gets_one_flat_name(
+    repo: Path, root: str, hermetic_config
+):
+    """--checkout treebox/a/b drops the placeholder prefix and flattens the
+    rest to a--b: one directory leaf that create, list, enter and teardown all
+    agree on - never a nested <root>/a/b that list shows as 'b' and that a
+    later `create b` makes ambiguous."""
+    assert _git(repo, "branch", "treebox/a/b").returncode == 0
+    base = ["--repo", str(repo), "--root", root]
+
+    created = _run(["create", "--checkout", "treebox/a/b", *base, "--json"])
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.stdout)
+    wt = Path(root) / "a--b"
+    assert payload["name"] == "a--b"
+    assert payload["branch"] == "treebox/a/b"
+    assert Path(payload["worktree_path"]) == wt
+    assert wt.is_dir()
+    assert not (Path(root) / "a").exists()  # nothing nested, no stray .locks
+
+    listed = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert [(row["name"], row["branch"]) for row in listed] == [("a--b", "treebox/a/b")]
+
+    # The leaf 'b' is free again: a second worktree named b never collides.
+    assert _run(["create", "b", *base, "--json"]).exit_code == 0
+    for ref in ("a--b", "treebox/a/b"):
+        entered = _run(["enter", ref, *base, "--json"])
+        assert entered.exit_code == 0, entered.output
+        assert json.loads(entered.stdout)["name"] == "a--b"
+    entered_b = _run(["enter", "b", *base, "--json"])
+    assert entered_b.exit_code == 0, entered_b.output
+    assert json.loads(entered_b.stdout)["name"] == "b"
+
+    removed = _run(["teardown", "a--b", *base, "--force", "--json"])
+    assert removed.exit_code == 0, removed.output
+    (record,) = json.loads(removed.stdout)["worktrees"]
+    assert record["name"] == "a--b" and record["removed"] is True
+    assert not wt.exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["create", "x", "--no-fetch", "--print"],
+        ["create", "x", "--no-fetch", "--dry-run"],
+        ["create", "--checkout", "main", "--no-fetch", "--print"],
+        ["enter", "x", "--print"],
+        ["list"],
+        ["teardown", "x", "--force"],
+        ["teardown"],
+    ],
+    ids=lambda c: " ".join(c),
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["file", "under-file"])
+@pytest.mark.parametrize("json_out", [False, True], ids=["human", "json"])
+def test_non_directory_root_is_a_classified_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config, command: list[str], nested: bool, json_out: bool
+):
+    """A --root that is a regular file (or lies under one) is exit 2 with
+    INVALID_ROOT on every command that takes --root - never a raw
+    NotADirectoryError traceback from the lock path."""
+    blocker = tmp_path / "root-file"
+    blocker.write_text("not a directory\n")
+    root = blocker / "wts" if nested else blocker
+    # A lingering local branch drives teardown's branch-without-worktree path.
+    assert _git(repo, "branch", "x").returncode == 0
+
+    res = _run([*command, "--repo", str(repo), "--root", str(root)] + (["--json"] * json_out))
+    assert res.exit_code == 2, res.output
+    assert res.stdout == ""
+    if json_out:
+        error = json.loads(res.stderr)["error"]
+        assert error["code"] == "INVALID_ROOT"
+        assert error["path"] == str(root)
+        assert "is not a directory" in error["message"]
+    else:
+        assert "is not a directory" in res.stderr
+        assert "Traceback" not in res.stderr
+    assert blocker.read_text() == "not a directory\n"
+
+
+def test_dangling_symlink_root_is_a_classified_usage_error(
+    repo: Path, tmp_path: Path, hermetic_config
+):
+    root = tmp_path / "wts"
+    root.symlink_to(tmp_path / "gone")
+    res = _run(["create", "x", "--repo", str(repo), "--root", str(root), "--json"])
+    assert res.exit_code == 2, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_ROOT"
+
+
 def test_create_existing_branch_is_branch_exists_conflict(repo: Path, root: str, hermetic_config):
     """create NAME promises a fresh branch off origin/<base>: a branch that
     already exists (locally or on origin) is a loud exit 5 pointing at
-    --checkout — never a silent adoption of old work."""
+    --checkout - never a silent reuse of old work."""
     subprocess.run(["git", "-C", str(repo), "branch", "taken"], check=True)
     res = _run(["create", "taken", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 5, res.output  # EXIT_CONFLICT
@@ -254,24 +352,23 @@ def test_create_name_collision_is_conflict(repo: Path, root: str, hermetic_confi
 
 
 def test_create_finishes_unprovisioned_worktree(repo: Path, root: str, hermetic_config):
-    """A worktree dir left behind by a run that died before setup (no recorded
-    state) must be finished on the next create — not launched half-built, and
-    not refused as a name conflict."""
+    """A worktree dir left behind by a run that died during setup (setup
+    pending in the record) must be finished on the next create — not launched
+    half-built, and not refused as a name conflict."""
     wt = Path(root) / "feature-auth"
     args = ["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"]
     assert _run([*args, "--base", "dev"]).exit_code == 0
     assert (wt / "setup.log").read_text().strip() == "ran"
 
     # Simulate the half-provisioned state: dir exists, but setup never completed.
-    st = state._state_path(wt)
-    st.unlink()
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
     (wt / "setup.log").unlink()
 
     res = _run([*args, "--base", "dev"])
     assert res.exit_code == 0, res.output
     # Setup re-ran (instead of the old behaviour: skip setup, launch, fail).
     assert (wt / "setup.log").read_text().strip() == "ran"
-    assert state.load(wt) is not None  # state recorded this time
+    assert record.load(wt).setup.status == "done"  # recorded this time
 
 
 def test_placeholder_branch_is_unpushable_until_renamed(repo: Path, root: str, hermetic_config):
@@ -394,7 +491,12 @@ def test_env_directory_on_branch_is_kept_and_does_not_block_create_or_enter(
 
     entered = _run(["enter", "envdir", *base, "--json"])
     assert entered.exit_code == 0, entered.output
-    assert json.loads(entered.stdout)["created"] is False
+    payload = json.loads(entered.stdout)
+    assert payload["created"] is False
+    # Under --json the skipped copy is not printed, but it is in the payload.
+    assert entered.stderr == ""
+    (warning,) = payload["warnings"]
+    assert warning.startswith(".env not copied") and str(kept) in warning
     assert (kept / "keep.txt").read_text() == "must survive\n"
 
     # A completed create is a normal conflict again, not a crash loop.
@@ -427,6 +529,261 @@ def test_gitmodules_directory_on_branch_is_kept_and_does_not_block_create_or_ent
     assert (kept / "keep.txt").read_text() == "must survive\n"
     # No tracked content was deleted or modified to make room.
     assert _git(wt, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+
+# --- submodule copies follow the branch's own .gitmodules (issue #62) --------
+
+_FILE_PROTOCOL = ("-c", "protocol.file.allow=always")
+_IDENTITY = ("-c", "user.name=t", "-c", "user.email=t@e")
+
+
+def _push_branch_from_clone(repo: Path, tmp_path: Path, branch: str, *edits: list[str]) -> None:
+    """Push ``branch`` (from main) after running git ``edits`` in a scratch
+    clone, so the main checkout's own working tree stays exactly as it is."""
+    clone = tmp_path / f"clone-{branch}"
+    origin = _git(repo, "remote", "get-url", "origin").stdout.strip()
+    assert _git(tmp_path, "clone", "-q", origin, str(clone)).returncode == 0
+    assert _git(clone, "checkout", "-q", "-b", branch).returncode == 0
+    for edit in edits:
+        done = _git(clone, *_FILE_PROTOCOL, *edit)
+        assert done.returncode == 0, done.stderr
+    commit = _git(clone, *_IDENTITY, "commit", "-q", "-m", f"edit {branch}")
+    assert commit.returncode == 0, commit.stderr
+    assert _git(clone, "push", "-q", "origin", branch).returncode == 0
+    assert _git(repo, "fetch", "-q", "origin").returncode == 0
+
+
+def _sub_url(repo: Path) -> str:
+    return _git(repo, "config", "-f", ".gitmodules", "submodule.sub.url").stdout.strip()
+
+
+def _assert_pristine(wt: Path) -> None:
+    """The fresh worktree is exactly its branch: nothing modified and nothing
+    untracked but the hermetic setup hook's log (the copied ``.env`` is
+    force-ignored)."""
+    assert _git(wt, "status", "--porcelain", "-uall").stdout == "?? setup.log\n"
+
+
+def test_create_keeps_the_branchs_renamed_submodule_and_stays_clean(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """``main`` declares ``sub``; the branch renames it to ``libB``. The
+    worktree keeps the branch's ``.gitmodules``, gets no stray ``sub/``, and
+    ``libB`` (which the main checkout does not have) is skipped with a note."""
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "renamed"
+
+    created = _run(["create", "--checkout", "renamed", *base, "--print"])
+    assert created.exit_code == 0, created.output
+    assert _git(wt, "config", "-f", ".gitmodules", "--get-regexp", "path").stdout == (
+        "submodule.sub.path libB\n"
+    )
+    assert not (wt / "sub").exists()
+    _assert_pristine(wt)
+    assert "skipped libB" in created.stderr
+    assert "copied 0" in created.stderr
+    # The main checkout is left exactly as it was.
+    assert _git(repo, "status", "--porcelain").stdout == ""
+    assert (repo / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+
+
+def test_renamed_submodule_note_keeps_json_stdout_pure(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """Under ``--json`` the skip note never reaches stdout, which stays one
+    parseable payload."""
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    created = _run(
+        ["create", "--checkout", "renamed", "--repo", str(repo), "--root", root, "--json"]
+    )
+    assert created.exit_code == 0, created.output
+    assert json.loads(created.stdout)["created"] is True
+    assert "libB" not in created.stdout
+    _assert_pristine(Path(root) / "renamed")
+
+
+def test_create_copies_only_submodules_both_sides_declare(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """A branch that adds a submodule the main checkout lacks still gets the
+    shared one copied; the new one is skipped and left as the branch has it."""
+    _push_branch_from_clone(
+        repo, tmp_path, "adds-extra", ["submodule", "add", "-q", _sub_url(repo), "extra"]
+    )
+    wt = Path(root) / "adds-extra"
+    created = _run(
+        ["create", "--checkout", "adds-extra", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert (wt / "sub" / "lib.txt").read_text() == "hello from submodule\n"
+    assert not (wt / "sub" / ".git").exists()
+    assert (wt / "extra").is_dir()
+    assert list((wt / "extra").iterdir()) == []
+    assert "skipped extra" in created.stderr
+    assert "copied 1" in created.stderr
+    assert _git(wt, "show", "HEAD:.gitmodules").stdout == (wt / ".gitmodules").read_text()
+    _assert_pristine(wt)
+
+
+def test_branch_without_gitmodules_gets_nothing_from_the_main_checkout(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """The main checkout declares ``sub`` but the branch dropped every
+    submodule: no ``.gitmodules`` and no submodule tree may appear."""
+    _push_branch_from_clone(repo, tmp_path, "no-modules", ["rm", "-q", "sub", ".gitmodules"])
+    wt = Path(root) / "no-modules"
+    created = _run(
+        ["create", "--checkout", "no-modules", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert not (wt / ".gitmodules").exists()
+    assert not (wt / "sub").exists()
+    _assert_pristine(wt)
+
+
+def test_untracked_gitmodules_in_the_main_checkout_is_never_copied(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """An untracked ``.gitmodules`` in the main checkout (with its tree on
+    disk) declares nothing for a branch that tracks no ``.gitmodules``."""
+    _push_branch_from_clone(repo, tmp_path, "no-modules", ["rm", "-q", "sub", ".gitmodules"])
+    assert _git(repo, "checkout", "-q", "no-modules").returncode == 0
+    (repo / ".gitmodules").write_text('[submodule "vendor"]\n\tpath = vendor\n\turl = unused\n')
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "lib.txt").write_text("untracked vendor\n")
+    assert "?? .gitmodules" in _git(repo, "status", "--porcelain").stdout
+
+    wt = Path(root) / "probe"
+    created = _run(
+        ["create", "probe", "--base", "no-modules", "--repo", str(repo), "--root", root, "--print"]
+    )
+    assert created.exit_code == 0, created.output
+    assert not (wt / ".gitmodules").exists()
+    assert not (wt / "vendor").exists()
+    _assert_pristine(wt)
+
+
+def test_branch_gitmodules_without_one_in_the_main_checkout_is_kept(
+    repo: Path, root: str, hermetic_config
+):
+    """The branch declares ``sub`` but the main checkout has no
+    ``.gitmodules``: the branch's file is kept and ``sub`` is skipped."""
+    (repo / ".gitmodules").unlink()
+    wt = Path(root) / "feature-x"
+    created = _run(["create", "feature-x", "--repo", str(repo), "--root", root, "--print"])
+    assert created.exit_code == 0, created.output
+    assert _git(wt, "show", "HEAD:.gitmodules").stdout == (wt / ".gitmodules").read_text()
+    assert list((wt / "sub").iterdir()) == []
+    assert "skipped sub" in created.stderr
+    _assert_pristine(wt)
+
+
+def _add_second_submodule_to_main(repo: Path) -> None:
+    """Give ``main`` (and its checkout) a second submodule ``libC``, so a
+    branch can rename, add or drop one while another is still copied."""
+    added = _git(repo, *_FILE_PROTOCOL, "submodule", "add", "-q", _sub_url(repo), "libC")
+    assert added.returncode == 0, added.stderr
+    assert _git(repo, *_IDENTITY, "commit", "-q", "-m", "add libC").returncode == 0
+    assert _git(repo, "push", "-q", "origin", "main").returncode == 0
+
+
+def _dry_run_submodule_plan(commands: list[str]) -> tuple[list[str], list[str]]:
+    """The (copied, skipped) submodule paths a dry-run plan names."""
+    copied = [c.split()[3] for c in commands if c.startswith("# copy submodule ")]
+    skipped = [c.split()[3] for c in commands if c.startswith("# submodules: skipped ")]
+    return copied, skipped
+
+
+def _real_submodule_result(stderr: str, wt: Path) -> tuple[list[str], list[str]]:
+    """The (copied, skipped) submodule paths a real ``create --print`` did:
+    skipped from its notes, copied from the trees that now have content."""
+    skipped = re.findall(r"submodules\s+skipped (\S+) ·", stderr)
+    declared = _git(wt, "config", "-f", ".gitmodules", "--get-regexp", "path").stdout
+    paths = [line.split(" ", 1)[1] for line in declared.splitlines()] if declared else []
+    copied = [p for p in paths if (wt / p / "lib.txt").is_file()]
+    if paths:
+        assert f"copied {len(copied)}" in stderr
+    return copied, skipped
+
+
+_BRANCH_EDITS: dict[str, tuple[list[str], tuple[list[str], list[str]]]] = {
+    # branch edit -> the (copied, skipped) paths the real run gives
+    "renamed": (["mv", "sub", "libB"], (["libC"], ["libB"])),
+    "added": (["submodule", "add", "-q", "{url}", "extra"], (["sub", "libC"], ["extra"])),
+    "removed": (["rm", "-q", "libC"], (["sub"], [])),
+}
+
+
+@pytest.mark.parametrize("case", [*_BRANCH_EDITS, "no-gitmodules"])
+@pytest.mark.parametrize("entry", ["checkout", "named", "nameless"])
+def test_dry_run_submodule_plan_matches_the_real_run(
+    repo: Path, tmp_path: Path, root: str, hermetic_config, case: str, entry: str
+):
+    """``create --dry-run`` (human and ``--json``) names the same copied and
+    skipped submodule paths as the real ``create`` for the same branch, for
+    every create entry: ``--checkout``, a named new branch from
+    ``origin/<base>``, and a nameless create. The dry run changes nothing."""
+    _add_second_submodule_to_main(repo)
+    if case == "no-gitmodules":
+        edits = [["rm", "-q", "sub", "libC", ".gitmodules"]]
+        expected: tuple[list[str], list[str]] = ([], [])
+    else:
+        edit, expected = _BRANCH_EDITS[case]
+        edits = [[arg.replace("{url}", _sub_url(repo)) for arg in edit]]
+    _push_branch_from_clone(repo, tmp_path, case, *edits)
+
+    if entry == "checkout":
+        args = ["create", "--checkout", case]
+    elif entry == "named":
+        args = ["create", f"new-{case}", "--base", case]
+    else:
+        args = ["create", "--base", case]
+    args += ["--repo", str(repo), "--root", root]
+    before_worktrees = _git(repo, "worktree", "list", "--porcelain").stdout
+    before_status = _git(repo, "status", "--porcelain").stdout
+
+    planned = _run([*args, "--dry-run", "--json"])
+    assert planned.exit_code == 0, planned.output
+    commands = json.loads(planned.stdout)["commands"]
+    assert _dry_run_submodule_plan(commands) == expected
+    assert not any("copy submodule trees" in c for c in commands)
+    human = _run([*args, "--dry-run"])
+    assert human.exit_code == 0, human.output
+    for path in expected[0]:
+        assert f"# copy submodule {path} from {repo} into" in human.stderr
+    for path in expected[1]:
+        assert f"# submodules: skipped {path} · not checked out in {repo}" in human.stderr
+    # A dry run changes nothing on disk.
+    assert not Path(root).exists()
+    assert _git(repo, "worktree", "list", "--porcelain").stdout == before_worktrees
+    assert _git(repo, "status", "--porcelain").stdout == before_status
+
+    created = _run([*args, "--print"])
+    assert created.exit_code == 0, created.output
+    (wt,) = [p for p in Path(root).iterdir() if (p / ".git").is_file()]
+    assert _real_submodule_result(created.stderr, wt) == expected
+    _assert_pristine(wt)
+
+
+def test_dry_run_of_a_resumed_worktree_plans_from_its_own_gitmodules(
+    repo: Path, tmp_path: Path, root: str, hermetic_config
+):
+    """A resumed unprovisioned worktree is planned from the ``.gitmodules``
+    on its disk, the file the real run reads."""
+    _add_second_submodule_to_main(repo)
+    _push_branch_from_clone(repo, tmp_path, "renamed", ["mv", "sub", "libB"])
+    base = ["create", "--checkout", "renamed", "--repo", str(repo), "--root", root]
+    assert _run([*base, "--print"]).exit_code == 0
+    wt = Path(root) / "renamed"
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
+
+    planned = _run([*base, "--dry-run", "--json"])
+    assert planned.exit_code == 0, planned.output
+    assert _dry_run_submodule_plan(json.loads(planned.stdout)["commands"]) == (
+        ["libC"],
+        ["libB"],
+    )
 
 
 def test_managed_file_copy_refuses_a_directory_planted_mid_copy(tmp_path: Path, monkeypatch):
@@ -655,8 +1012,7 @@ def test_enter_resync_preserves_recorded_harness(repo: Path, root: str, hermetic
     res = _run(["enter", "qux", *base, "-H", "claude", "--print"])
     assert res.exit_code == 0, res.output
     assert "claude" in res.stdout and "codex" not in res.stdout  # override ran…
-    st = state.load(wt)
-    assert st is not None and st.harness == "codex"  # …but state keeps codex
+    assert record.load(wt).harness == "codex"  # …but the record keeps codex
 
     # And a plain enter afterwards still launches the recorded harness.
     res = _run(["enter", "qux", *base, "--print"])
@@ -683,7 +1039,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         def facts(self):
             from treebox.runners import RunnerFacts
 
-            return RunnerFacts(preflight_detail="", login_required=True)
+            return RunnerFacts(preflight_detail="", sandboxed=False)
 
         def setup(self, wt, *, cold, reporter):
             calls.append("setup")
@@ -710,6 +1066,7 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         _Recorder(),
         repo=str(repo),
         path=Path(root) / "fresh-creds",
+        base="main",
         harness=get_harness("claude"),
         cold=False,
         args=[],
@@ -721,42 +1078,26 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
 def test_enter_finishes_unprovisioned_state_even_when_lockfile_hash_matches(
     repo: Path, root: str, hermetic_config
 ):
-    """A setup crash records provisioned=False before dependencies finish.
-    enter must treat that as unfinished work even when the current lockfile
-    hash matches the recorded hash (notably "" for repos without lockfiles)."""
+    """A setup crash leaves setup pending in the record before dependencies
+    finish. enter must treat that as unfinished work whatever the lockfile
+    hash (notably "" for repos without lockfiles)."""
     from treebox import ecosystems
 
     base = ["--repo", str(repo), "--root", root]
     assert _run(["create", "half-built", *base, "--print"]).exit_code == 0
     wt = Path(root) / "half-built"
-    prior = state.load(wt)
-    assert prior is not None
 
     (wt / "uv.lock").unlink()
     (wt / "setup.log").unlink()
     current = ecosystems.lockfile_hash(wt)
     assert current == ""
-    state.save(
-        wt,
-        state.WorktreeState(
-            base=prior.base,
-            isolation=prior.isolation,
-            harness=prior.harness,
-            lockfile_hash=current,
-            provisioned=False,
-            firewall=prior.firewall,
-            template=prior.template,
-        ),
-    )
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
 
     res = _run(["enter", "half-built", *base, "--print"])
     assert res.exit_code == 0, res.output
     assert "setup never completed" in res.stderr
     assert (wt / "setup.log").read_text().strip() == "ran"
-    st = state.load(wt)
-    assert st is not None
-    assert st.provisioned is True
-    assert st.lockfile_hash == current
+    assert record.load(wt).setup == lifecycle.SetupResult.done(current)
 
 
 def test_cold_create(repo: Path, root: str, hermetic_config):
@@ -913,8 +1254,10 @@ def test_list_reports_stale_and_unknown_deps(repo: Path, root: str, hermetic_con
     (wt / "uv.lock").write_text("version = 2\n")
     assert deps() == "stale"
 
-    # No recorded state at all (provisioning died before setup) → unknown.
-    state._state_path(wt).unlink()
+    # Setup did not finish (pending in the record) → unknown, even though a
+    # matching hash would be there: freshness needs a finished setup.
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
+    (wt / "uv.lock").write_text("version = 1\n")
     assert deps() == "unknown"
 
 
@@ -985,7 +1328,7 @@ def test_teardown_delete_branch(repo: Path, root: str, hermetic_config):
     assert not git.local_branch_exists(str(repo), "feature-gone")
 
 
-def test_fetch_is_required_and_fails_loudly(repo: Path, root: str, hermetic_config):
+def test_fetch_is_required_and_fails_loudly(repo: Path, root: str, hermetic_config, agent_ready):
     # Break origin so no fetch can succeed.
     subprocess.run(
         ["git", "-C", str(repo), "remote", "set-url", "origin", "/nonexistent/x.git"],
@@ -1158,7 +1501,7 @@ def test_teardown_corrupt_worktree_uses_recorded_runner(
     base = ["--repo", str(repo), "--root", root]
     _run(["create", "corrupt-docker", *base, "--print"])
     wt = repo / root / "corrupt-docker"
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
     (wt / ".git").unlink()
 
     calls: list[str] = []
@@ -1336,7 +1679,7 @@ def test_dry_run_existing_worktree_dir_is_slug_conflict(repo: Path, root: str, h
     )
     wt = Path(root) / "taken-dir"
     before = _git(repo, "worktree", "list", "--porcelain").stdout
-    state_before = state._state_path(wt).read_bytes()
+    record_before = record.record_path(wt).read_bytes()
     setup_before = (wt / "setup.log").read_bytes()
 
     res = _run(["create", "taken-dir", "--repo", str(repo), "--root", root, "--dry-run", "--json"])
@@ -1347,7 +1690,7 @@ def test_dry_run_existing_worktree_dir_is_slug_conflict(repo: Path, root: str, h
     assert err["error"]["code"] == "SLUG_CONFLICT"
     assert "treebox enter taken-dir" in err["error"]["hint"]
     assert _git(repo, "worktree", "list", "--porcelain").stdout == before
-    assert state._state_path(wt).read_bytes() == state_before
+    assert record.record_path(wt).read_bytes() == record_before
     assert (wt / "setup.log").read_bytes() == setup_before
 
 
@@ -1386,8 +1729,8 @@ def test_dry_run_previews_unprovisioned_resume_without_mutation(
     wt = Path(root) / "resume-dry"
     base = ["create", "resume-dry", "--repo", str(repo), "--root", root]
     assert _run([*base, "--print"]).exit_code == 0
-    state_path = state._state_path(wt)
-    state_path.unlink()
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
+    record_before = record.record_path(wt).read_bytes()
     (wt / "setup.log").unlink()
     before_worktrees = _git(repo, "worktree", "list", "--porcelain").stdout
     before_status = _git(wt, "status", "--porcelain", "--ignore-submodules=all").stdout
@@ -1399,7 +1742,7 @@ def test_dry_run_previews_unprovisioned_resume_without_mutation(
     assert any("resume existing unprovisioned worktree" in cmd for cmd in commands)
     assert any("echo ran >> setup.log" in cmd for cmd in commands)
     assert not any("fetch origin" in cmd or "worktree add" in cmd for cmd in commands)
-    assert not state_path.exists()
+    assert record.record_path(wt).read_bytes() == record_before
     assert not (wt / "setup.log").exists()
     assert _git(repo, "worktree", "list", "--porcelain").stdout == before_worktrees
     assert _git(wt, "status", "--porcelain", "--ignore-submodules=all").stdout == before_status
@@ -1415,17 +1758,21 @@ def test_create_and_doctor_json_have_schema_version(repo: Path, root: str, herme
     assert doc["schemaVersion"] == SCHEMA_VERSION
 
 
-def _rewrite_state_runner(wt: Path, runner_name: str) -> None:
-    """Simulate a worktree provisioned with another runner (e.g. docker)."""
+def _edit_record(wt: Path, **changes: object) -> None:
+    """Rewrite fields of a worktree's host-owned record (the only place its
+    creation policy lives)."""
     import dataclasses
 
-    st = state.load(wt)
-    assert st is not None
-    state.save(wt, dataclasses.replace(st, isolation=runner_name))
+    record.save(dataclasses.replace(record.load(wt), **changes))
+
+
+def _rewrite_recorded_runner(wt: Path, runner_name: str) -> None:
+    """Simulate a worktree provisioned with another runner (e.g. docker)."""
+    _edit_record(wt, isolation=runner_name)
 
 
 def test_enter_prefers_recorded_runner(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """enter without --isolation must use the isolation mode the worktree was provisioned
     with, not the config default (host) — otherwise a docker-sandboxed worktree
@@ -1434,7 +1781,7 @@ def test_enter_prefers_recorded_runner(
 
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
 
     # Docker present and healthy so enter's preflight passes on hosts without
     # a running daemon (e.g. macOS CI) — this test is about runner selection.
@@ -1449,7 +1796,7 @@ def test_enter_prefers_recorded_runner(
 
 
 def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """enter --print/--json with an unchanged lockfile must still make the
     sandbox entry-ready (docker: restart a stopped container and re-lock
@@ -1460,7 +1807,7 @@ def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
 
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
 
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
@@ -1484,23 +1831,66 @@ def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
     assert res.stdout == ""
 
 
-def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, hermetic_config):
-    """A worktree recorded with a runner this version doesn't know is a loud
-    conflict — never silently entered with the host default."""
+def test_enter_firewall_failure_is_classified_and_never_launches(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed firewall init on entry is a classified, non-zero result on
+    every path (issue #59): --json carries FIREWALL_FAILED and emits no
+    payload, and the launch path never starts the agent with open egress."""
+    from treebox.runners import docker as dr
+    from treebox.runners.base import FirewallError
+
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "bogus")
+    _rewrite_recorded_runner(wt, "docker")
+
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+
+    def _fail(self: dr.DockerRunner, w: object) -> None:
+        raise FirewallError("firewall initialization failed: ERROR: boom", hint="re-create")
+
+    launched: list[object] = []
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", _fail)
+    monkeypatch.setattr(dr.DockerRunner, "launch", lambda self, w, **kw: launched.append(w) or 0)
 
     res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 1, res.output
+    assert res.stdout == ""
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "FIREWALL_FAILED"
+    assert "boom" in err["message"]
+    assert err["hint"] == "re-create"
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 1, res.output
+    assert launched == []
+
+
+def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, hermetic_config):
+    """A worktree recorded with a runner this version doesn't know has an
+    invalid record: a loud conflict, never silently entered with the host
+    default. The recovery the hint names (teardown) works on it."""
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "feature-auth"
+    _run(["create", "feature-auth", *base, "--print"])
+    _rewrite_recorded_runner(wt, "bogus")
+
+    res = _run(["enter", "feature-auth", *base, "--json"])
     assert res.exit_code == 5, res.output  # EXIT_CONFLICT
     err = json.loads(res.stderr)
-    assert err["error"]["code"] == "UNKNOWN_ISOLATION"
+    assert err["error"]["code"] == "RECORD_INVALID"
+    assert "treebox teardown feature-auth" in err["error"]["hint"]
+
+    res = _run(["teardown", "feature-auth", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert not wt.exists() and not record.exists(wt)
 
 
 def test_enter_explicit_runner_mismatch_is_conflict(repo: Path, root: str, hermetic_config):
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
 
     res = _run(
         [
@@ -1521,7 +1911,7 @@ def test_enter_explicit_runner_mismatch_is_conflict(repo: Path, root: str, herme
 
 
 def test_enter_preflights_the_runner_so_a_stopped_daemon_is_not_a_lost_worktree(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """A stopped Docker daemon must surface on `enter` as the same clean
     DOCKER_UNAVAILABLE error create/doctor give — never the misleading "no
@@ -1531,7 +1921,7 @@ def test_enter_preflights_the_runner_so_a_stopped_daemon_is_not_a_lost_worktree(
 
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
 
     # docker on PATH but daemon unreachable — exactly the reported repro.
     monkeypatch.setattr(dr.system, "have", lambda c: True)
@@ -1545,13 +1935,103 @@ def test_enter_preflights_the_runner_so_a_stopped_daemon_is_not_a_lost_worktree(
     assert wt.is_dir()  # the worktree survives — no destructive teardown advice
 
 
+def _as_root(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Run as uid 0 with a reachable daemon; record every docker engine call."""
+    from treebox import system
+    from treebox.runners import docker as dr
+
+    calls: list[list[str]] = []
+
+    def _docker(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+    monkeypatch.setattr(dr.system, "identity", lambda: system.Identity(uid=0, gid=0))
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    monkeypatch.setattr(dr, "_docker", _docker)
+    return calls
+
+
+def _assert_root_refusal(res) -> None:
+    assert res.exit_code == 1  # EXIT_ERROR, like every PreflightError
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "RUNNING_AS_ROOT"
+    assert "root" in err["message"]
+    assert "useradd" in err["hint"]
+
+
+def test_docker_create_as_root_is_refused_before_anything_is_provisioned(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """As uid 0 the image build cannot add the sandbox user (`useradd -u 0`
+    is not unique), and a root agent could delete its own firewall rules.
+    `create --isolation docker` must refuse before any git or docker work:
+    no worktree, no branch, no image build."""
+    calls = _as_root(monkeypatch)
+
+    res = _run(["create", "boxed", "--isolation", "docker", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 1
+    assert "useradd" in res.stderr
+
+    res = _run(
+        ["create", "boxed", "--isolation", "docker", "--repo", str(repo), "--root", root, "--json"]
+    )
+    _assert_root_refusal(res)
+    assert not (Path(root) / "boxed").exists()
+    assert _git(repo, "branch", "--list", "boxed").stdout == ""
+    assert not any(c[:1] == ["build"] for c in calls)
+
+
+def test_docker_enter_as_root_is_refused_and_leaves_the_worktree_alone(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    wt = Path(root) / "feature-auth"
+    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_recorded_runner(wt, "docker")
+    calls = _as_root(monkeypatch)
+
+    res = _run(["enter", "feature-auth", "--repo", str(repo), "--root", root, "--json"])
+    _assert_root_refusal(res)
+    assert wt.is_dir()
+    assert not any(c[:1] == ["build"] for c in calls)
+
+
+def test_doctor_docker_as_root_fails_the_isolation_hard_check(
+    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    _as_root(monkeypatch)
+
+    res = _run(["doctor", "--isolation", "docker", "--repo", str(repo), "--json"])
+    assert res.exit_code == 1
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is False
+    check = next(c for c in payload["checks"] if c["name"] == "isolation: docker")
+    assert check["ok"] is False and "root" in check["detail"]
+    assert any("useradd" in a for a in payload["advisories"])
+
+    res = _run(["doctor", "--isolation", "docker", "--repo", str(repo)])
+    assert res.exit_code == 1
+    assert "useradd" in res.stdout + res.stderr
+
+
+def test_host_isolation_as_root_is_unaffected(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    _as_root(monkeypatch)
+
+    res = _run(["create", "rooted", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 0, res.stderr
+    res = _run(["enter", "rooted", "--repo", str(repo), "--root", root, "--json"])
+    assert res.exit_code == 0, res.stderr
+
+
 def test_runner_recorded_before_setup_survives_a_failed_create(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
     """The un-tearable-orphan fix: if setup dies (a docker build/run can leave a
     container behind), the runner must already be on disk so teardown knows what
-    to clean. State is written before setup with provisioned=False."""
-    from treebox import state
+    to clean. The record is written before the worktree with setup pending."""
     from treebox.runners.host import HostRunner
 
     def boom(self, wt, *, cold, reporter):
@@ -1562,20 +2042,17 @@ def test_runner_recorded_before_setup_survives_a_failed_create(
     assert res.exit_code != 0  # the create failed…
 
     wt = Path(root) / "crashed"
-    assert wt.is_dir()  # …but left the worktree and, crucially, its state
-    st = state.load(wt)
-    assert st is not None
-    assert st.isolation == "host"  # recorded before setup, not lost to the crash
-    assert st.provisioned is False  # setup never completed
+    assert wt.is_dir()  # …but left the worktree and, crucially, its record
+    assert record.load(wt).isolation == "host"  # recorded before setup, not lost
+    assert record.load(wt).setup.status == "pending"  # setup never completed
 
 
 def test_failed_create_can_be_finished_by_recreating(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """A half-built tree (provisioned=False) is not a slug conflict: re-running
+    """A half-built tree (setup pending) is not a slug conflict: re-running
     create finishes setup instead of refusing, so a transient setup failure is
     recoverable rather than a dead worktree you must delete by hand."""
-    from treebox import state
     from treebox.runners.host import HostRunner
 
     real_setup = HostRunner.setup
@@ -1591,13 +2068,39 @@ def test_failed_create_can_be_finished_by_recreating(
 
     first = _run(["create", "flaky", "--repo", str(repo), "--root", root, "--print"])
     assert first.exit_code != 0
-    assert state.load(Path(root) / "flaky").provisioned is False
+    assert record.load(Path(root) / "flaky").setup.status == "pending"
 
     # Second create on the same name recovers (finishes setup) rather than 5-ing.
     second = _run(["create", "flaky", "--repo", str(repo), "--root", root, "--print"])
     assert second.exit_code == 0, second.output
-    assert "unprovisioned" in second.stderr  # took the finish-setup path
-    assert state.load(Path(root) / "flaky").provisioned is True
+    assert "setup unfinished" in second.stderr  # took the finish-setup path
+    assert record.load(Path(root) / "flaky").setup.status == "done"
+
+
+def test_resumed_create_cannot_change_the_recorded_policy(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A resume must restate the host-owned record exactly: a docker
+    worktree whose setup did not finish must not let a plain `create NAME`
+    (config default: host) re-record it as host (RECORD_CONFLICT, exit 5)."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "boxed", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "boxed"
+    _rewrite_recorded_runner(wt, "docker")
+    record.save(dataclasses.replace(record.load(wt), setup=lifecycle.SetupResult()))
+
+    # --dry-run fails with the same error a real run would.
+    dry = _run(["create", "boxed", *base, "--dry-run", "--json"])
+    assert dry.exit_code == 5, dry.output
+    assert json.loads(dry.stderr)["error"]["code"] == "RECORD_CONFLICT"
+
+    res = _run(["create", "boxed", *base, "--json"])
+    assert res.exit_code == 5, res.output
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "RECORD_CONFLICT"
+    assert "--isolation docker" in err["hint"]
+    assert err["path"] == str(record.record_path(wt))
+    assert record.load(wt).isolation == "docker"  # untouched
 
 
 def test_provisioned_tree_is_still_a_slug_conflict(repo: Path, root: str, hermetic_config):
@@ -1612,66 +2115,25 @@ def test_provisioned_tree_is_still_a_slug_conflict(repo: Path, root: str, hermet
 def test_teardown_uses_recorded_runner(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """teardown without --isolation must tear down via the recorded isolation mode, so a
+    """teardown must tear down via the recorded isolation mode, so a
     docker-sandboxed worktree's container/image/config dir are not leaked."""
+    from treebox.runners.base import RunnerTeardownResult
     from treebox.runners.docker import DockerRunner
 
     wt = Path(root) / "feature-auth"
     _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
 
     calls: list[str] = []
     monkeypatch.setattr(
         DockerRunner,
         "teardown",
-        lambda self, wt, *, reporter: calls.append(wt.name),
+        lambda self, wt, *, reporter: calls.append(wt.name) or RunnerTeardownResult.cleaned(),
     )
     res = _run(["teardown", "feature-auth", "--repo", str(repo), "--root", root, "--force"])
     assert res.exit_code == 0, res.output
     assert calls == ["feature-auth"]  # DockerRunner.teardown was invoked
     assert not wt.exists()
-
-
-def test_teardown_explicit_runner_mismatch_is_conflict(repo: Path, root: str, hermetic_config):
-    wt = Path(root) / "feature-auth"
-    _run(["create", "feature-auth", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
-
-    res = _run(
-        [
-            "teardown",
-            "feature-auth",
-            "--repo",
-            str(repo),
-            "--root",
-            root,
-            "--force",
-            "--isolation",
-            "host",
-        ]
-    )
-    assert res.exit_code == 5  # EXIT_CONFLICT
-    assert wt.exists()  # nothing was removed
-
-
-def test_teardown_batch_isolation_mismatch_is_all_or_nothing(
-    repo: Path, root: str, hermetic_config
-):
-    """An --isolation mismatch on the SECOND target must abort the batch before
-    anything is removed: previously it fired mid-loop, so the first worktree
-    was gone but the --json payload carried only the error object — a scripting
-    agent reasonably concluded nothing was removed."""
-    base = ["--repo", str(repo), "--root", root]
-    _run(["create", "first", *base, "--print"])
-    _run(["create", "second", *base, "--print"])
-    _rewrite_state_runner(Path(root) / "second", "docker")
-
-    res = _run(["teardown", "first", "second", *base, "--force", "--isolation", "host", "--json"])
-    assert res.exit_code == 5  # EXIT_CONFLICT
-    assert json.loads(res.stderr)["error"]["code"] == "ISOLATION_MISMATCH"
-    # All-or-nothing: the matching first target must NOT have been removed.
-    assert (Path(root) / "first").exists()
-    assert (Path(root) / "second").exists()
 
 
 def test_teardown_lock_held_is_conflict(repo: Path, root: str, hermetic_config):
@@ -1782,9 +2244,10 @@ def test_enter_refuses_registered_worktree_missing_git_pointer(
     repo: Path, root: str, hermetic_config
 ):
     """enter on a worktree whose .git pointer file was removed (interrupted
-    teardown) must refuse like create's resume path does: without the pointer,
-    git commands and the state read/write inside the dir resolve to the MAIN
-    repo, and the launched agent would operate on the user's real checkout."""
+    teardown) must refuse: without the pointer, git commands inside the dir
+    resolve to the MAIN repo, and the launched agent would operate on the
+    user's real checkout. list, enter, create and teardown all agree on the
+    one health classification (invalid_linkage), and teardown recovers it."""
     from treebox import git
 
     base = ["--repo", str(repo), "--root", root]
@@ -1798,14 +2261,28 @@ def test_enter_refuses_registered_worktree_missing_git_pointer(
     res = _run(["enter", "victim", *base, "--print", "--json"])
     assert res.exit_code == 5, res.output
     err = json.loads(res.stderr)
-    assert err["error"]["code"] == "SLUG_CONFLICT"
-    assert "not a healthy registered worktree" in err["error"]["hint"]
+    assert err["error"]["code"] == "INVALID_LINKAGE"
+    assert err["error"]["path"] == str(wt)
     assert "treebox teardown victim" in err["error"]["hint"]
 
-    # No state leaked into the main repo's private git dir, and its config
-    # was never touched by a re-run setup against the wrong git context.
-    assert not (repo / ".git" / "treebox-state.json").exists()
+    # list says the same thing, and the old `missing` field keeps its value.
+    (row,) = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert (row["health"], row["missing"]) == ("invalid_linkage", True)
+    # create on the occupied name is still a name conflict, with the same cause.
+    created = _run(["create", "victim", *base, "--json"])
+    assert json.loads(created.stderr)["error"]["code"] == "SLUG_CONFLICT"
+    assert "not a healthy registered worktree" in json.loads(created.stderr)["error"]["hint"]
+
+    # Nothing was written into the main repo's git dir, and its config was
+    # never touched by a re-run setup against the wrong git context.
     assert _git(repo, "config", "core.hooksPath").returncode != 0
+
+    # The recovery the hint names works: teardown removes dir + registration.
+    torn = _run(["teardown", "victim", *base, "--force", "--json"])
+    assert torn.exit_code == 0, torn.output
+    assert json.loads(torn.stdout)["worktrees"][0]["complete"] is True
+    assert not wt.exists() and not record.exists(wt)
+    assert "victim" not in _git(repo, "worktree", "list").stdout
 
 
 def test_create_refuse_hint_points_to_teardown_and_prune(repo: Path, root: str, hermetic_config):
@@ -2158,36 +2635,22 @@ def test_teardown_cancel_at_branch_question_removes_nothing(
     assert "Cancelled" in res.stderr
 
 
-def test_teardown_refuses_unknown_recorded_isolation(repo: Path, root: str, hermetic_config):
-    """A worktree whose recorded isolation mode treebox can't drive is a hard
-    conflict on teardown, exactly as on enter: the batch aborts untouched.
-    --skip-container is the escape hatch that removes it anyway."""
-    from treebox import state
-
+def test_teardown_removes_a_worktree_with_an_unknown_recorded_isolation(
+    repo: Path, root: str, hermetic_config
+):
+    """A record naming an isolation mode treebox can't drive is invalid, so
+    teardown - its recovery - picks the runner from host-owned files (no
+    docker resource manifest here: the host runner) and removes it. Never a
+    batch-wide conflict, never the config default."""
     for name in ("broken", "modern"):
         _run(["create", name, "--repo", str(repo), "--root", root, "--print"])
+    _rewrite_recorded_runner(Path(root) / "broken", "devcontainer")
 
-    # Rewrite one worktree's recorded isolation to a mode treebox no longer knows.
-    broken_path = Path(root) / "broken"
-    st = state.load(broken_path)
-    assert st is not None
-    st.isolation = "devcontainer"
-    state.save(broken_path, st)
-
-    # The conflict fires before any removal, so the whole batch is left untouched.
     res = _run(["teardown", "broken", "modern", "--repo", str(repo), "--root", root, "--force"])
-    assert res.exit_code == 5, res.output  # EXIT_CONFLICT
-    assert "unknown isolation mode" in res.stderr
-    assert (Path(root) / "broken").is_dir()  # nothing removed
-    assert (Path(root) / "modern").is_dir()
-
-    # --skip-container does no container work, so it skips isolation resolution
-    # and removes the otherwise-undrivable tree anyway.
-    res = _run(
-        ["teardown", "broken", "--repo", str(repo), "--root", root, "--force", "--skip-container"]
-    )
     assert res.exit_code == 0, res.output
-    assert not (Path(root) / "broken").is_dir()
+    assert not (Path(root) / "broken").exists()
+    assert not (Path(root) / "modern").exists()
+    assert not record.exists(Path(root) / "broken")
 
 
 def test_teardown_chooser_cancel_removes_nothing(
@@ -2299,36 +2762,51 @@ def test_create_explicit_name_with_checkout(repo: Path, root: str, hermetic_conf
 
 
 def test_launch_propagates_the_agent_exit_code(
-    repo: Path, root: str, hermetic_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, agent_ready: Path
 ):
     """The full launch path: without --print/--json, create provisions, prints
-    the Ready line, launches the harness, and exits with the AGENT's exit code."""
-    import os
+    the Ready line, launches the harness, and exits with the AGENT's exit code.
+    A non-zero agent exit ends with the one fixed-prefix line (the contract a
+    caller tells an agent exit from a treebox failure by); exit 0 has none."""
+    from treebox.cli import AGENT_EXIT_PREFIX
 
-    bin_dir = tmp_path / "fake-bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "claude"
-    fake.write_text("#!/bin/sh\nexit 7\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-
+    (agent_ready / "claude").write_text("#!/bin/sh\nexit 7\n")
     res = _run(["create", "launchy", "--repo", str(repo), "--root", root])
     assert res.exit_code == 7, res.output  # the fake agent's exit code, verbatim
     assert "Ready" in res.stderr and "launching claude" in res.stderr
+    assert AGENT_EXIT_PREFIX == "treebox: agent exited with status "
+    assert res.stderr.splitlines()[-1] == "treebox: agent exited with status 7"
+
+    (agent_ready / "claude").write_text("#!/bin/sh\nexit 0\n")
+    res = _run(["enter", "launchy", "--repo", str(repo), "--root", root])
+    assert res.exit_code == 0, res.output
+    assert AGENT_EXIT_PREFIX not in res.stderr
 
 
 def test_launch_missing_harness_is_a_clean_error(
-    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, root: str, hermetic_config, agent_ready: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A harness CLI absent from PATH must exit 1 with an instructive message,
-    not a traceback."""
-    from treebox.runners import host as host_mod
+    """A harness CLI absent from PATH is a classified failure (exit 1,
+    HARNESS_MISSING) with an instructive hint, not a traceback - and a launch
+    fails before anything is provisioned. --json never launches, so it needs
+    no agent."""
+    (agent_ready / "claude").unlink()
+    # Hide any real claude elsewhere on PATH, too.
+    path = [d for d in os.environ["PATH"].split(os.pathsep) if not (Path(d) / "claude").exists()]
+    monkeypatch.setenv("PATH", os.pathsep.join(path))
+    base = ["--repo", str(repo), "--root", root]
 
-    monkeypatch.setattr(host_mod, "have", lambda c: False)
-    res = _run(["create", "nocli", "--repo", str(repo), "--root", root])
+    res = _run(["create", "nocli", *base])
     assert res.exit_code == 1
     assert "not found on PATH" in res.stderr
     assert "Traceback" not in res.output
+    assert not (Path(root) / "nocli").exists()  # nothing provisioned
+
+    assert _run(["create", "nocli", *base, "--json"]).exit_code == 0
+    res = _run(["--non-interactive", "enter", "nocli", *base, "--json"])
+    assert res.exit_code == 0, res.output
+    res = _run(["enter", "nocli", *base, "--json", "--print"])
+    assert res.exit_code == 0, res.output
 
 
 def test_fetch_failed_publickey_hint_mentions_ssh(
@@ -2370,14 +2848,17 @@ def test_teardown_skip_container_reports_skipped(repo: Path, root: str, hermetic
     assert record["removed"] is True
 
 
-def test_teardown_json_reports_docker_unavailable_as_skipped(
+def test_teardown_with_docker_unavailable_is_incomplete_and_keeps_the_worktree(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
+    """With the engine unreachable, treebox cannot know whether a container is
+    left: the teardown fails (TEARDOWN_INCOMPLETE, exit 1) and keeps the
+    worktree and its record, so the same command retries once Docker is up."""
     from treebox.runners.docker import DockerRunner
 
     wt = Path(root) / "dockdown"
     _run(["create", "dockdown", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
+    _rewrite_recorded_runner(wt, "docker")
     monkeypatch.setattr(DockerRunner, "_available", lambda self: False)
 
     res = _run(
@@ -2394,29 +2875,32 @@ def test_teardown_json_reports_docker_unavailable_as_skipped(
         ]
     )
 
-    assert res.exit_code == 0, res.output
-    (record,) = json.loads(res.stdout)["worktrees"]
-    assert record["container"] == "skipped"
-    assert record["volumes_removed"] is False
-    assert record["removed"] is True
+    assert res.exit_code == 1, res.output
+    (row,) = json.loads(res.stdout)["worktrees"]
+    assert row["container"] == "skipped"
+    assert row["volumes_removed"] is False
+    assert (row["removed"], row["complete"]) == (False, False)
+    assert row["remaining"] == ["Docker resources (Docker is not reachable)"]
+    assert json.loads(res.stderr)["error"]["code"] == "TEARDOWN_INCOMPLETE"
+    assert wt.is_dir() and record.exists(wt)
 
 
 def test_teardown_json_reports_failed_volume_removal_honestly(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
     """A failed volume rm after a successful container rm keeps the two
-    outcomes separate: container stays "cleaned", volumes_removed is false."""
+    outcomes separate: container stays "cleaned", volumes_removed is false.
+    The teardown is incomplete: the worktree, its record and the resource
+    manifest stay, and the same teardown removes the volume on a retry."""
     from treebox.config import Config
     from treebox.models import Worktree
     from treebox.runners.docker import DockerRunner
 
     wt = Path(root) / "volfail"
     _run(["create", "volfail", "--repo", str(repo), "--root", root, "--print"])
-    _rewrite_state_runner(wt, "docker")
-    st = state.load(wt)
-    assert st is not None
+    _rewrite_recorded_runner(wt, "docker")
     DockerRunner(Config(isolation="docker")).initialize(
-        Worktree(str(repo), "volfail", "volfail", st.base, wt)
+        Worktree(str(repo), "volfail", "volfail", "main", wt)
     )
     calls: list[list[str]] = []
 
@@ -2462,14 +2946,36 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
         ]
     )
 
-    assert res.exit_code == 0, res.output
-    (record,) = json.loads(res.stdout)["worktrees"]
-    assert record["container"] == "cleaned"
-    assert record["volumes_removed"] is False
-    assert record["removed"] is True
+    assert res.exit_code == 1, res.output
+    (row,) = json.loads(res.stdout)["worktrees"]
+    assert row["container"] == "cleaned"
+    assert row["volumes_removed"] is False
+    assert (row["removed"], row["complete"]) == (False, False)
+    assert row["remaining"] == ["volumes treebox-shellhistory-volfail (docker volume rm failed)"]
     assert ["rm", "-f", "abc123"] in calls
     assert ["volume", "rm", "treebox-shellhistory-volfail"] in calls
-    assert not wt.exists()
+    assert wt.is_dir() and record.exists(wt)
+    assert (Path(root) / ".containers" / "volfail" / "treebox-resources.json").is_file()
+
+    # The retry: the container is gone now and the volume rm succeeds.
+    monkeypatch.setattr(DockerRunner, "_container_ids", lambda self, worktree: [])
+    monkeypatch.setattr(
+        DockerRunner,
+        "_engine",
+        lambda self, args: subprocess.CompletedProcess(
+            ["docker", *args],
+            0,
+            "treebox-shellhistory-volfail\n" if args[:2] == ["volume", "ls"] else "",
+            "",
+        ),
+    )
+    volfail = ["teardown", "volfail", "--repo", str(repo), "--root", root, "--force"]
+    retry = _run([*volfail, "--remove-volumes", "--json"])
+    assert retry.exit_code == 0, retry.output
+    (row,) = json.loads(retry.stdout)["worktrees"]
+    assert (row["complete"], row["volumes_removed"], row["removed"]) == (True, True, True)
+    assert not wt.exists() and not record.exists(wt)
+    assert not (Path(root) / ".containers" / "volfail").exists()
 
 
 def test_teardown_removes_manifest_volumes_when_container_and_template_gone(
@@ -2478,7 +2984,6 @@ def test_teardown_removes_manifest_volumes_when_container_and_template_gone(
     """The issue-21 leak, end to end: the container was removed manually AND
     the user template no longer exists on disk. The host-owned generated
     manifest must still drive removal instead of leaking the volume."""
-    import dataclasses
 
     from treebox.config import Config
     from treebox.models import Worktree
@@ -2486,19 +2991,10 @@ def test_teardown_removes_manifest_volumes_when_container_and_template_gone(
 
     wt = Path(root) / "volleak"
     _run(["create", "volleak", "--repo", str(repo), "--root", root, "--print"])
-    st = state.load(wt)
-    assert st is not None
     DockerRunner(Config(isolation="docker")).initialize(
-        Worktree(str(repo), "volleak", "volleak", st.base, wt)
+        Worktree(str(repo), "volleak", "volleak", "main", wt)
     )
-    state.save(
-        wt,
-        dataclasses.replace(
-            st,
-            isolation="docker",
-            template="deleted-template",  # since removed from disk
-        ),
-    )
+    _edit_record(wt, isolation="docker", template="deleted-template")  # since removed
     calls: list[list[str]] = []
 
     monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
@@ -2549,15 +3045,12 @@ def test_teardown_never_trusts_sandbox_writable_state_for_volume_removal(
 
     wt = Path(root) / "volinject"
     _run(["create", "volinject", "--repo", str(repo), "--root", root, "--print"])
-    st = state.load(wt)
-    assert st is not None
     DockerRunner(Config(isolation="docker")).initialize(
-        Worktree(str(repo), "volinject", "volinject", st.base, wt)
+        Worktree(str(repo), "volinject", "volinject", "main", wt)
     )
+    _rewrite_recorded_runner(wt, "docker")
     state_file = Path(git.git_dir(wt)) / "treebox-state.json"
-    injected = json.loads(state_file.read_text())
-    injected.update(isolation="docker", volumes=["production-database"])
-    state_file.write_text(json.dumps(injected))
+    state_file.write_text(json.dumps({"isolation": "docker", "volumes": ["production-database"]}))
     calls: list[list[str]] = []
 
     monkeypatch.setattr(DockerRunner, "_available", lambda self: True)
@@ -2626,21 +3119,33 @@ def test_teardown_json_host_remove_volumes_reports_none_removed(
 def test_teardown_container_cleanup_failure_is_best_effort(
     repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
 ):
-    """Container teardown failing must not abort the removal: the worktree still
-    goes, the record says container=failed, and the exit stays 0."""
+    """A failing runner teardown is an incomplete cleanup: the teardown fails
+    (exit 1, TEARDOWN_INCOMPLETE), names what remains, and keeps the worktree
+    and its record, so the same command finishes the job on a retry."""
     from treebox.runners.host import HostRunner
 
     def boom(self, wt, *, reporter):
         raise RuntimeError("daemon exploded")
 
-    monkeypatch.setattr(HostRunner, "teardown", boom)
     _run(["create", "bestef", "--repo", str(repo), "--root", root, "--print"])
-    res = _run(["teardown", "bestef", "--repo", str(repo), "--root", root, "--force", "--json"])
-    assert res.exit_code == 0, res.output
-    (record,) = json.loads(res.stdout)["worktrees"]
-    assert record["container"] == "failed"
-    assert record["removed"] is True
-    assert not (Path(root) / "bestef").exists()
+    wt = Path(root) / "bestef"
+    with monkeypatch.context() as patched:
+        patched.setattr(HostRunner, "teardown", boom)
+        res = _run(["teardown", "bestef", "--repo", str(repo), "--root", root, "--force", "--json"])
+    assert res.exit_code == 1, res.output
+    (row,) = json.loads(res.stdout)["worktrees"]
+    assert row["container"] == "failed"
+    assert (row["removed"], row["complete"]) == (False, False)
+    assert row["remaining"] == ["host resources (daemon exploded)"]
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "TEARDOWN_INCOMPLETE"
+    assert "bestef: host resources (daemon exploded)" in err["message"]
+    assert wt.is_dir() and record.exists(wt)
+
+    retry = _run(["teardown", "bestef", "--repo", str(repo), "--root", root, "--force", "--json"])
+    assert retry.exit_code == 0, retry.output
+    assert json.loads(retry.stdout)["worktrees"][0]["complete"] is True
+    assert not wt.exists() and not record.exists(wt)
 
 
 def test_teardown_branch_delete_failure_is_reported_not_fatal(
@@ -2717,7 +3222,7 @@ def test_doctor_human_path_reports_blocked_and_exits_1(tmp_path: Path, hermetic_
     assert "repo" in res.stdout
 
 
-def test_doctor_human_path_healthy_repo_exits_0(repo: Path, hermetic_config):
+def test_doctor_human_path_healthy_repo_exits_0(repo: Path, hermetic_config, agent_ready):
     res = _run(["doctor", "--repo", str(repo)])
     assert res.exit_code == 0, res.output
     assert "doctor" in res.stdout
@@ -2871,6 +3376,8 @@ def test_cold_dry_run_json_preserves_schema_and_command_order(
             "worktree_path",
             "branch",
             "commands",
+            "resources",
+            "warnings",
         }
     )
     assert warm["schemaVersion"] == cold["schemaVersion"] == 1
@@ -3044,20 +3551,20 @@ def test_list_human_table_through_the_cli(repo: Path, root: str, hermetic_config
 def test_list_human_table_marks_unavailable_isolation_unknown(
     repo: Path, root: str, hermetic_config
 ):
-    """A pre-state-file worktree must not be mislabeled with the current
+    """A worktree without a host-owned record must not be mislabeled with the current
     config default. The human table says unknown while JSON v1 keeps its
     established empty-string fallback."""
-    wt = Path(root) / "legacy"
+    wt = Path(root) / "unrecorded"
     wt.parent.mkdir(parents=True)
-    added = _git(repo, "worktree", "add", "-b", "legacy", str(wt), "main")
+    added = _git(repo, "worktree", "add", "-b", "unrecorded", str(wt), "main")
     assert added.returncode == 0, added.stderr
 
     human = _run(["list", "--repo", str(repo), "--root", root])
     assert human.exit_code == 0, human.output
-    assert "legacy" in human.stdout and "unknown" in human.stdout
+    assert "unrecorded" in human.stdout and "unknown" in human.stdout
 
     payload = json.loads(_run(["list", "--repo", str(repo), "--root", root, "--json"]).stdout)
-    row = next(r for r in payload["worktrees"] if r["name"] == "legacy")
+    row = next(r for r in payload["worktrees"] if r["name"] == "unrecorded")
     assert row["isolation"] == ""
 
 
@@ -3073,7 +3580,7 @@ def test_teardown_chooser_with_no_worktrees_says_so(
 
 
 def test_doctor_surfaces_runner_preflight_hint_as_advisory(
-    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+    repo: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch, non_root_identity
 ):
     """A failing isolation preflight must reach the doctor payload as a failed
     check plus its remediation hint in advisories — and exit 1 (hard check)."""
@@ -3116,3 +3623,400 @@ def test_stale_worktree_does_not_crash_and_teardown_prunes(repo: Path, root: str
     res = _run(["teardown", "gone", "--repo", str(repo), "--root", root, "--force"])
     assert res.exit_code == 0, res.output
     assert not any(Path(r.path).name == "gone" for r in git.worktree_list(str(repo)))
+
+
+# --- host-owned record (issue #57) -------------------------------------------
+
+
+def test_sandbox_written_state_cannot_choose_the_next_session(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """Everything a boxed agent can write in the private git dir is inert for
+    policy: a forged isolation/template/firewall in the state file changes
+    neither the runner nor the template of the next enter, nor what list
+    reports. The host-owned record decides."""
+    from treebox import git
+    from treebox.runners import docker as dr
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "boxed", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "boxed"
+    _edit_record(wt, isolation="docker", template="default")
+    state_file = Path(git.git_dir(wt)) / "treebox-state.json"
+    forged = {"isolation": "host", "template": str(wt / "evil"), "firewall": False}
+    state_file.write_text(json.dumps(forged))
+
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, wt: None)
+    res = _run(["enter", "boxed", *base, "--print"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout.split()[:2] == ["docker", "exec"]  # still sandboxed
+    rows = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    assert rows[0]["isolation"] == "docker"
+
+
+def _spy_teardowns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record which runner tears each worktree down, without touching Docker."""
+    from treebox.runners import RunnerTeardownResult
+    from treebox.runners.docker import DockerRunner
+    from treebox.runners.host import HostRunner
+
+    calls: list[str] = []
+    for cls in (DockerRunner, HostRunner):
+
+        def _teardown(self, wt, *, reporter, _name=cls.name):  # type: ignore[no-untyped-def]
+            calls.append(f"{_name}:{wt.name}")
+            return RunnerTeardownResult.cleaned()
+
+        monkeypatch.setattr(cls, "teardown", _teardown)
+    return calls
+
+
+def test_missing_record_fails_closed_and_teardown_recovers(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A worktree without a host-owned record (made by another treebox
+    version, or its record was deleted) is never entered with the config
+    default or with its sandbox-writable state's claims: enter is
+    RECORD_MISSING with the recreate hint. `list` still shows it, and a plain
+    teardown (no extra flag) removes it, so `create` works again."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "unrecorded", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "unrecorded"
+    record.remove(wt)
+    from treebox import git
+
+    # A forged file in the sandbox-writable git dir claims a policy and a
+    # finished setup; nothing reads it.
+    forged = {"lockfile_hash": "", "provisioned": True, "base": "main", "isolation": "docker"}
+    forged.update(harness="codex", template="/etc")
+    (Path(git.git_dir(wt)) / "treebox-state.json").write_text(json.dumps(forged))
+
+    res = _run(["enter", "unrecorded", *base, "--json"])
+    assert res.exit_code == 5, res.output
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "RECORD_MISSING"
+    assert err["hint"] == (
+        "Tear it down and create it again: treebox teardown unrecorded, then treebox create"
+        " (add --checkout <branch> to keep its branch)."
+    )
+    assert err["path"] == str(record.record_path(wt))
+    assert not record.exists(wt)  # nothing promoted from state
+
+    rows = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
+    row = next(r for r in rows if r["name"] == "unrecorded")
+    assert row["isolation"] == ""
+
+    # No record and no docker resource manifest: the host runner tears it
+    # down. The forged "docker" in the state is never read.
+    calls = _spy_teardowns(monkeypatch)
+    res = _run(["teardown", "unrecorded", *base, "--force", "--delete-branch", "--json"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["host:unrecorded"]
+    assert not wt.exists() and not record.exists(wt)
+
+    assert _run(["create", "unrecorded", *base, "--print"]).exit_code == 0
+    assert record.load(wt).isolation == "host"
+
+
+def test_record_less_docker_worktree_is_torn_down_by_its_resource_manifest(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """Without a record, the docker runner's host-owned resource manifest
+    (written before any docker resource exists) is what makes teardown use
+    the docker runner, so a docker worktree's container is not leaked."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "boxed", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "boxed"
+    record.remove(wt)
+    manifest = Path(root) / ".containers" / "boxed" / "treebox-resources.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+
+    calls = _spy_teardowns(monkeypatch)
+    res = _run(["teardown", "boxed", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["docker:boxed"]
+    assert not wt.exists() and not record.exists(wt)
+
+
+def test_record_less_docker_teardown_that_is_incomplete_retries_with_the_same_command(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """An incomplete cleanup of a docker worktree without a record keeps the
+    worktree (and the docker runner keeps its manifest), so the same plain
+    teardown picks the docker runner again and finishes the job. No flag."""
+    from treebox.runners import RunnerTeardownResult
+    from treebox.runners.docker import DockerRunner
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "boxed", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "boxed"
+    record.remove(wt)
+    manifest = Path(root) / ".containers" / "boxed" / "treebox-resources.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+
+    calls: list[str] = []
+
+    def _teardown(self, wt, *, reporter):  # type: ignore[no-untyped-def]
+        calls.append(wt.name)
+        if len(calls) == 1:
+            return RunnerTeardownResult("failed", remaining=("container abc (docker rm failed)",))
+        manifest.unlink()
+        return RunnerTeardownResult.cleaned()
+
+    monkeypatch.setattr(DockerRunner, "teardown", _teardown)
+    res = _run(["teardown", "boxed", *base, "--force", "--json"])
+    assert res.exit_code == 1, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "TEARDOWN_INCOMPLETE"
+    assert json.loads(res.stdout)["worktrees"][0]["complete"] is False
+    assert wt.is_dir() and manifest.exists()
+
+    res = _run(["teardown", "boxed", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["boxed", "boxed"]
+    assert json.loads(res.stdout)["worktrees"][0]["complete"] is True
+    assert not wt.exists() and not record.exists(wt)
+
+
+def test_invalid_record_is_classified_and_teardown_recovers(repo: Path, root: str, hermetic_config):
+    """A record that does not parse - here bound to another path (the root
+    was moved, or a file was copied); another schemaVersion is the same - is
+    RECORD_INVALID with the recreate hint, and a plain teardown removes the
+    worktree and the invalid record."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "moved", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "moved"
+    path = record.record_path(wt)
+    path.write_text(path.read_text().replace(str(wt), "/old/root/moved"))
+
+    res = _run(["enter", "moved", *base, "--json"])
+    assert res.exit_code == 5
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "RECORD_INVALID"
+    assert "treebox teardown moved" in err["hint"]
+
+    res = _run(["teardown", "moved", *base, "--force", "--delete-branch", "--json"])
+    assert res.exit_code == 0, res.output
+    assert not wt.exists() and not path.exists()
+    assert _run(["create", "moved", *base, "--print"]).exit_code == 0
+
+
+def test_teardown_removes_the_record(repo: Path, root: str, hermetic_config):
+    """A normal teardown removes the host-owned record with the worktree."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "normal", *base, "--print"]).exit_code == 0
+    res = _run(["teardown", "normal", *base, "--force", "--json"])
+    assert res.exit_code == 0, res.output
+    assert not record.exists(Path(root) / "normal")
+
+
+def test_enter_template_flag_stays_a_per_session_override(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """`enter --template` is the operator's per-session override and never
+    rewrites the record."""
+    from treebox.runners import docker as dr
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "tpl", *base, "--print"]).exit_code == 0
+    monkeypatch.setenv("TREEBOX_HOME", str(tmp_path / "home"))
+    assert _run(["template", "init", "other"]).exit_code == 0
+    wt = Path(root) / "tpl"
+    _edit_record(wt, isolation="docker", template="default")
+    seen: list[str] = []
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    monkeypatch.setattr(
+        dr.DockerRunner, "prepare_entry", lambda self, wt: seen.append(self.config.template)
+    )
+    assert _run(["enter", "tpl", *base, "--template", "other", "--print"]).exit_code == 0
+    assert _run(["enter", "tpl", *base, "--print"]).exit_code == 0
+    assert seen == ["other", "default"]
+    assert record.load(wt).template == "default"
+
+
+# --- explicit lifecycle state (issue #63) -------------------------------------
+
+
+def _list_row(repo: Path, root: str, name: str) -> dict[str, object]:
+    rows = json.loads(_run(["list", "--repo", str(repo), "--root", root, "--json"]).stdout)
+    return next(r for r in rows["worktrees"] if r["name"] == name)
+
+
+def test_failed_setup_is_a_failed_create_and_enter_retries_it(
+    repo: Path, root: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A setup hook that exits 7 fails create (exit 1, SETUP_FAILED) with the
+    step, its exit status and where its output is. The worktree is kept and
+    marked failed in the host-owned record, list never calls it fresh, a
+    forged "provisioned" state file in the sandbox-writable git dir changes
+    nothing, and enter (or the same create) retries setup until it passes."""
+    from treebox import git
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('setup_hook = ["echo attempt >> setup.log; echo hook-output; exit 7"]\n')
+    monkeypatch.setenv("TREEBOX_CONFIG", str(cfg))
+    base = ["--repo", str(repo), "--root", root]
+    wt = Path(root) / "hookfail"
+
+    res = _run(["create", "hookfail", *base, "--json"])
+    assert res.exit_code == 1, res.output
+    assert res.stdout == ""
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "SETUP_FAILED"
+    assert "'setup · hook 1'" in err["message"] and "status 7" in err["message"]
+    log = Path(err["path"])
+    assert log == lifecycle.setup_log_path(wt) and not log.is_relative_to(wt)
+    assert "hook-output" in log.read_text()
+    assert "treebox enter hookfail" in err["hint"]
+    assert wt.is_dir()
+    assert record.load(wt).setup == lifecycle.SetupResult.failed("setup · hook 1", 7)
+    row = _list_row(repo, root, "hookfail")
+    assert (row["setup"], row["deps"], row["health"]) == ("failed", "unknown", "healthy")
+
+    # The sandbox can write the git dir; a forged state file there is inert.
+    from treebox import ecosystems
+
+    forged = {"lockfile_hash": ecosystems.lockfile_hash(wt), "provisioned": True}
+    (Path(git.git_dir(wt)) / "treebox-state.json").write_text(json.dumps(forged))
+    assert _list_row(repo, root, "hookfail")["deps"] == "unknown"
+
+    # enter retries the failed setup (and still fails while the hook fails).
+    again = _run(["enter", "hookfail", *base, "--json"])
+    assert again.exit_code == 1
+    assert json.loads(again.stderr)["error"]["code"] == "SETUP_FAILED"
+    assert (wt / "setup.log").read_text().count("attempt") == 2
+
+    # A repeated create retries it too: same name, no SLUG_CONFLICT.
+    cfg.write_text('setup_hook = ["echo attempt >> setup.log"]\n')
+    fixed = _run(["create", "hookfail", *base, "--json"])
+    assert fixed.exit_code == 0, fixed.output
+    assert (wt / "setup.log").read_text().count("attempt") == 3
+    assert record.load(wt).setup.status == "done"
+    assert _list_row(repo, root, "hookfail")["deps"] == "fresh"
+
+    # Done now: enter skips setup, and a same-name create is a conflict again.
+    assert _run(["enter", "hookfail", *base, "--json"]).exit_code == 0
+    assert (wt / "setup.log").read_text().count("attempt") == 3
+    assert _run(["create", "hookfail", *base, "--json"]).exit_code == 5
+
+
+def test_interrupted_setup_stays_pending_and_enter_finishes_it(
+    repo: Path, root: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A real interrupt (SIGINT to the treebox process while its setup hook
+    runs) leaves setup pending in the record; list does not call the
+    worktree fresh and the next enter finishes setup."""
+    import os
+    import signal
+    import sys
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'setup_hook = ["if [ ! -e ../interrupted ]; then touch ../interrupted; '
+        'kill -INT $PPID; sleep 5; fi; echo ran >> setup.log"]\n'
+    )
+    env = {**os.environ, "TREEBOX_CONFIG": str(cfg)}
+    env.pop("VIRTUAL_ENV", None)
+    base = ["--repo", str(repo), "--root", root]
+    cli = [sys.executable, "-c", "from treebox.cli import app; app()"]
+    proc = subprocess.run(
+        [*cli, "create", "cut", *base, "--json"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode in (130, -signal.SIGINT), (proc.returncode, proc.stderr)
+    wt = Path(root) / "cut"
+    assert wt.is_dir() and not (wt / "setup.log").exists()
+    assert record.load(wt).setup.status == "pending"
+    row = _list_row(repo, root, "cut")
+    assert (row["setup"], row["deps"]) == ("pending", "unknown")
+
+    monkeypatch.setenv("TREEBOX_CONFIG", str(cfg))
+    res = _run(["enter", "cut", *base, "--json"])
+    assert res.exit_code == 0, res.output
+    assert (wt / "setup.log").read_text().strip() == "ran"
+    assert record.load(wt).setup.status == "done"
+
+
+def test_teardown_rechecks_dirty_state_after_the_prompt(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """The prompt race: a file written while the confirmation prompt is open
+    must not be deleted on 'y'. The dirty check runs again under the lock,
+    right before removal, and refuses (DIRTY_WORKTREE, exit 5)."""
+    from treebox import cli
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "racy", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "racy"
+    (wt / "setup.log").unlink()  # clean, so the pre-prompt check passes
+
+    def confirm_while_writing(*args: object, **kwargs: object) -> bool:
+        (wt / "written-during-prompt.txt").write_text("unsaved work\n")
+        return True
+
+    monkeypatch.setattr(cli, "_stdin_isatty", lambda: True)
+    monkeypatch.setattr(cli.typer, "confirm", confirm_while_writing)
+    res = _run(["teardown", "racy", *base])
+
+    assert res.exit_code == 5, res.output
+    assert "uncommitted changes" in res.output
+    assert (wt / "written-during-prompt.txt").read_text() == "unsaved work\n"
+    assert record.exists(wt)
+
+
+def test_teardown_never_removes_a_git_locked_worktree(repo: Path, root: str, hermetic_config):
+    """`git worktree lock` is an explicit "keep this" that --force does not
+    override: teardown refuses (WORKTREE_LOCKED, exit 5) and removes nothing,
+    so the directory and git's registration can never disagree."""
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "pinned", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "pinned"
+    assert _git(repo, "worktree", "lock", "--reason", "in use", str(wt)).returncode == 0
+
+    res = _run(["teardown", "pinned", *base, "--force", "--json"])
+    assert res.exit_code == 5, res.output
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "WORKTREE_LOCKED"
+    assert "worktree unlock" in err["hint"]
+    assert wt.is_dir() and record.exists(wt)
+    assert str(wt.name) in _git(repo, "worktree", "list").stdout
+
+    assert _git(repo, "worktree", "unlock", str(wt)).returncode == 0
+    assert _run(["teardown", "pinned", *base, "--force", "--json"]).exit_code == 0
+    assert not wt.exists() and not record.exists(wt)
+
+
+def test_teardown_never_falls_back_to_deleting_a_tree_git_refused(
+    repo: Path, root: str, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """If git refuses to remove a healthy worktree (here: changes that appear
+    after the last check), teardown keeps it and fails (TEARDOWN_INCOMPLETE,
+    exit 1) - it never deletes the directory by other means."""
+    from treebox import git
+
+    base = ["--repo", str(repo), "--root", root]
+    assert _run(["create", "refused", *base, "--print"]).exit_code == 0
+    wt = Path(root) / "refused"
+    (wt / "setup.log").unlink()
+    real_remove = git.worktree_remove
+
+    def dirty_then_remove(repo_path, worktree, *, force):
+        (wt / "late.txt").write_text("late work\n")
+        real_remove(repo_path, worktree, force=force)
+
+    monkeypatch.setattr(git, "worktree_remove", dirty_then_remove)
+    monkeypatch.setattr("treebox.cli._stdin_isatty", lambda: True)
+    monkeypatch.setattr("treebox.cli.typer.confirm", lambda *a, **k: True)
+    res = _run(["teardown", "refused", *base])
+
+    assert res.exit_code == 1, res.output
+    assert "Teardown is incomplete: refused: worktree (git refused to remove it" in res.output
+    assert (wt / "late.txt").read_text() == "late work\n"
+    assert record.exists(wt)

@@ -5,12 +5,23 @@
   "schemaVersion": 1,
   "name": "golden-docker-json",
   "worktree_path": "__ROOT__/wts/golden-docker-json",
+  "id": "__HASH__",
+  "port_base": 20040,
+  "port_count": 10,
   "branch": "golden-docker-json",
   "base": "main",
   "entry_command": [
     "docker",
     "exec",
     "-i",
+    "-e",
+    "TREEBOX_NAME=golden-docker-json",
+    "-e",
+    "TREEBOX_ID=__HASH__",
+    "-e",
+    "TREEBOX_PORT_BASE=20040",
+    "-e",
+    "TREEBOX_PORT_COUNT=10",
     "-u",
     "agent",
     "-w",
@@ -19,6 +30,12 @@
     "claude",
     "--dangerously-skip-permissions"
   ],
-  "created": true
+  "created": true,
+  "resources": {
+    "cpus": null,
+    "memory": null,
+    "pids": null
+  },
+  "warnings": []
 }
 # --- stderr ---

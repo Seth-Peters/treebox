@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -28,13 +29,17 @@ from rich.text import Text
 from . import (
     __version__,
     assets,
+    cleanup,
     forge,
     git,
+    lifecycle,
     locking,
     names,
+    ports,
     provision,
+    record,
     resolve,
-    state,
+    resources,
     status,
     system,
 )
@@ -48,17 +53,28 @@ from .models import (
     WorktreeRow,
     derive_name,
     expand_user,
-    flatten_branch,
     is_placeholder,
     is_valid_name,
+    is_valid_template_name,
     path_is_under,
     placeholder_branch,
     same_path,
+    worktree_id,
     worktree_path,
     worktree_root,
 )
 from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
-from .runners import VALID_ISOLATION, PreflightError, Runner, get_runner
+from .resources import ResourceLimitError, ResourceLimits
+from .runners import (
+    VALID_ISOLATION,
+    DockerRunner,
+    FirewallError,
+    HostRunner,
+    PreflightError,
+    Runner,
+    get_runner,
+)
+from .runners.docker import has_resource_manifest
 
 # Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
 EXIT_OK = 0
@@ -74,8 +90,11 @@ EXIT_CONFLICT = 5  # already exists / uncommitted changes / lock held
 SCHEMA_VERSION = 1
 
 _EPILOG = (
-    "Exit codes: 0 ok · 1 runtime/doctor hard-check · 2 usage · "
-    "3 not-found · 4 auth/permission · 5 conflict (exists/locked/dirty)."
+    "Exit codes: 0 ok · 1 runtime (incl. failed setup, incomplete teardown)/doctor "
+    "hard-check · 2 usage · 3 not-found · 4 auth/permission · 5 conflict "
+    "(exists/locked/dirty). A launch exits with the agent's exit code (non-zero: "
+    "the last stderr line is 'treebox: agent exited with status N'); a "
+    "SIGINT/SIGTERM/SIGHUP to treebox stops the agent and exits 128+signal."
 )
 
 app = typer.Typer(
@@ -177,82 +196,265 @@ def _resolve_config(
     return cfg
 
 
-def _reconcile_with_state(
+def _reconcile_with_record(
     reporter: Reporter,
     cfg: Config,
-    st: state.WorktreeState | None,
+    rec: record.WorktreeRecord,
     *,
     isolation: str | None,
     harness: str | None = None,
     template: str | None = None,
-    honor_firewall: bool = False,
     json_out: bool = False,
 ) -> Config:
-    """Fold a worktree's recorded creation-time choices into the session config.
+    """Fold a worktree's host-owned record (its creation policy) into the
+    session config.
 
-    One precedence policy: a recorded value describes the worktree that
-    actually exists, so it beats the config default. What an explicit flag
-    means differs per field:
+    The record describes the worktree that actually exists, so it beats the
+    config default. What an explicit flag means differs per field:
 
-    - ``isolation``: the sandbox/no-sandbox decision is fixed at create time —
-      falling back to the config default would silently enter a
-      docker-sandboxed worktree on the host (or leak its container on
-      teardown). An unknown recorded mode (corrupt or hand-edited state) and
-      an explicit ``--isolation`` that disagrees with the recorded one are
-      both conflicts, never overrides.
-    - ``firewall`` (``honor_firewall`` callers, i.e. ``enter``): the recorded
-      choice simply wins — capabilities are fixed on the created container,
-      so re-resolving the config default would make ``create --no-firewall``
-      (under a ``firewall=true`` config) hard-error against its own
-      container, and there is no ``enter`` flag to reconcile. ``teardown``
-      leaves the config default in place, as it always has.
-    - ``harness``: a known recorded value wins over the config default, so
-      ``create -H codex`` + ``enter`` launches codex, not the session
-      default — but an explicit ``--harness`` stays a legitimate per-session
-      override, and an unrecorded/unknown value falls back to the default.
-    - ``template``: the template decides the container's user, mounts, and
-      per-workspace volume names, so the recorded choice wins (a config
-      default here would regenerate ``container.json`` from the wrong
-      template — docker exec as the wrong user → unauthenticated agent — and
-      derive the wrong volume names on ``--remove-volumes``). An explicit
-      ``--template`` stays a legitimate per-session override; unrecorded
-      (None) falls back to the config default.
+    - ``isolation``: the sandbox/no-sandbox decision is fixed at create time.
+      An explicit ``--isolation`` that disagrees with the recorded one is a
+      conflict, never an override.
+    - ``firewall``: the recorded choice wins - capabilities are fixed on the
+      created container, and there is no ``enter`` flag to reconcile.
+    - ``harness``: the recorded value wins over the config default, but an
+      explicit ``--harness`` stays a legitimate per-session override.
+    - ``template``: the template decides the container's user and mounts, so
+      the recorded choice wins over the config default; an explicit
+      ``--template`` stays a legitimate per-session operator override.
+    - ``resources``: the recorded limits are what the sandbox has, so they
+      always win (``_check_entry_resources`` refuses a conflicting flag and
+      warns about a config or template change).
 
-    This is also where recorded/boundary ``str`` names are final: callers
-    resolve ``Harness``/runner objects from the returned config, once.
+    ``record.load`` already refused unknown isolation and harness names, so
+    the recorded ``str`` names are final here: callers resolve
+    ``Harness``/runner objects from the returned config, once.
     """
-    recorded = st.isolation if st else ""
-    if recorded and recorded not in VALID_ISOLATION:
+    if isolation is not None and isolation != rec.isolation:
         raise _die(
             reporter,
-            f"Worktree was provisioned with unknown isolation mode '{recorded}'.",
-            code=EXIT_CONFLICT,
-            error_code="UNKNOWN_ISOLATION",
-            hint="Its recorded isolation mode is unknown (corrupt or hand-edited state). "
-            "Remove it manually (git worktree remove; docker rm any leftover container) "
-            "and re-create it.",
-            json_out=json_out,
-        )
-    if recorded and isolation is not None and isolation != recorded:
-        raise _die(
-            reporter,
-            f"Worktree was provisioned with '{recorded}' isolation, "
+            f"Worktree was provisioned with '{rec.isolation}' isolation, "
             f"but --isolation {isolation} was given.",
             code=EXIT_CONFLICT,
             error_code="ISOLATION_MISMATCH",
-            hint=f"Drop --isolation to use the recorded '{recorded}' mode, or tear "
+            hint=f"Drop --isolation to use the recorded '{rec.isolation}' mode, or tear "
             "down and re-create the worktree with the new one.",
             json_out=json_out,
         )
-    if recorded and isolation is None:
-        cfg = cfg.with_overrides(isolation=recorded)
-    if honor_firewall and st is not None:
-        cfg = cfg.with_overrides(firewall=st.firewall)
-    if harness is None and st and st.harness in VALID_HARNESSES:
-        cfg = cfg.with_overrides(harness=st.harness)
-    if template is None and st and st.template:
-        cfg = cfg.with_overrides(template=st.template)
+    cfg = cfg.with_overrides(
+        isolation=rec.isolation, firewall=rec.firewall, resources=rec.resources
+    )
+    if harness is None:
+        cfg = cfg.with_overrides(harness=rec.harness)
+    if template is None:
+        cfg = cfg.with_overrides(template=rec.template)
     return cfg
+
+
+def _record_hint(exc: record.RecordError) -> str:
+    """The recovery for a missing or invalid host-owned record: tear the
+    worktree down and create it again. Never a fallback to config defaults or
+    to the worktree's sandbox-writable state."""
+    return (
+        f"Tear it down and create it again: treebox teardown {exc.worktree.name}, "
+        "then treebox create (add --checkout <branch> to keep its branch)."
+    )
+
+
+# --- resource limits ---------------------------------------------------------
+
+_CPUS_HELP = (
+    "CPU limit for this worktree's sandbox, in CPUs (a decimal, at least 0.01, "
+    "at most the engine's CPU count), e.g. --cpus 2 or --cpus 1.5. Maps to "
+    "docker run --cpus. Overrides \\[resources] cpus in config and the template's "
+    "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
+    "--isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_MEMORY_HELP = (
+    "Memory limit for this worktree's sandbox, in Docker's memory syntax: a "
+    "number and a unit b, k, m, g, t or p (binary multiples; a bare number is "
+    "bytes; at least 6m), e.g. --memory 4g or --memory 512m. Maps to docker run "
+    "--memory. Overrides \\[resources] memory in config and the template's "
+    "resources. Unset: no treebox cap. Fixed when the sandbox is created. "
+    "--isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_PIDS_HELP = (
+    "Process limit for this worktree's sandbox: the most processes and threads "
+    "it can run at once (a positive whole number), e.g. --pids-limit 512. Maps "
+    "to docker run --pids-limit. Overrides \\[resources] pids in config and the "
+    "template's resources. Unset: no treebox cap. Fixed when the sandbox is "
+    "created. --isolation host has no sandbox and refuses this flag (exit 2)."
+)
+_ENTER_LIMIT_NOTE = (
+    " On enter: only restates the recorded limit; a different value is a "
+    "conflict (exit 5) with the re-create commands."
+)
+
+
+def _resource_flags(
+    reporter: Reporter,
+    *,
+    cpus: str | None,
+    memory: str | None,
+    pids_limit: str | None,
+    json_out: bool,
+) -> ResourceLimits:
+    """Validate the ``--cpus`` / ``--memory`` / ``--pids-limit`` flags before
+    anything is provisioned: a bad value is a usage error (exit 2)."""
+    try:
+        return resources.from_flags(cpus=cpus, memory=memory, pids=pids_limit)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="See the units and an example in `treebox create --help`.",
+            json_out=json_out,
+        ) from exc
+
+
+def _refuse_unsupported_limits(
+    reporter: Reporter, run: Runner, explicit: ResourceLimits, *, json_out: bool
+) -> None:
+    """An explicit limit the runner cannot apply is an error, never ignored."""
+    unsupported = [n for n in explicit.names() if n not in run.supported_resources]
+    if not unsupported:
+        return
+    flags = ", ".join(resources.FLAGS[n] for n in unsupported)
+    raise _die(
+        reporter,
+        f"The {run.name} runner cannot apply {flags}"
+        + (
+            ": it runs the agent on the host, with no sandbox to cap."
+            if run.name == "host"
+            else "."
+        ),
+        code=EXIT_USAGE,
+        error_code="RESOURCE_UNSUPPORTED",
+        hint=f"Drop {flags}, or use a sandbox: --isolation docker.",
+        json_out=json_out,
+    )
+
+
+def _creation_limits(
+    reporter: Reporter,
+    cfg: Config,
+    run: Runner,
+    explicit: ResourceLimits,
+    *,
+    json_out: bool,
+) -> tuple[ResourceLimits, list[str]]:
+    """The effective limits of a new sandbox, field by field: explicit flag,
+    then user config (``cfg.resources``), then the runner's template tier,
+    restricted to what the runner can apply. Also returns the config limits
+    this runner does not apply (shown as a note, never an error: one
+    ``[resources]`` table must not break every host worktree). Engine-refused
+    values fail here, before provisioning."""
+    _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
+    try:
+        wanted = explicit.over(cfg.resources).over(run.template_resources())
+        effective = wanted.only(run.supported_resources)
+        run.check_resources(effective)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="Pick a smaller value, or check the Docker engine's resources (docker info).",
+            json_out=json_out,
+        ) from exc
+    except _PROVISION_ERRORS as exc:
+        raise _handle(reporter, exc, json_out=json_out) from exc
+    ignored = [n for n in cfg.resources.names() if n not in run.supported_resources]
+    return effective, ignored
+
+
+def _note_ignored_limits(reporter: Reporter, run: Runner, ignored: list[str]) -> None:
+    if ignored:
+        reporter.note(
+            "limits",
+            f"[resources] {', '.join(ignored)} not applied: the {run.name} runner "
+            "sets no such limit",
+        )
+
+
+def _recreate_command(rec: record.WorktreeRecord, branch: str | None, flags: ResourceLimits) -> str:
+    """The exact commands that re-create a worktree's sandbox. ``flags`` are
+    the limits to choose by flag; every other limit comes from config and the
+    template again, as on any create (teardown keeps the branch, and its
+    commits, by default)."""
+    name = rec.worktree.name
+    create = ["treebox", "create", name]
+    if branch and branch != "detached":
+        create += ["--checkout", branch]
+    create += ["--isolation", rec.isolation]
+    if rec.firewall:
+        create.append("--firewall")
+    create += ["--template", rec.template, "-H", rec.harness, *flags.cli_flags()]
+    return f"treebox teardown {name} && {shlex.join(create)}"
+
+
+def _check_entry_resources(
+    reporter: Reporter,
+    run: Runner,
+    rec: record.WorktreeRecord,
+    *,
+    branch: str | None,
+    explicit: ResourceLimits,
+    config_limits: ResourceLimits,
+    json_out: bool,
+) -> ResourceLimits:
+    """The recorded limits are what an existing sandbox has, and a container's
+    limits cannot change in place. An explicit flag that differs is a
+    conflict (exit 5) with the re-create commands. A limit that config or the
+    template gave at create, and that they now give differently, is drift: a
+    warning with the same commands, never a silent no-op. Returns the drift
+    (the values config and template now give; unset = no drift).
+
+    A limit an explicit ``create`` flag chose (``rec.explicit_resources``)
+    never drifts: the operator picked it on purpose. Neither does one this
+    ``enter`` restates by flag."""
+    _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
+    recorded = rec.resources
+    chosen = recorded.only(rec.explicit_resources)
+    differs = [n for n in explicit.names() if getattr(explicit, n) != getattr(recorded, n)]
+    if differs:
+        flags = ", ".join(
+            f"{resources.FLAGS[n]} {resources.format_value(n, getattr(explicit, n))}"
+            for n in differs
+        )
+        raise _die(
+            reporter,
+            f"Worktree '{rec.worktree.name}' was created with limits "
+            f"{recorded.describe()}; {flags} cannot apply to its existing sandbox.",
+            code=EXIT_CONFLICT,
+            error_code="RESOURCE_MISMATCH",
+            hint="Drop the flag to keep the recorded limits, or commit your work and "
+            "re-create the sandbox: " + _recreate_command(rec, branch, explicit.over(chosen)),
+            path=str(record.record_path(rec.worktree)),
+            json_out=json_out,
+        )
+    try:
+        template = run.template_resources()
+    except _PROVISION_ERRORS:
+        template = ResourceLimits()  # enter tolerates a deleted or broken template
+    # Only a value the config or template sets counts: an unset default asks
+    # for nothing, so it never contradicts a limit chosen at create.
+    wanted = config_limits.over(template).only(run.supported_resources)
+    pinned = rec.explicit_resources | set(explicit.names())
+    drift = wanted.only(
+        n for n in wanted.names() if n not in pinned and getattr(wanted, n) != getattr(recorded, n)
+    )
+    if drift.names():
+        reporter.warn(
+            f"limits: this sandbox keeps its recorded limits ({recorded.describe()}); "
+            f"config and template now give {drift.describe()}. A limit change cannot "
+            "apply to an existing sandbox. To apply it, commit your work and "
+            f"re-create: {_recreate_command(rec, branch, chosen)}"
+        )
+    return drift
 
 
 def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
@@ -281,6 +483,29 @@ def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
             hint="Run inside a git repo, or pass --repo <path>.",
             json_out=json_out,
         ) from exc
+
+
+def _check_root(reporter: Reporter, repo_path: str, root: str, *, json_out: bool = False) -> None:
+    """Refuse a worktree root that cannot hold worktrees: the root, or its
+    nearest existing ancestor, is not a directory (a regular file, a dangling
+    symlink). A root that does not exist yet is fine - create makes it."""
+    base = worktree_root(repo_path, root)
+    probe = base
+    while not os.path.lexists(probe) and probe != probe.parent:
+        probe = probe.parent
+    if probe.is_dir():
+        return
+    where = "" if probe == base else f" ({probe} is not a directory)"
+    raise _die(
+        reporter,
+        f"Worktree root {base} is not a directory{where}.",
+        code=EXIT_USAGE,
+        error_code="INVALID_ROOT",
+        hint="Point --root (or root in config.toml) at a directory, "
+        "or at a path that does not exist yet.",
+        path=str(base),
+        json_out=json_out,
+    )
 
 
 def _validate_branch(reporter: Reporter, branch: str, *, json_out: bool = False) -> None:
@@ -364,8 +589,12 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(
             EXIT_CONFLICT,
             "LOCK_HELD",
-            "Another run holds this worktree — wait, then retry.",
+            exc.hint or "Another run holds this worktree — wait, then retry.",
         )
+    if isinstance(exc, ports.PortsExhaustedError):
+        return _ErrorInfo(EXIT_CONFLICT, "PORTS_EXHAUSTED", exc.hint)
+    if isinstance(exc, ports.LedgerInvalidError):
+        return _ErrorInfo(EXIT_ERROR, "PORT_LEDGER_INVALID", exc.hint)
     if isinstance(exc, git.FetchError):
         msg = str(exc).lower()
         if "publickey" in msg or "permission denied" in msg:
@@ -383,6 +612,20 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_PERMISSION, "FETCH_FAILED", hint)
     if isinstance(exc, provision.SlugConflictError):
         return _ErrorInfo(EXIT_CONFLICT, "SLUG_CONFLICT", exc.hint)
+    if isinstance(exc, provision.InvalidLinkageError):
+        return _ErrorInfo(EXIT_CONFLICT, "INVALID_LINKAGE", exc.hint)
+    if isinstance(exc, provision.SetupFailedError):
+        return _ErrorInfo(EXIT_ERROR, "SETUP_FAILED", exc.hint)
+    if isinstance(exc, record.RecordMissingError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_MISSING", _record_hint(exc))
+    if isinstance(exc, record.RecordInvalidError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_INVALID", _record_hint(exc))
+    if isinstance(exc, provision.RecordConflictError):
+        return _ErrorInfo(EXIT_CONFLICT, "RECORD_CONFLICT", exc.hint)
+    if isinstance(exc, assets.TemplateNameError):
+        return _ErrorInfo(
+            EXIT_USAGE, "INVALID_CONFIG", "Pass a template name, e.g. --template default."
+        )
     if isinstance(exc, provision.BranchInUseError):
         return _ErrorInfo(EXIT_CONFLICT, "BRANCH_IN_USE", exc.hint)
     if isinstance(exc, provision.BranchConflictError):
@@ -410,9 +653,10 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Runner dependency problems keep exit 1 (codes are stable; agents
-        # branch on error.code instead: MISSING_DEPENDENCY, DOCKER_UNAVAILABLE).
+        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
+    if isinstance(exc, FirewallError):
+        return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -425,7 +669,10 @@ def _handle(reporter: Reporter, exc: Exception, *, json_out: bool) -> typer.Exit
         code=code,
         error_code=error_code,
         hint=hint,
-        path=str(exc.path) if isinstance(exc, provision.ProvisionError) and exc.path else None,
+        path=str(exc.path)
+        if isinstance(exc, (provision.ProvisionError, record.RecordError, ports.PortsError))
+        and exc.path
+        else None,
         json_out=json_out,
     )
 
@@ -444,18 +691,38 @@ def _short_path(path: Path | str, repo: str) -> str:
         return str(p)
 
 
-def _emit_result(outcome: provision.Outcome, *, json_out: bool, print_only: bool) -> None:
-    """Write the machine/script-facing result to stdout."""
+def _emit_result(
+    outcome: provision.Outcome,
+    *,
+    json_out: bool,
+    print_only: bool,
+    warnings: list[str],
+    limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
+) -> None:
+    """Write the machine/script-facing result to stdout. ``warnings`` are the
+    run's warnings (an additive payload field: empty when nothing was
+    skipped). ``drift`` (``enter`` only) is what config and template now give
+    for a limit the sandbox keeps: ``resources_drift``, every key present,
+    ``null`` = no drift."""
+    block = outcome.worktree.ports
     if json_out:
         payload = {
             "schemaVersion": SCHEMA_VERSION,
             "name": outcome.worktree.name,
             "worktree_path": str(outcome.worktree.path),
+            "id": outcome.worktree.id,
+            "port_base": block.base if block else None,
+            "port_count": block.count if block else None,
             "branch": outcome.worktree.branch,
             "base": outcome.worktree.base,
             "entry_command": outcome.entry_command,
             "created": outcome.created,
+            "resources": limits.to_json(),
+            "warnings": warnings,
         }
+        if drift is not None:
+            payload["resources_drift"] = drift.to_json()
         _emit_json(payload)
     elif print_only:
         sys.stdout.write(" ".join(shlex.quote(p) for p in outcome.entry_command) + "\n")
@@ -473,6 +740,7 @@ def _dry_run(
     cold: bool,
     json_out: bool,
     checkout: str | None,
+    ignored_limits: list[str],
 ) -> None:
     """Render what ``create`` would do, executing nothing."""
     try:
@@ -499,6 +767,8 @@ def _dry_run(
                 "worktree_path": str(wt.path),
                 "branch": branch,
                 "commands": cmds,
+                "resources": cfg.resources.to_json(),
+                "warnings": reporter.warnings,
             }
         )
         return
@@ -507,6 +777,9 @@ def _dry_run(
     reporter.summary("worktree", _short_path(wt.path, repo_path))
     reporter.summary("branch", branch)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if cfg.resources.names():
+        reporter.summary("limits", cfg.resources.describe())
+    _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
     for cmd in cmds:
         reporter.command(cmd)
@@ -539,7 +812,9 @@ def create(
         None, "--base", help="Base branch for the new branch (resolved as origin/<base>)."
     ),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -565,6 +840,9 @@ def create(
         "Resolved from $TREEBOX_TEMPLATE_DIR or $TREEBOX_HOME/templates/<name> "
         "(default ~/.treebox/templates/<name>).",
     ),
+    cpus: str | None = typer.Option(None, "--cpus", help=_CPUS_HELP, metavar="CPUS"),
+    memory: str | None = typer.Option(None, "--memory", help=_MEMORY_HELP, metavar="SIZE"),
+    pids_limit: str | None = typer.Option(None, "--pids-limit", help=_PIDS_HELP, metavar="N"),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -578,7 +856,16 @@ def create(
         False, "--json", help="Provision, then print a JSON result (no launch)."
     ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Stream raw command output (to stderr)."
+    ),
+    args: list[str] | None = typer.Argument(
+        None,
+        help="Extra args passed to the agent, after -- and after NAME "
+        "(create NAME -- ARGS...), exactly as for enter. With --json or "
+        "--print they are part of the emitted entry_command.",
+        show_default=False,
+    ),
 ) -> None:
     """Provision a worktree and launch the agent harness in it.
 
@@ -589,6 +876,28 @@ def create(
     (git branch -m <type>/<short-name>, e.g. feature/user-auth, fix/login-race,
     chore/bump-deps), then push. Every worktree gets a pre-push guard that
     keeps treebox/* refs un-pushable.
+
+    A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
+    exit status, and the file with its output). The worktree is kept and
+    marked unfinished; `treebox enter NAME` or the same create retries setup.
+
+    Setup and the agent get, for repo-owned service scripts: TREEBOX_NAME
+    (the worktree name), TREEBOX_ID (10 lowercase hex characters, unique on
+    this machine, derived from the worktree path), and TREEBOX_PORT_BASE and
+    TREEBOX_PORT_COUNT (a port block no other treebox worktree on the machine
+    has; the ports table of the user config sets the range). --print and
+    --json commands carry them too. A full range fails before anything is made
+    (exit 5, PORTS_EXHAUSTED); --dry-run reserves nothing.
+
+    To start the agent on a task, put its args after NAME and --
+    (create fix-auth -- -p "fix the login race"). A nameless create takes
+    no agent args: give a NAME.
+
+    When it launches (no --json, --print, --dry-run), create exits with the
+    agent's exit code; a non-zero one is named in the last stderr line
+    ("treebox: agent exited with status N"). SIGINT, SIGTERM or SIGHUP to
+    treebox stops the agent (inside the container for docker) and exits
+    128+signal (CANCELLED).
     """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
@@ -604,19 +913,39 @@ def create(
         template=template,
         json_out=json_out,
     )
+    explicit_limits = _resource_flags(
+        reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
+    )
+    if checkout is None and name is not None and name.startswith("-"):
+        # Without --checkout, NAME is the branch, and a dash-led branch is
+        # never valid (INVALID_BRANCH, as always). It usually means
+        # `create -- ARGS`: the first agent arg took the name slot. Say how
+        # to pass agent args. With --checkout, NAME is only the worktree
+        # name, and a dash-led one is valid (`create --checkout B -- -auth`,
+        # the firewall recovery command for a `treebox/-auth` worktree).
+        raise _die(
+            reporter,
+            f"Invalid branch name '{name}'.",
+            code=EXIT_USAGE,
+            error_code="INVALID_BRANCH",
+            hint="A name cannot start with '-'. To pass agent args, name the worktree "
+            "first: treebox create NAME -- ARGS...",
+            json_out=json_out,
+        )
     if name is not None:
         _validate_name(reporter, name, json_out=json_out)
     if checkout is not None:
         _validate_branch(reporter, checkout, json_out=json_out)
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     if checkout is not None:
-        wt_name = flatten_branch(name) if name else derive_name(checkout)
+        wt_name = derive_name(name or checkout)
         target_branch = checkout
     elif name is not None:
         # An explicit name IS the branch: slashes stay in the branch, the
         # directory flattens them (feature/auth -> feature--auth).
-        wt_name = flatten_branch(name)
+        wt_name = derive_name(name)
         target_branch = name
         _validate_branch(reporter, target_branch, json_out=json_out)
     else:
@@ -638,6 +967,16 @@ def create(
         except (assets.TemplateNotFoundError, assets.TemplateInvalidError) as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
+    # Limits are final before anything is provisioned, and they are what the
+    # host-owned record will hold.
+    limits, ignored_limits = _creation_limits(
+        reporter, cfg, run, explicit_limits, json_out=json_out
+    )
+    cfg = cfg.with_overrides(
+        resources=limits, explicit_resources=frozenset(explicit_limits.names())
+    )
+    run = get_runner(cfg)
+
     if dry_run:
         _dry_run(
             reporter,
@@ -650,6 +989,7 @@ def create(
             cold=cold,
             json_out=json_out,
             checkout=checkout,
+            ignored_limits=ignored_limits,
         )
         return
 
@@ -663,8 +1003,11 @@ def create(
         reporter.summary("branch", f"{target_branch}  ·  placeholder — rename before push")
         reporter.summary("base", cfg.base)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if limits.names():
+        reporter.summary("limits", limits.describe())
     if cold:
         reporter.summary("cache", "cold (from source)")
+    _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
 
     # The boundary str was validated by _resolve_config; internal seams take
@@ -682,12 +1025,13 @@ def create(
             harness=agent,
             cold=cold,
             fetch=not no_fetch,
-            # Prompt for git credentials whenever a terminal is attached —
-            # like `git pull`. ssh's passphrase prompt uses the tty/stderr,
-            # so it stays out of the way of --json's stdout.
-            interactive=sys.stdin.isatty(),
+            # Prompt for git credentials only when treebox may ask (a
+            # terminal, no --non-interactive) - like `git pull`. git and ssh
+            # ask on the terminal itself, out of the way of --json's stdout.
+            interactive=_interactive(),
             reporter=reporter,
             existing_branch=checkout is not None,
+            args=args or [],
         )
 
     _run_session(
@@ -698,7 +1042,8 @@ def create(
         provision_call=_provision,
         json_out=json_out,
         print_only=print_only,
-        args=[],
+        args=args or [],
+        limits=limits,
     )
 
 
@@ -707,11 +1052,17 @@ def create(
 
 @app.command()
 def enter(
-    ref: str = typer.Argument(..., help="Worktree name, branch, or a unique substring of either."),
+    ref: str = typer.Argument(
+        ...,
+        help="Worktree name, branch, or a unique substring of either; "
+        "an absolute path matches only the worktree registered there.",
+    ),
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
     ),
     harness: str | None = typer.Option(
         None, "--harness", "-H", help=f"Agent harness to launch: {'|'.join(VALID_HARNESSES)}."
@@ -724,6 +1075,15 @@ def enter(
         "(default ~/.treebox/templates/<name>).",
     ),
     cold: bool = typer.Option(False, "--cold", help="Bypass shared caches when re-syncing."),
+    cpus: str | None = typer.Option(
+        None, "--cpus", help=_CPUS_HELP + _ENTER_LIMIT_NOTE, metavar="CPUS"
+    ),
+    memory: str | None = typer.Option(
+        None, "--memory", help=_MEMORY_HELP + _ENTER_LIMIT_NOTE, metavar="SIZE"
+    ),
+    pids_limit: str | None = typer.Option(
+        None, "--pids-limit", help=_PIDS_HELP + _ENTER_LIMIT_NOTE, metavar="N"
+    ),
     print_only: bool = typer.Option(
         False, "--print", help="Prepare, then print the launch command (no launch)."
     ),
@@ -731,12 +1091,27 @@ def enter(
         False, "--json", help="Prepare, then print a JSON result (no launch)."
     ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Stream raw command output (to stderr)."
+    ),
     args: list[str] | None = typer.Argument(
         None, help="Extra args passed to the agent (after --)."
     ),
 ) -> None:
-    """Re-launch the agent in an existing worktree; refresh .env and re-sync deps if changed."""
+    """Re-launch the agent in an existing worktree; refresh .env and re-sync deps if changed.
+
+    An unfinished or failed setup runs again; if a setup step fails, enter
+    fails too (exit 1, SETUP_FAILED) and the next enter retries it.
+
+    Setup and the agent get the same TREEBOX_NAME, TREEBOX_ID,
+    TREEBOX_PORT_BASE and TREEBOX_PORT_COUNT as at create; --print and --json
+    commands carry them too.
+
+    When it launches (no --json, --print), enter exits with the agent's exit
+    code; a non-zero one is named in the last stderr line ("treebox: agent
+    exited with status N"). SIGINT, SIGTERM or SIGHUP to treebox stops the
+    agent (inside the container for docker) and exits 128+signal (CANCELLED).
+    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -748,7 +1123,12 @@ def enter(
         template=template,
         json_out=json_out,
     )
+    explicit_limits = _resource_flags(
+        reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
+    )
+    config_limits = cfg.resources
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
@@ -763,15 +1143,20 @@ def enter(
         raise _handle(reporter, exc, json_out=json_out) from exc
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
-    st = state.load(cand.path)
-    cfg = _reconcile_with_state(
+    # The creation policy comes only from the host-owned record. A missing or
+    # invalid one is a classified error with a recovery path, never a fallback
+    # to the config default (or to the worktree's sandbox-writable state).
+    try:
+        rec = record.load(Path(cand.path))
+    except record.RecordError as exc:
+        raise _handle(reporter, exc, json_out=json_out) from exc
+    cfg = _reconcile_with_record(
         reporter,
         cfg,
-        st,
+        rec,
         isolation=isolation,
         harness=harness,
         template=template,
-        honor_firewall=True,
         json_out=json_out,
     )
     # Names are final after reconciliation: resolve the objects once.
@@ -781,6 +1166,17 @@ def enter(
     subtitle = cand.name if cand.branch in (None, cand.name) else f"{cand.name}  ·  {cand.branch}"
     reporter.heading("enter", subtitle)
     reporter.summary("isolation", f"{cfg.isolation}  →  {cfg.harness}")
+    if rec.resources.names():
+        reporter.summary("limits", rec.resources.describe())
+    drift = _check_entry_resources(
+        reporter,
+        run,
+        rec,
+        branch=cand.branch,
+        explicit=explicit_limits,
+        config_limits=config_limits,
+        json_out=json_out,
+    )
     reporter.blank()
 
     def _provision() -> provision.Outcome:
@@ -789,6 +1185,7 @@ def enter(
             run,
             repo=repo_path,
             path=Path(cand.path),
+            base=rec.base,
             harness=agent,
             cold=cold,
             args=args or [],
@@ -804,6 +1201,8 @@ def enter(
         json_out=json_out,
         print_only=print_only,
         args=args or [],
+        limits=rec.resources,
+        drift=drift,
     )
 
 
@@ -817,6 +1216,8 @@ def _run_session(
     json_out: bool,
     print_only: bool,
     args: list[str],
+    limits: ResourceLimits,
+    drift: ResourceLimits | None = None,
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
     the lock on the worktree at ``path``, the provisioning step, one exception
@@ -826,25 +1227,43 @@ def _run_session(
     host runner) fail fast with a clean error + hint — before any git state
     is touched, and never surfacing a stopped docker daemon deep inside
     launch as a misleading "no container" that steers users into a
-    destructive teardown.
+    destructive teardown. A launch also checks the agent first (the harness
+    binary on the host; in unattended mode also its login), so a missing
+    prerequisite fails before anything is provisioned.
+
+    Launch contract: treebox exits with the agent's exit code. When the
+    agent exits non-zero, the last stderr line is ``AGENT_EXIT_PREFIX`` and
+    that code, so a caller can tell an agent exit from a treebox failure
+    (which always prints its classified error instead). A cancel signal
+    (SIGINT, SIGTERM, SIGHUP) stops the agent and exits ``128 + signum``
+    with ``CANCELLED``.
     """
     started = time.monotonic()
+    launching = not (json_out or print_only)
     try:
         run.preflight(reporter)
+        if launching:
+            _require_agent(run, harness, login=not _interactive())
         with locking.worktree_lock(path):
             outcome = provision_call()
-            if json_out or print_only:
-                # The launch path makes the sandbox entry-ready inside
-                # run.launch; the emit path must do the same, or a stopped
-                # container yields an entry_command that is dead on replay
-                # (and a manual `docker start` workaround would silently
-                # skip the firewall re-init).
-                run.prepare_entry(outcome.worktree)
+            # Every entry - launch and emit alike - makes the sandbox
+            # entry-ready first: a stopped container is started, and the
+            # firewall is re-applied even on a running one (`docker restart`
+            # outside treebox drops the rules). A failure here is classified
+            # and nothing launches or is emitted.
+            run.prepare_entry(outcome.worktree)
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 
-    if json_out or print_only:
-        _emit_result(outcome, json_out=json_out, print_only=print_only)
+    if not launching:
+        _emit_result(
+            outcome,
+            json_out=json_out,
+            print_only=print_only,
+            warnings=reporter.warnings,
+            limits=limits,
+            drift=drift,
+        )
         return
     reporter.blank()
     # Style-A closing line: green "Ready", dim "in <total> — launching <harness>".
@@ -853,9 +1272,85 @@ def _run_session(
     reporter.restore_terminal()
     try:
         code = run.launch(outcome.worktree, harness=harness, args=args)
+    except system.SessionCancelled as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=128 + exc.signum,
+            error_code="CANCELLED",
+            hint=f"The worktree is kept. Start the agent again: treebox enter "
+            f"{outcome.worktree.name}",
+        ) from exc
     except RuntimeError as exc:
-        raise _die(reporter, str(exc)) from exc
-    raise typer.Exit(code)
+        raise _handle(reporter, exc, json_out=False) from exc
+    if code == 0:
+        raise typer.Exit(0)
+    # A negative code: the agent was killed by that signal (shell convention).
+    status = code if code > 0 else 128 - code
+    killed = f" (killed by {system.signal_name(-code)})" if code < 0 else ""
+    sys.stderr.write(f"{AGENT_EXIT_PREFIX}{status}{killed}\n")
+    sys.stderr.flush()
+    raise typer.Exit(status)
+
+
+# The fixed prefix of the one line treebox prints last, on stderr, when the
+# launched agent exits non-zero: "treebox: agent exited with status <N>". A
+# documented contract (docs/usage.md): a caller tells an agent exit from a
+# treebox failure by it. Never printed for a treebox failure.
+AGENT_EXIT_PREFIX = "treebox: agent exited with status "
+
+
+def _agent_binary_check(run: Runner, harness: Harness) -> DoctorCheck:
+    """The harness binary, where the agent runs. On the host it must be on
+    PATH; in a sandbox it is part of the image, checked at launch."""
+    name = f"agent: {harness.name}"
+    if run.facts().sandboxed:
+        return DoctorCheck(name, True, f"in the {run.name} sandbox image · checked at launch")
+    found = shutil.which(harness.binary())
+    if found:
+        return DoctorCheck(name, True, found)
+    return DoctorCheck(
+        name,
+        False,
+        f"'{harness.binary()}' not found on PATH",
+        f"Install the {harness.name} CLI so '{harness.binary()}' is on PATH.",
+    )
+
+
+def _agent_login_check(harness: Harness, *, required: bool = True) -> DoctorCheck:
+    """The harness's subscription login: the one an agent on the host uses
+    and a sandbox gets a copy of."""
+    name = f"login: {harness.name}"
+    found = harness.login()
+    if found:
+        return DoctorCheck(name, True, found, required=required)
+    return DoctorCheck(
+        name,
+        False,
+        f"no login at {harness.login_file()}",
+        harness.login_hint(),
+        required=required,
+    )
+
+
+def _require_agent(run: Runner, harness: Harness, *, login: bool) -> None:
+    """Fail a launch before provisioning when the agent cannot start: no
+    harness binary (HARNESS_MISSING) or, with ``login``, no usable login
+    (LOGIN_MISSING) - an unattended agent would otherwise wait in its own
+    login flow."""
+    binary = _agent_binary_check(run, harness)
+    if not binary.ok:
+        raise PreflightError(
+            binary.detail + ".", error_code="HARNESS_MISSING", hint=binary.advisory
+        )
+    if login:
+        check = _agent_login_check(harness)
+        if not check.ok:
+            raise PreflightError(
+                f"No {harness.name} login for an unattended launch: {check.detail}.",
+                error_code="LOGIN_MISSING",
+                hint=check.advisory,
+            )
 
 
 # --- list --------------------------------------------------------------------
@@ -877,38 +1372,54 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         # listed (or offered by the teardown chooser).
         if same_path(wt_path, repo_path):
             continue
-        # A registration whose dir is gone (git-prunable, or removed under us)
-        # must never be shelled into — that would crash list/teardown on a path
-        # that isn't there. Surface it as `missing` so teardown can prune it.
-        missing = rec.prunable or not wt_path.is_dir()
-        # Read through the main repo's registration so a missing worktree can
-        # still report its recorded creation-time choices. An absent, legacy,
-        # or unreadable state file remains honestly unknown.
-        st = state.load_registered(repo_path, rec.path)
+        # A registration whose dir is gone, or whose .git pointer no longer
+        # leads to it, must never be shelled into: git would crash on the
+        # missing path or act on the main checkout. `missing` keeps its old
+        # meaning for those two health values so teardown can prune them.
+        health = provision.worktree_health(repo_path, wt_path)
+        missing = health in ("directory_missing", "invalid_linkage")
+        # The policy columns come from the host-owned record; a missing or
+        # invalid record shows as honestly unknown (""), never as a guess.
+        try:
+            policy: record.WorktreeRecord | None = record.load(wt_path)
+        except record.RecordError:
+            policy = None
         deps: DepsFreshness
         if missing:
             subject, epoch, deps, env_present = "", 0, "unknown", False
         else:
             env_present = (wt_path / ".env").is_file()
-            if st and st.lockfile_hash:
-                deps = "fresh" if st.lockfile_hash == ecosystems.lockfile_hash(wt_path) else "stale"
-            else:
-                deps = "unknown"
+            deps = (
+                lifecycle.freshness(policy.setup, ecosystems.lockfile_hash(wt_path))
+                if policy
+                else "unknown"
+            )
             subject, epoch = git.last_commit(wt_path)
         rows.append(
             WorktreeRow(
                 name=wt_path.name,
+                # Spelled like enter spells it (git may canonicalize a root alias
+                # such as /var -> /private/var), so list shows the id the
+                # worktree's setup and agent get.
+                id=worktree_id(
+                    Path(resolve.Candidate.registered(repo_path, cfg.root, rec.path, None).path)
+                ),
                 branch=rec.branch or "detached",
                 unnamed=is_placeholder(rec.branch),
                 missing=missing,
                 last_commit=subject,
                 commit_epoch=epoch,
                 path=rec.path,
-                base=st.base if st else "",
-                isolation=st.isolation if st else "",
-                harness=st.harness if st else "",
+                base=policy.base if policy else "",
+                isolation=policy.isolation if policy else "",
+                harness=policy.harness if policy else "",
+                resources=policy.resources.to_json() if policy else None,
                 deps=deps,
                 env="present" if env_present else "absent",
+                health=health,
+                setup=policy.setup.status if policy else "",
+                port_base=policy.ports.base if policy and policy.ports else None,
+                port_count=policy.ports.count if policy and policy.ports else None,
             )
         )
 
@@ -936,6 +1447,7 @@ def list_cmd(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     rows = _collect_rows(repo_path, cfg)
 
@@ -962,6 +1474,17 @@ _PT_STYLE = {
 def _stdin_isatty() -> bool:
     """Indirection so tests can simulate an interactive terminal."""
     return sys.stdin.isatty()
+
+
+# Set by the global --non-interactive option (or $TREEBOX_NON_INTERACTIVE).
+_NON_INTERACTIVE = False
+
+
+def _interactive() -> bool:
+    """Whether treebox may ask the user anything: a terminal on stdin, and no
+    --non-interactive. The one gate for pickers, prompts and credential
+    prompts, so unattended mode holds with or without a terminal."""
+    return not _NON_INTERACTIVE and _stdin_isatty()
 
 
 class _PickerEntry(NamedTuple):
@@ -1192,14 +1715,12 @@ def _parse_selection(raw: str, n: int) -> list[int]:
 def teardown(
     refs: list[str] | None = typer.Argument(
         None,
-        help="Worktrees to remove: name, branch, or a unique substring of either. "
+        help="Worktrees to remove: name, branch, or a unique substring of either; "
+        "an absolute path matches only the worktree registered there. "
         "Omit to pick interactively from a status-annotated list.",
     ),
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
-    isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode: {'|'.join(VALID_ISOLATION)}."
-    ),
     delete_branch: bool = typer.Option(
         False, "--delete-branch", help="Also delete the local branch."
     ),
@@ -1207,20 +1728,44 @@ def teardown(
         False, "--remove-volumes", help="Also remove treebox volumes."
     ),
     force: bool = typer.Option(
-        False, "--force", help="Remove even with uncommitted changes / no prompt."
+        False,
+        "--force",
+        help="Remove even with uncommitted changes, and without the confirmation "
+        "prompt. Never removes a worktree locked with `git worktree lock`.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Answer the confirmation prompt with yes, for unattended use. Only "
+        "the prompt: a worktree with uncommitted changes is still refused "
+        "(DIRTY_WORKTREE, exit 5); add --force to remove it anyway.",
     ),
     skip_container: bool = typer.Option(
         False, "--skip-container", help="Do not touch containers/images."
     ),
     json_out: bool = typer.Option(False, "--json", help="Print a JSON record of what was removed."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress."),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream raw command output."),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Stream raw command output (to stderr)."
+    ),
 ) -> None:
-    """Remove worktree directories (and optionally their branches); caches are left intact."""
+    """Remove worktree directories (and optionally their branches); caches are left intact.
+
+    An incomplete cleanup fails teardown (exit 1, TEARDOWN_INCOMPLETE): it
+    names what remains (for example a container docker could not remove) and
+    keeps the worktree, its record and its port block, so the same command
+    retries. A complete teardown releases the port block. A worktree locked
+    with `git worktree lock` is never removed.
+
+    Unattended (--json, --non-interactive, or no terminal) there is no
+    prompt: pass --yes to confirm. --yes keeps the uncommitted-changes
+    check (DIRTY_WORKTREE, exit 5); --force removes those too.
+    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
-        isolation=isolation,
+        isolation=None,
         harness=None,
         base=None,
         root=root,
@@ -1228,6 +1773,7 @@ def teardown(
         json_out=json_out,
     )
     repo_path = _repo_root(reporter, repo, json_out=json_out)
+    _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     targets: list[resolve.Candidate] = []
     # Which targets also lose their local branch, by path. The chooser fills this
@@ -1238,7 +1784,7 @@ def teardown(
     # --json / non-TTY must not block on a picker — same contract as the prompt.
     from_chooser = False
     if not refs:
-        if json_out or not _stdin_isatty():
+        if json_out or not _interactive():
             raise _die(
                 reporter,
                 "Refusing to choose a worktree non-interactively.",
@@ -1293,30 +1839,18 @@ def teardown(
                 json_out=json_out,
             )
 
-    # The dirty gate, unified. A worktree with uncommitted changes is unsafe to
-    # remove without --force. In the chooser a mixed selection is the norm, so we
-    # skip the dirty ones and still remove the clean ones the user picked (and say
-    # so). For explicit refs it stays all-or-nothing: naming a dirty tree should
-    # stop the whole run — a scripting contract, not a partial surprise.
-    def _blocked_dirty(c: resolve.Candidate) -> bool:
-        path = Path(c.path)
-        # A missing/corrupt .git pointer lets git walk up into the main
-        # checkout, so only ask git about dirtiness after linkage is proven.
-        return (
-            not force
-            and path.is_dir()
-            and provision.links_to_worktree_gitdir(repo_path, path)
-            and git.is_dirty(path)
-        )
-
-    skipped_dirty: list[resolve.Candidate] = []
-    if from_chooser:
-        skipped_dirty = [c for c in targets if _blocked_dirty(c)]
-        skipped = {c.path for c in skipped_dirty}
-        targets = [c for c in targets if c.path not in skipped]
-    else:
-        for cand in targets:
-            if _blocked_dirty(cand):
+    # The removal gate (uncommitted changes without --force, a git lock) runs
+    # here, so a refusal comes before the prompt, and again under the lock
+    # right before anything is removed (_gate), so work written while the
+    # prompt was open is never deleted. In the chooser a mixed selection is
+    # the norm, so blocked ones are skipped and the clean ones the user picked
+    # still go (and we say so). For explicit refs it stays all-or-nothing:
+    # naming a dirty tree stops the whole run - a scripting contract.
+    def _gate(cands: list[resolve.Candidate]) -> list[resolve.Candidate]:
+        blocked = [(c, why) for c in cands if (why := _teardown_block(repo_path, c, force))]
+        if blocked and not from_chooser:
+            cand, why = blocked[0]
+            if why == "dirty":
                 raise _die(
                     reporter,
                     f"Worktree '{cand.name}' has uncommitted changes.",
@@ -1326,11 +1860,28 @@ def teardown(
                     path=cand.path,
                     json_out=json_out,
                 )
+            raise _die(
+                reporter,
+                f"Worktree '{cand.name}' is locked by git (git worktree lock).",
+                code=EXIT_CONFLICT,
+                error_code="WORKTREE_LOCKED",
+                hint=f"treebox never removes a locked worktree. Unlock it first: "
+                f"git -C {repo_path} worktree unlock {cand.path}",
+                path=cand.path,
+                json_out=json_out,
+            )
+        skipped.extend(blocked)
+        out = {c.path for c, _ in blocked}
+        return [c for c in cands if c.path not in out]
 
-    if not force and not from_chooser and any(Path(c.path).is_dir() for c in targets):
-        # --json is a scripting contract: never block on a prompt (and never
-        # let one leak into stdout) — require --force instead.
-        if _stdin_isatty() and not json_out:
+    skipped: list[tuple[resolve.Candidate, TeardownBlock]] = []
+    targets = _gate(targets)
+
+    confirmed = force or yes or from_chooser
+    if not confirmed and any(Path(c.path).is_dir() for c in targets):
+        # --json and unattended mode are a scripting contract: never block on
+        # a prompt (and never let one leak into stdout) - require --yes.
+        if _interactive() and not json_out:
             listed = ", ".join(c.name for c in targets)
             plural = "s" if len(targets) != 1 else ""
             typer.confirm(f"Remove worktree{plural} {listed}?", abort=True)
@@ -1340,7 +1891,8 @@ def teardown(
                 "Refusing to remove non-interactively without confirmation.",
                 code=EXIT_CONFLICT,
                 error_code="NEEDS_CONFIRMATION",
-                hint="Pass --force for non-interactive teardown.",
+                hint="Pass --yes to confirm (uncommitted changes still block the removal), "
+                "or --force to also remove uncommitted changes.",
                 json_out=json_out,
             )
 
@@ -1355,30 +1907,20 @@ def teardown(
                 # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
                     stack.enter_context(locking.worktree_lock(Path(cand.path)))
-                # Validate the isolation mode for EVERY target before removing
-                # anything: a mismatch or unknown recorded mode firing mid-batch
-                # would leave the earlier targets removed but unreported in the
-                # --json payload. The resolve-everything-first contract above
-                # applies to this per-target check too. --skip-container touches
-                # no containers, so it skips resolution entirely — the escape
-                # hatch for a tree whose recorded mode treebox can't drive.
+                # Recheck under the lock, immediately before removal.
+                targets = _gate(targets)
+                # --skip-container touches no containers, so it skips runner
+                # resolution entirely.
                 runners: list[Runner | None] = (
                     [None] * len(targets)
                     if skip_container
                     else [
-                        _teardown_runner(
-                            reporter,
-                            cfg,
-                            cand,
-                            repo_path,
-                            explicit=isolation,
-                            remove_volumes=remove_volumes,
-                            json_out=json_out,
-                        )
+                        _teardown_runner(cfg, cand, remove_volumes=remove_volumes)
                         for cand in targets
                     ]
                 )
-                reporter.heading("teardown", ", ".join(c.name for c in targets))
+                if targets:
+                    reporter.heading("teardown", ", ".join(c.name for c in targets))
                 records = [
                     _teardown_one(
                         reporter,
@@ -1386,9 +1928,7 @@ def teardown(
                         cand,
                         repo_path,
                         run=run,
-                        explicit_isolation=isolation,
                         delete_branch=cand.path in branch_delete,
-                        remove_volumes=remove_volumes,
                         force=force,
                         skip_container=skip_container,
                         json_out=json_out,
@@ -1398,33 +1938,75 @@ def teardown(
         except locking.LockError as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
-    if skipped_dirty:
-        _report_skipped_dirty(reporter, skipped_dirty, removed=len(records))
+    if skipped:
+        _report_skipped(reporter, skipped, removed=sum(r["complete"] for r in records))
 
     if json_out:
-        _emit_json({"schemaVersion": SCHEMA_VERSION, "worktrees": records})
+        _emit_json(
+            {"schemaVersion": SCHEMA_VERSION, "worktrees": records, "warnings": reporter.warnings}
+        )
 
-    # Honest exit: the clean ones are gone, but we refused the dirty ones. Do it
-    # last so the removals and the recap have already been reported.
-    if skipped_dirty:
+    # An incomplete cleanup is a failed teardown: name what remains. Nothing
+    # that names it was deleted, so the same command retries.
+    incomplete = [r for r in records if not r["complete"]]
+    if incomplete:
+        raise _die(
+            reporter,
+            "Teardown is incomplete: "
+            + "; ".join(f"{r['name']}: {', '.join(r['remaining'])}" for r in incomplete)
+            + ".",
+            code=EXIT_ERROR,
+            error_code="TEARDOWN_INCOMPLETE",
+            hint="The worktree and its ownership record are kept. Fix the cause, then run "
+            "the same teardown again.",
+            path=incomplete[0]["worktree_path"],
+            json_out=json_out,
+        )
+
+    # Honest exit: the clean ones are gone, but we refused the blocked ones. Do
+    # it last so the removals and the recap have already been reported.
+    if skipped:
         raise typer.Exit(EXIT_CONFLICT)
 
 
-def _report_skipped_dirty(
-    reporter: Reporter, skipped: list[resolve.Candidate], *, removed: int
+# Why the removal gate keeps a worktree: uncommitted changes (without
+# --force), or a git lock (never overridden).
+TeardownBlock = Literal["dirty", "locked"]
+
+
+def _teardown_block(repo_path: str, cand: resolve.Candidate, force: bool) -> TeardownBlock | None:
+    """Whether teardown must keep ``cand``, and why. A worktree git cannot
+    use (missing directory, invalid linkage) is never asked about dirtiness:
+    git there would walk up into the main checkout."""
+    path = Path(cand.path)
+    if any(rec.locked and same_path(rec.path, path) for rec in git.worktree_list(repo_path)):
+        return "locked"
+    if force or provision.worktree_health(repo_path, path) not in ("healthy", "unreadable_state"):
+        return None
+    return "dirty" if git.is_dirty(path) else None
+
+
+def _report_skipped(
+    reporter: Reporter, skipped: list[tuple[resolve.Candidate, TeardownBlock]], *, removed: int
 ) -> None:
     """Make the mixed-selection outcome unmistakable: name each worktree we kept
-    for having uncommitted changes, how to remove it anyway, and a one-line tally
-    so the user knows exactly what did and didn't happen."""
+    and why, how to remove it anyway, and a one-line tally so the user knows
+    exactly what did and didn't happen."""
     reporter.blank()
-    for cand in skipped:
-        reporter.fail(cand.name, "kept · uncommitted changes")
-    reporter.hint("commit or stash the changes, or re-run teardown with --force")
+    for cand, why in skipped:
+        reporter.fail(
+            cand.name, "kept · uncommitted changes" if why == "dirty" else "kept · locked"
+        )
+    if any(why == "dirty" for _, why in skipped):
+        reporter.hint("commit or stash the changes, or re-run teardown with --force")
+    if any(why == "locked" for _, why in skipped):
+        reporter.hint("unlock it first (git worktree unlock <path>); treebox never removes it")
     reporter.blank()
     plural = "s" if removed != 1 else ""
-    reporter.info(
-        f"Removed {removed} worktree{plural} · kept {len(skipped)} with uncommitted changes."
+    reasons = " or ".join(
+        sorted({"with uncommitted changes" if why == "dirty" else "locked" for _, why in skipped})
     )
+    reporter.info(f"Removed {removed} worktree{plural} · kept {len(skipped)} {reasons}.")
 
 
 # What happened to a teardown target's container/runner resources.
@@ -1438,48 +2020,36 @@ class TeardownRecord(TypedDict):
     name: str
     branch: str | None
     worktree_path: str
-    removed: bool  # False: it was already gone (still exit 0)
+    removed: bool  # False: it was already gone (still exit 0), or it was kept
     branch_deleted: bool
     container: ContainerOutcome
     volumes_removed: bool
+    complete: bool  # False: a step failed; the worktree and its record are kept
+    remaining: list[str]  # what is still present, "<resource> (<reason>)"
 
 
-def _teardown_runner(
-    reporter: Reporter,
-    cfg: Config,
-    cand: resolve.Candidate,
-    repo_path: str,
-    *,
-    explicit: str | None,
-    remove_volumes: bool,
-    json_out: bool,
-) -> Runner:
-    """Resolve one teardown target's runner from its recorded isolation mode.
+def _teardown_runner(cfg: Config, cand: resolve.Candidate, *, remove_volumes: bool) -> Runner:
+    """Resolve one teardown target's runner from host-owned files only.
 
-    The record is read through the repo's own worktree registration
-    (`state.load_registered`), never through the worktree's ``.git`` pointer:
-    a corrupt tree (missing pointer, the documented teardown recovery path)
-    would make the pointer route resolve into the MAIN repo, read no state,
-    and silently fall back to the config default - tearing a docker worktree
-    down with the host runner and leaking its container while reporting
-    ``container: "cleaned"``.
+    The host-owned record names the isolation mode. It is keyed by the
+    registered path and lives outside the worktree, so it survives a corrupt
+    tree (missing ``.git`` pointer) and even a deleted worktree directory.
 
-    Called for the whole batch *before* any removal: the mismatch/unknown
-    conflicts `_reconcile_with_state` raises must abort an untouched batch
-    (all-or-nothing), never fire mid-loop after worktrees are already gone. An
-    unknown recorded isolation mode is a hard conflict here just as it is on
-    ``enter`` — ``--skip-container`` is the escape hatch for a tree treebox
-    can't drive. Reconciliation also recovers the created-time template, so
-    `_template_volumes` derives the right per-workspace volume names on
-    `--remove-volumes` (teardown has no `--template` flag; state is the only
-    source) — and folds the recorded harness too, which nothing in a teardown
-    reads today; only the firewall stays at the config default here (see
-    ``honor_firewall``). ``remove_volumes`` is handed to the factory: teardown
-    options and resource ownership are runner concerns, so the docker runner
-    reads its authoritative host-owned manifest outside the sandbox mount."""
-    st = state.load_registered(repo_path, cand.path)
-    cfg_run = _reconcile_with_state(reporter, cfg, st, isolation=explicit, json_out=json_out)
-    return get_runner(cfg_run, remove_volumes=remove_volumes)
+    Teardown is the recovery for a missing or invalid record (``enter``
+    refuses such a worktree), so it must work without one. Then the docker
+    runner's resource manifest decides: ``create`` writes it outside every
+    sandbox mount before any docker resource exists, so every docker worktree
+    has one and a host worktree never does. The config default and the
+    worktree's sandbox-writable state are never read for this.
+    ``remove_volumes`` is handed to the factory: teardown options and
+    resource ownership are runner concerns, so the docker runner reads its
+    authoritative host-owned manifest outside the sandbox mount."""
+    path = Path(cand.path)
+    try:
+        isolation = record.load(path).isolation
+    except record.RecordError:
+        isolation = DockerRunner.name if has_resource_manifest(path) else HostRunner.name
+    return get_runner(cfg.with_overrides(isolation=isolation), remove_volumes=remove_volumes)
 
 
 def _teardown_one(
@@ -1489,101 +2059,68 @@ def _teardown_one(
     repo_path: str,
     *,
     run: Runner | None,
-    explicit_isolation: str | None,
     delete_branch: bool,
-    remove_volumes: bool,
     force: bool,
     skip_container: bool,
     json_out: bool,
 ) -> TeardownRecord:
     """Tear down one resolved worktree; returns its --json record. ``run`` is
-    the batch-validated runner from ``_teardown_runner``, or ``None`` under
+    the runner from ``_teardown_runner``, or ``None`` under
     ``--skip-container`` (no container work, so no runner was resolved)."""
     wt = Worktree.at(repo_path, Path(cand.path), branch=cand.branch or "")
-    exists = wt.path.is_dir()
-    st = state.load_registered(repo_path, wt.path)
-
-    branch_name = (
-        cand.branch
-        if cand.branch and (exists or git.local_branch_exists(repo_path, cand.branch))
-        else None
-    )
-
-    container: ContainerOutcome
-    volumes_removed = False
-    if skip_container:
-        container = "skipped"
-        reporter.note("container", "skipped")
-    elif not exists and st is None and explicit_isolation is None:
-        # The directory and its recorded state are both gone, so the isolation
-        # mode is unreadable and the config default is only a guess we won't
-        # act on.
-        container = "skipped"
-        reporter.warn(
-            "worktree directory is gone — recorded isolation mode unreadable; "
-            "remove any leftover container manually"
+    try:
+        result = cleanup.cleanup_one(
+            wt, run, force=force, delete_branch=delete_branch, reporter=reporter
         )
+    except cleanup.MainWorktreeError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_CONFLICT,
+            error_code="MAIN_WORKTREE",
+            hint="treebox only manages linked worktrees; the repo itself is never a target.",
+            path=str(wt.path),
+            json_out=json_out,
+        ) from exc
+
+    if skip_container:
+        reporter.note("container", "skipped")
+    if result.runner_error is not None:
+        reporter.warn(f"isolation teardown: {result.runner_error}")
+    shown = _short_path(wt.path, repo_path)
+    if result.worktree == "removed":
+        reporter.ok("worktree", f"removed {shown}")
+    elif result.worktree == "already_gone":
+        reporter.note("worktree", f"already gone · {shown}")
+    elif result.worktree == "cleanup_incomplete":
+        reporter.note("worktree", f"kept · cleanup incomplete · {shown}")
     else:
-        # run is None only under --skip-container, handled above; a real runner
-        # is always resolved when we reach an actual container teardown.
-        assert run is not None
-        container = "skipped"
-        try:
-            # The runner was constructed with the batch's volume choice
-            # (_teardown_runner); teardown options are its own business.
-            teardown_result = run.teardown(wt, reporter=reporter)
-            container = teardown_result.container
-            volumes_removed = teardown_result.volumes_removed
-        except Exception as exc:  # teardown is best-effort
-            container = "failed"
-            reporter.warn(f"isolation teardown: {exc}")
-
-    if exists:
-        try:
-            git.worktree_remove(repo_path, wt.path, force=force)
-        except git.GitError:
-            # Last-resort cleanup for corrupt *linked* worktrees git refuses to
-            # remove. It must never run against the main working tree (git's
-            # refusal is also a GitError): that would delete the whole repo.
-            if same_path(wt.path, repo_path):
-                raise _die(
-                    reporter,
-                    f"Refusing to remove the main working tree '{cand.name}'.",
-                    code=EXIT_CONFLICT,
-                    error_code="MAIN_WORKTREE",
-                    hint="treebox only manages linked worktrees; "
-                    "the repo itself is never a target.",
-                    path=str(wt.path),
-                    json_out=json_out,
-                ) from None
-            import shutil as _sh
-
-            _sh.rmtree(wt.path, ignore_errors=True)
-            git.worktree_prune(repo_path)
-        reporter.ok("worktree", f"removed {_short_path(wt.path, repo_path)}")
-    else:
-        git.worktree_prune(repo_path)
-        reporter.note("worktree", f"already gone · {_short_path(wt.path, repo_path)}")
-
-    branch_deleted = False
-    if delete_branch and branch_name:
-        try:
-            git.delete_branch(repo_path, branch_name)
-            branch_deleted = True
-            reporter.ok("branch", f"deleted {branch_name}")
-        except git.GitError as exc:
-            reporter.warn(f"could not delete branch: {exc}")
-    elif branch_name:
-        reporter.note("branch", f"kept {branch_name}")
+        reporter.fail("worktree", f"kept · {shown}")
+    if result.port_error is not None:
+        reporter.warn(
+            f"port block not released now (the next create reclaims it): {result.port_error}"
+        )
+    elif result.released_ports is not None:
+        reporter.ok("ports", f"released {result.released_ports}")
+    if not result.complete:
+        reporter.note("record", "kept · the same teardown retries")
+    elif result.branch_error is not None:
+        reporter.warn(f"could not delete branch: {result.branch_error}")
+    elif result.branch_deleted:
+        reporter.ok("branch", f"deleted {result.branch}")
+    elif result.branch:
+        reporter.note("branch", f"kept {result.branch}")
 
     return TeardownRecord(
         name=cand.name,
-        branch=branch_name,
+        branch=result.branch,
         worktree_path=str(wt.path),
-        removed=exists,
-        branch_deleted=branch_deleted,
-        container=container,
-        volumes_removed=volumes_removed,
+        removed=result.worktree == "removed",
+        branch_deleted=result.branch_deleted,
+        container=result.runner.container,
+        volumes_removed=result.runner.volumes_removed,
+        complete=result.complete,
+        remaining=list(result.remaining),
     )
 
 
@@ -1594,22 +2131,42 @@ def _teardown_one(
 def doctor(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     isolation: str | None = typer.Option(
-        None, "--isolation", help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}."
+        None,
+        "--isolation",
+        help=f"Isolation mode to check: {'|'.join(VALID_ISOLATION)}. docker needs a non-root user.",
+    ),
+    harness: str | None = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help=f"Agent harness to check: {'|'.join(VALID_HARNESSES)}. Default: the "
+        "config default (the harness create launches).",
     ),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """Check git, login credentials, UID/GID, and isolation-specific dependencies."""
+    """Check git, the agent, its login, UID/GID, and isolation-specific dependencies.
+
+    For the selected harness (--harness, else the config default) doctor
+    checks what a launch needs, where the agent runs: on the host, the
+    harness binary on PATH and a real login (its login file, or on macOS
+    the Keychain item the CLI keeps it in); in a docker sandbox, the login
+    file the sandbox gets a copy of (the binary is part of the image and is
+    checked at launch). A login dir that merely exists is no login. Those
+    two rows are hard checks (exit 1), like git, repo and isolation; the
+    other harnesses' logins are shown as optional.
+    """
     reporter = Reporter(silent=json_out)
     cfg = _resolve_config(
         reporter,
         isolation=isolation,
-        harness=None,
+        harness=harness,
         base=None,
         root=None,
         firewall=None,
         json_out=json_out,
     )
     run = get_runner(cfg)
+    selected = get_harness(cfg.harness)
 
     # Instant checks: no I/O worth spinning on, so they print immediately.
     checks: list[DoctorCheck] = []
@@ -1628,14 +2185,9 @@ def doctor(
     ident = system.identity()
     checks.append(DoctorCheck("uid/gid", True, f"{ident.uid}:{ident.gid}"))
 
-    for harness in HARNESSES:
-        checks.append(
-            DoctorCheck(
-                f"login: {harness.name}",
-                harness.credentials_present(),
-                str(harness.credential_path()),
-            )
-        )
+    checks.append(_agent_binary_check(run, selected))
+    for h in HARNESSES:
+        checks.append(_agent_login_check(h, required=h is selected))
 
     # Same resolver copy_env uses, so doctor reports the exact secrets source
     # provisioning will copy.
@@ -1684,28 +2236,20 @@ def doctor(
         ("checking git auth", _check_git_auth),
         ("checking isolation", _check_runner),
     ]
-    advisories: list[str] = []
-
     if json_out:
-        for _, check in slow:
-            result = check()
-            checks.append(result)
-            if result.advisory:
-                advisories.append(result.advisory)
-        # Credentials are the only hard gate for the host runner: at least one login.
-        has_login = any(c.ok for c in checks if c.name.startswith("login:"))
-        problems = _doctor_problems(checks)
+        checks.extend(check() for _, check in slow)
+        problems = _doctor_problems(checks, selected)
         payload = {
             "schemaVersion": SCHEMA_VERSION,
-            "ok": not problems and (has_login or not run.facts().login_required),
+            "ok": not problems,
             "isolation": cfg.isolation,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
-            "advisories": advisories,
+            "advisories": _doctor_advisories(checks),
         }
         _emit_json(payload)
         # Same exit-code contract as the human path: hard checks (git, repo,
-        # runner) failing mean exit 1, so `doctor --json && create` in CI can
-        # branch on $? instead of parsing `ok`.
+        # the selected agent and its login, runner) failing mean exit 1, so
+        # `doctor --json && create` in CI can branch on $? instead of `ok`.
         if problems:
             raise typer.Exit(1)
         return
@@ -1715,22 +2259,27 @@ def doctor(
     names_ = [c.name for c in checks] + ["git auth", f"isolation: {run.name}"]
     width = max(len(name) for name in names_)
 
-    checks, advisories = reporter.render_doctor(checks, slow, cfg.isolation, width)
-    has_login = any(c.ok for c in checks if c.name.startswith("login:"))
-    problems = _doctor_problems(checks)
-    reporter.render_doctor_verdict(problems=problems, has_login=has_login, advisories=advisories)
+    checks, _ = reporter.render_doctor(checks, slow, cfg.isolation, width)
+    problems = _doctor_problems(checks, selected)
+    reporter.render_doctor_verdict(problems=problems, advisories=_doctor_advisories(checks))
     if problems:
         raise typer.Exit(1)
 
 
-def _doctor_problems(checks: list[DoctorCheck]) -> list[str]:
-    """The hard-check failures (git, repo, isolation) that make doctor exit 1 —
-    one definition so the human and --json paths share an exit-code contract."""
+def _doctor_problems(checks: list[DoctorCheck], selected: Harness) -> list[str]:
+    """The hard-check failures (git, repo, the selected harness's binary and
+    login, isolation) that make doctor exit 1 - one definition so the human
+    and --json paths share an exit-code contract."""
+    hard = {"git", "repo", f"agent: {selected.name}", f"login: {selected.name}"}
     return [
-        c.name
-        for c in checks
-        if not c.ok and (c.name.startswith("isolation") or c.name in ("git", "repo"))
+        c.name for c in checks if not c.ok and (c.name in hard or c.name.startswith("isolation"))
     ]
+
+
+def _doctor_advisories(checks: list[DoctorCheck]) -> list[str]:
+    """How to fix each failing check that matters (an optional row's
+    advisory, such as another harness's login, is not shown)."""
+    return [c.advisory for c in checks if c.advisory and not c.ok and c.required]
 
 
 # --- version -----------------------------------------------------------------
@@ -1766,11 +2315,6 @@ template_app = typer.Typer(
 )
 app.add_typer(template_app, name="template")
 
-# A template name is a single path segment and a docker-image-tag fragment; keep
-# it to a conservative, filesystem-safe charset so `init` can't write outside
-# the templates root.
-_TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
 
 def _template_source(name: str) -> str:
     """Where ``template_dir(name)`` resolves from, for display: an explicit
@@ -1799,15 +2343,24 @@ def template_init(
     """Copy a template into $TREEBOX_HOME/templates/<name> so you can edit it.
 
     This is the sanctioned replacement for hand-copying the shipped directory:
-    it works from any install and always yields a directory with the full
-    required file set. Then edit the Dockerfile and container.json and run
+    it works from any install. Then edit the Dockerfile and container.json and run
     `treebox create <name> --isolation docker --template <name>`.
     """
     reporter = Reporter(silent=json_out)
-    if name in (".", "..") or not _TEMPLATE_NAME_RE.match(name):
+    # One identifier rule (models.is_valid_template_name) for init, path, and
+    # resolution, so `init` can never write outside the templates root.
+    if not is_valid_template_name(name):
         raise _die(
             reporter,
             f"Invalid template name '{name}'. Use letters, digits, '.', '_', or '-'.",
+            code=EXIT_USAGE,
+            error_code="INVALID_NAME",
+            json_out=json_out,
+        )
+    if name == assets.STAGING_DIR:
+        raise _die(
+            reporter,
+            f"Invalid template name '{name}': treebox reserves it for its staging directory.",
             code=EXIT_USAGE,
             error_code="INVALID_NAME",
             json_out=json_out,
@@ -1859,17 +2412,19 @@ def template_init(
         elif target.is_symlink() or target.exists():
             target.unlink()
 
-    # Copy into a staging dir beside the destination and swap it into place, so
-    # a failed copy leaves any existing template untouched rather than deleting
-    # it up front — and no OSError escapes as a bare traceback.
-    staging = dest.parent / f".{name}.treebox-tmp"
+    # Keep the old template byte-for-byte until the new copy is installed, so
+    # rollback needs only a rename. Use a unique staging dir under STAGING_DIR:
+    # another process may still own a directory left by an earlier run.
+    staging_root = dest.parent / assets.STAGING_DIR
+    staging: Path | None = None
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        _remove(staging)
-        shutil.copytree(src, staging)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f"{name}.", dir=staging_root))
+        shutil.copytree(src, staging / "new")
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        if staging is not None:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
             f"Could not copy template into {dest}: {exc}.",
@@ -1879,15 +2434,17 @@ def template_init(
             json_out=json_out,
         ) from exc
 
+    old = staging / "old"
     if existing:
         try:
-            _remove(dest)
+            dest.rename(old)
         except OSError as exc:
             with contextlib.suppress(OSError):
                 _remove(staging)
             raise _die(
                 reporter,
-                f"Could not overwrite existing template at {dest}: {exc}.",
+                f"Could not overwrite existing template at {dest}: {exc}. "
+                "The existing template is unchanged.",
                 code=EXIT_ERROR,
                 error_code="OVERWRITE_FAILED",
                 path=str(dest),
@@ -1895,18 +2452,35 @@ def template_init(
             ) from exc
 
     try:
-        staging.rename(dest)
+        (staging / "new").rename(dest)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            _remove(staging)
+        kept = ""
+        if existing:
+            try:
+                old.rename(dest)
+            except OSError:
+                # Do not delete the staging dir: it holds the only copy of the
+                # old template now.
+                kept = f" The previous template is kept at {old}."
+        if not kept:
+            with contextlib.suppress(OSError):
+                _remove(staging)
         raise _die(
             reporter,
-            f"Could not copy template into {dest}: {exc}.",
+            f"Could not copy template into {dest}: {exc}.{kept}",
             code=EXIT_ERROR,
             error_code="COPY_FAILED",
             path=str(dest),
             json_out=json_out,
         ) from exc
+
+    leftover = ""
+    try:
+        _remove(staging)
+    except OSError as exc:
+        leftover = (
+            f"could not remove the previous template copy at {staging} ({exc}); delete it by hand"
+        )
 
     missing = assets.missing_template_files(dest)
     if json_out:
@@ -1928,6 +2502,8 @@ def template_init(
         reporter.warn(
             f"copied from an incomplete source — missing required files: {', '.join(missing)}"
         )
+    if leftover:
+        reporter.warn(leftover)
     reporter.hint(
         "Edit the Dockerfile and container.json, then: "
         f"treebox create <name> --isolation docker --template {name}"
@@ -2013,6 +2589,8 @@ def template_path(
     reporter = Reporter()
     try:
         path = assets.template_dir(name)
+    except assets.TemplateNameError as exc:
+        raise _die(reporter, str(exc), code=EXIT_USAGE, error_code="INVALID_NAME") from exc
     except assets.TemplateNotFoundError as exc:
         raise _die(reporter, str(exc), code=EXIT_NOTFOUND, error_code="TEMPLATE_NOT_FOUND") from exc
     sys.stdout.write(f"{path}\n")
@@ -2034,7 +2612,22 @@ def main(
         is_eager=True,
         help="Show version and exit.",
     ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        envvar="TREEBOX_NON_INTERACTIVE",
+        help="Unattended mode, also with a terminal attached: treebox never "
+        "opens a picker, asks a question, prompts for git or ssh credentials, "
+        "or waits on the terminal. What would need an answer fails with a "
+        "classified error instead (teardown without --yes or --force is "
+        "NEEDS_CONFIRMATION; a fetch that needs credentials is FETCH_FAILED), "
+        "and a launch without a usable agent login is LOGIN_MISSING. Give it "
+        "before the command: treebox --non-interactive create NAME. "
+        "Without a terminal on stdin, treebox already behaves this way.",
+    ),
 ) -> None:
+    global _NON_INTERACTIVE
+    _NON_INTERACTIVE = non_interactive
     # Restore default SIGPIPE handling on POSIX so piping output into `head` /
     # `grep -m1` ends the process quietly (SIGPIPE, exit 141) instead of
     # surfacing "BrokenPipeError ignored" noise or a traceback at shutdown.

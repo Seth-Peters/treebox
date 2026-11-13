@@ -10,8 +10,8 @@ through this protocol.
 The contract has two parts. Every runner may assume provisioning already
 happened host-side and that the host filesystem is visible to the agent at
 identical absolute paths. Docker does this by bind-mounting the worktree and
-its git common dir 1:1; state lives in the host-side private git dir, and the
-lockfile hash stats host files. Backends that can't present host paths
+its git common dir 1:1; the host-owned record lives beside the worktree, and
+the lockfile hash stats host files. Backends that can't present host paths
 verbatim (SSH-remote, VMs, cloud sandboxes) do not fit this seam; they would
 need a filesystem-transport seam that deliberately does not exist yet.
 
@@ -32,6 +32,7 @@ from typing import Literal, Protocol, runtime_checkable
 from ..harnesses import Harness
 from ..models import Worktree
 from ..output import Reporter
+from ..resources import ResourceLimits
 
 
 class PreflightError(RuntimeError):
@@ -53,6 +54,18 @@ class PreflightError(RuntimeError):
         self.hint = hint
 
 
+class FirewallError(RuntimeError):
+    """The requested egress lockdown could not be established.
+
+    The sandbox is not entry-ready: the CLI classifies this
+    (``FIREWALL_FAILED``, with the remediation ``hint``) and never launches
+    the agent or emits an ``entry_command`` after it."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
 RunnerTeardownStatus = Literal["cleaned", "skipped", "failed"]
 
 
@@ -61,15 +74,18 @@ class RunnerTeardownResult:
     """Observable result of a runner-specific teardown attempt.
 
     ``failed`` means a container/image removal was attempted and failed after
-    every remaining cleanup step was still tried - the caller deletes the
-    worktree's recorded state right after teardown, so a step skipped here
-    could never be retried and its resources would leak forever. This result
-    distinguishes that from an honest skip, and reports whether per-runner
-    volumes were actually removed.
+    every remaining cleanup step was still tried. ``remaining`` names each
+    runner resource that is still present because a step failed or could not
+    run (``"<resource> (<reason>)"``, the cleanup result in ``cleanup.py``):
+    while it is non-empty the caller keeps the worktree and its ownership
+    record, and the runner keeps the metadata a retry needs, so the same
+    teardown can finish the job. Also reports whether per-runner volumes were
+    actually removed.
     """
 
     container: RunnerTeardownStatus
     volumes_removed: bool = False
+    remaining: tuple[str, ...] = ()
 
     @classmethod
     def cleaned(cls, *, volumes_removed: bool = False) -> RunnerTeardownResult:
@@ -86,17 +102,25 @@ class RunnerFacts:
 
     Kept out of the operational methods so presentation vocabulary never
     leaks into the run seam: the checklist detail shown when ``preflight``
-    passes, and whether a missing subscription login is a hard gate in
-    ``doctor``'s machine verdict for this runner.
+    passes, and where the agent runs. ``sandboxed`` decides what ``doctor``
+    checks for the selected harness: on the host (False) the harness binary
+    on ``PATH`` and the host login; in a sandbox (True) the login file the
+    sandbox gets a copy of (the binary is part of the sandbox image and is
+    checked at launch).
     """
 
     preflight_detail: str
-    login_required: bool
+    sandboxed: bool
 
 
 @runtime_checkable
 class Runner(Protocol):
     name: str
+    # The generic limits (``resources.RESOURCE_NAMES``) this runner can apply
+    # to its sandbox; it maps each one to its own engine. An explicit flag for
+    # a limit outside this set is refused; a config or template default for
+    # one is not applied. The host runner applies none.
+    supported_resources: frozenset[str]
 
     def preflight(self, reporter: Reporter) -> None:
         """Verify this runner's host dependencies before provisioning (also
@@ -111,6 +135,19 @@ class Runner(Protocol):
         """Persist runner-owned host metadata before this worktree's first
         setup. Sandboxed runners keep security-sensitive ownership records
         outside every sandbox-writable mount; host runners may no-op."""
+        ...
+
+    def template_resources(self) -> ResourceLimits:
+        """The limits this runner's sandbox definition sets by itself (the
+        docker runner: the operator template's ``resources`` object and raw
+        ``runArgs`` limits) - the lowest-precedence tier, used only when a new
+        sandbox is created. Runners without a template return no limits."""
+        ...
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        """Refuse, before provisioning, limits the engine would refuse at
+        sandbox creation (the docker runner: more CPUs than the engine has).
+        Raises ``resources.ResourceLimitError``."""
         ...
 
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
@@ -140,14 +177,13 @@ class Runner(Protocol):
         ...
 
     def prepare_entry(self, wt: Worktree) -> None:
-        """Make the sandbox entry-ready before the agent (or an emitted
-        ``entry_command``) enters it: the docker runner restarts a stopped
-        container and re-establishes the firewall; a no-op on the host. The
-        CLI calls it before emitting ``--print``/``--json`` output, and
-        ``launch`` implementations needing the same guarantee call it
-        themselves (the docker runner's does) - so an emitted
-        ``entry_command`` is never dead on arrival and a treebox-owned
-        restart never leaves egress silently open."""
+        """Prepare the sandbox before launch or entry-command emission.
+
+        The CLI calls this method on every entry, before ``launch`` or
+        ``--print``/``--json`` output. Docker starts a stopped container and
+        checks its enabled firewall even when the container is already running.
+        A failed firewall initialization raises ``FirewallError`` and blocks
+        launch and command emission. This method is a no-op on the host."""
         ...
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
@@ -160,8 +196,9 @@ class Runner(Protocol):
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         """Tear down this runner's resources for ``wt``, honoring any
-        teardown options the runner was constructed with. Best-effort: warn
-        and keep going when a cleanup step fails, then report what actually
-        happened in the result instead of raising.
+        teardown options the runner was constructed with. Warn and keep going
+        when a cleanup step fails, then report what actually happened - and
+        what remains - in the result instead of raising. Runner metadata a
+        retry needs is kept while anything remains.
         """
         ...

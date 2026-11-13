@@ -1,11 +1,27 @@
 name: Release
 
-# Build and publish treebox.
+# Validate, build and publish treebox.
 #
-#   * Push a tag like `v0.4.0`            -> clean release version (0.4.0), publish to PyPI + GitHub Release.
-#   * Manually run via "Run workflow"     -> builds the current commit as a dev version, publishes to TestPyPI.
+#   * Push a tag like `v0.4.0`  -> clean release version (0.4.0), publish to PyPI + GitHub Release.
+#   * "Run workflow" (manual)   -> publish to TestPyPI only. This is the default (index = testpypi).
+#     On a branch, the build is a dev version (0.4.1.devN).
+#   * "Run workflow" on a `v*` tag with index = pypi
+#                               -> publish that tag to PyPI + GitHub Release, on purpose.
+#     index = pypi on a ref that is not a `v*` tag fails in `build`; nothing is published.
 #
-# Publishing uses PyPI Trusted Publishing (OIDC) — there are NO API tokens or
+# A manual run never publishes to PyPI unless you select index = pypi in that
+# run. The publish-pypi condition compares the input with 'pypi', so an empty
+# or missing input never selects PyPI on a manual run (on a tag push, the
+# `inputs` context is empty and the tag push path does not read it). One run
+# publishes to one index only.
+#
+# Every path publishes only after the `validate` job passes. That job runs the
+# full CI validation (ci.yml, called as a reusable workflow) on the same commit
+# that `build` packages. The publish jobs stay in this file, because PyPI
+# Trusted Publishing does not accept a reusable workflow as the trusted
+# workflow.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC) - there are NO API tokens or
 # secrets to manage. One-time setup, once per index:
 #   https://pypi.org      -> Account -> Publishing -> add a "pending" trusted publisher:
 #     owner = Seth-Peters, repo = treebox, workflow = release.yml, environment = pypi
@@ -15,19 +31,43 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      index:
+        description: "Package index. pypi needs a v* tag ref and makes a public release that cannot be withdrawn."
+        type: choice
+        required: true
+        default: testpypi
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
 
 jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build distributions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Refuse a manual PyPI publish from a ref that is not a v* tag
+        if: github.event_name == 'workflow_dispatch' && inputs.index == 'pypi' && !startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::index = pypi needs a v* tag ref, but this run is on $REF. Select the tag in 'Use workflow from', or use index = testpypi."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # full history + tags so hatch-vcs can derive the version
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Build sdist + wheel
         run: uv build
@@ -35,44 +75,52 @@ jobs:
       - name: Show version being published
         run: ls -1 dist/
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/
 
   publish-pypi:
     name: Publish to PyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, build]
+    # Tag push: always. Manual run: only when index = pypi was selected on
+    # purpose, on a v* tag. An empty or missing input never equals 'pypi'.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') && (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.index == 'pypi')
+      )
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write # required for trusted publishing (OIDC)
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
 
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   publish-testpypi:
     name: Publish dev build to TestPyPI
-    needs: build
-    if: github.event_name == 'workflow_dispatch'
+    needs: [validate, build]
+    # Manual run only, and only when PyPI was not selected (testpypi is the
+    # default, so an empty input also lands here, never on PyPI).
+    if: github.event_name == 'workflow_dispatch' && inputs.index != 'pypi'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
       id-token: write # required for trusted publishing (OIDC)
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
 
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
 
@@ -83,13 +131,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
 
       - name: Create release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           generate_release_notes: true
           files: dist/*

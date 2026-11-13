@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest
 
 from treebox import ecosystems
 from treebox.config import Config, load_config
-from treebox.models import Worktree, flatten_branch, worktree_path
+from treebox.models import Worktree, derive_name, worktree_path
 from treebox.runners.docker import DockerRunner
 
 
@@ -79,6 +80,8 @@ def test_render_list_single_worktree_keeps_table_divider_without_summary():
                 "isolation": "host",
                 "deps": "fresh",
                 "env": "absent",
+                "health": "healthy",
+                "setup": "done",
             }
         ],
         "/repo",
@@ -128,6 +131,8 @@ def test_render_list_multi_worktree_summary_is_separated():
                 "isolation": "",
                 "deps": "fresh",
                 "env": "absent",
+                "health": "healthy",
+                "setup": "done",
             },
             {
                 "name": "beta",
@@ -138,6 +143,8 @@ def test_render_list_multi_worktree_summary_is_separated():
                 "isolation": "docker",
                 "deps": "stale",
                 "env": "present",
+                "health": "healthy",
+                "setup": "done",
             },
         ],
         "/repo",
@@ -184,6 +191,8 @@ def test_render_list_narrow_width_preserves_identity_and_state(width: int):
                 "isolation": "docker",
                 "deps": "fresh",
                 "env": "present",
+                "health": "healthy",
+                "setup": "done",
             },
             {
                 "name": "brave-otter",
@@ -194,6 +203,8 @@ def test_render_list_narrow_width_preserves_identity_and_state(width: int):
                 "isolation": "host",
                 "deps": "stale",
                 "env": "present",
+                "health": "healthy",
+                "setup": "done",
             },
         ],
         "/repo/.treebox/worktrees",
@@ -253,14 +264,29 @@ def test_golden_snapshot_gate_preserves_and_detects_trailing_spaces(tmp_path: Pa
     assert "+meaningful trailing spaces   " in compared.stdout
 
 
-def test_flatten_branch():
-    assert flatten_branch("feature/auth") == "feature--auth"
-    assert flatten_branch("bugfix/docs-outdated") == "bugfix--docs-outdated"
-    assert flatten_branch("simple") == "simple"
+@pytest.mark.parametrize(
+    ("branch", "name"),
+    [
+        ("simple", "simple"),
+        ("feature/auth", "feature--auth"),
+        ("bugfix/docs-outdated", "bugfix--docs-outdated"),
+        ("feature/x/y", "feature--x--y"),
+        ("treebox/fix-auth", "fix-auth"),
+        # A placeholder drops its prefix, then flattens like any branch: the
+        # name is one directory leaf, never a nested path.
+        ("treebox/a/b", "a--b"),
+        ("treebox/a/b/c", "a--b--c"),
+        # Only a leading prefix is a placeholder marker.
+        ("feature/treebox/x", "feature--treebox--x"),
+    ],
+)
+def test_derive_name_flattens_every_branch_shaped_input(branch: str, name: str):
+    assert derive_name(branch) == name
+    assert "/" not in derive_name(branch)
 
 
 def test_name_and_placeholder_helpers():
-    from treebox.models import derive_name, is_placeholder, is_slug, placeholder_branch
+    from treebox.models import is_placeholder, is_slug, placeholder_branch
 
     # NAME is one clean lowercase token — nothing else.
     assert is_slug("fix-auth") and is_slug("x2") and is_slug("brave-otter")
@@ -272,10 +298,6 @@ def test_name_and_placeholder_helpers():
     assert placeholder_branch("brave-otter") == "treebox/brave-otter"
     assert is_placeholder("treebox/brave-otter")
     assert not is_placeholder("feature/auth") and not is_placeholder(None)
-
-    # A placeholder implies its own slug; other branches flatten.
-    assert derive_name("treebox/fix-auth") == "fix-auth"
-    assert derive_name("feature/auth") == "feature--auth"
 
 
 def test_is_valid_name_accepts_slash_separated_slugs():
@@ -402,7 +424,7 @@ def test_resolve_ref_rejects_empty_ref(monkeypatch: pytest.MonkeyPatch):
 def test_worktree_discovery_canonicalizes_symlinked_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from treebox import ecosystems, git, resolve, state
+    from treebox import ecosystems, git, lifecycle, provision, record, resolve
     from treebox.cli import _collect_rows
     from treebox.config import Config
 
@@ -426,15 +448,18 @@ def test_worktree_discovery_canonicalizes_symlinked_roots(
     monkeypatch.setattr(git, "worktree_list", lambda repo: records)
     monkeypatch.setattr(git, "last_commit", lambda path: ("init", 1))
     monkeypatch.setattr(ecosystems, "lockfile_hash", lambda path: "lock")
+    monkeypatch.setattr(provision, "worktree_health", lambda repo, path: "healthy")
     monkeypatch.setattr(
-        state,
-        "load_registered",
-        lambda repo, path: state.WorktreeState(
+        record,
+        "load",
+        lambda path: record.WorktreeRecord(
+            worktree=path,
             base="main",
             isolation="host",
             harness="claude",
-            lockfile_hash="lock",
-            provisioned=True,
+            firewall=False,
+            template="default",
+            setup=lifecycle.SetupResult.done("lock"),
         ),
     )
 
@@ -652,7 +677,7 @@ def fake_common_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def _boxed_worktree(tmp_path: Path, branch: str = "feature/x") -> Worktree:
-    name = flatten_branch(branch)
+    name = derive_name(branch)
     wt_path = tmp_path / "root" / name
     wt_path.mkdir(parents=True, exist_ok=True)
     return Worktree("/repo", name, branch, "main", wt_path)
@@ -789,6 +814,37 @@ def test_docker_regenerates_config_each_run(tmp_path: Path, fake_common_dir):
     assert creds_marker.exists()  # bind-mounted creds dir spared
 
 
+def test_docker_renders_build_helpers_only_when_the_template_has_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
+):
+    """The bundled Dockerfile COPYs its build helpers from the build context,
+    so the rendered context carries them byte for byte. They are optional: a
+    template without them (scaffolded before they existed) still renders."""
+    import shutil
+
+    from treebox import assets
+
+    monkeypatch.setenv("TREEBOX_HOME", str(tmp_path / "treebox-home"))
+    monkeypatch.delenv("TREEBOX_TEMPLATE_DIR", raising=False)
+    bundled = assets.template_dir("default")
+    runner = DockerRunner(Config(isolation="docker"))
+    wt = _boxed_worktree(tmp_path)
+    runner._write_config(wt, cold=True)
+    for helper in assets.TEMPLATE_HELPER_FILES:
+        rendered = runner._config_dir(wt) / helper
+        assert rendered.read_bytes() == (bundled / helper).read_bytes()
+
+    tpl = tmp_path / "tpl"
+    shutil.copytree(bundled, tpl)
+    for helper in assets.TEMPLATE_HELPER_FILES:
+        (tpl / helper).unlink()
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tpl))
+    assert assets.missing_template_files(tpl) == []
+    runner._write_config(wt, cold=True)
+    for helper in assets.TEMPLATE_HELPER_FILES:
+        assert not (runner._config_dir(wt) / helper).exists()
+
+
 def test_docker_build_and_run_commands(tmp_path: Path, fake_common_dir):
     """The exact docker argv contract: build tags the deterministic (lowercase)
     slug from the config-dir context; run is detached with an init process, the
@@ -883,7 +939,10 @@ def test_autonomous_launch_argv_is_exact(tmp_path: Path, harness_name: str, argv
     # worktree directory: pasting it anywhere runs in the box.
     cmd = host.entry_command(wt, harness=harness, args=[])
     assert cmd[:2] == ["sh", "-c"]
-    assert cmd[2] == f"cd {shlex.quote(str(wt.path))} && exec {shlex.join(argv)}"
+    assert cmd[2] == (
+        f"cd {shlex.quote(str(wt.path))} && export TREEBOX_NAME=wt TREEBOX_ID={wt.id} "
+        f"&& exec {shlex.join(argv)}"
+    )
     assert host.entry_command(wt, harness=harness, args=["--continue"])[2].endswith(
         f"exec {shlex.join([*argv, '--continue'])}"
     )
@@ -921,7 +980,7 @@ def test_harness_credentials_are_scoped_copies(tmp_path: Path, monkeypatch: pyte
 
     claude = get_harness("claude")
     assert claude.credential_path() == live  # staging reads the login dir
-    assert claude.credentials_present()
+    assert claude.login() == str(live / ".credentials.json")
 
     staged = tmp_path / "staged" / "claude"
     claude.stage_credentials(staged)
@@ -940,9 +999,9 @@ def test_harness_credentials_are_scoped_copies(tmp_path: Path, monkeypatch: pyte
     claude.stage_credentials(staged)
     assert not (staged / ".credentials.json").exists()
 
-    # An absent login dir stages nothing and is reported not-present.
+    # An absent login dir stages nothing and is reported as no login.
     codex = get_harness("codex")
-    assert not codex.credentials_present()
+    assert codex.login() is None
     codex.stage_credentials(tmp_path / "staged" / "codex")
     assert list((tmp_path / "staged" / "codex").iterdir()) == []
 
@@ -1000,23 +1059,13 @@ def test_docker_refresh_restages_credentials_without_setup(
     assert not staged.exists()
 
 
-def test_firewall_template_fails_closed():
-    """The firewall overlay grants only the needed capabilities and bakes in the
-    env post-create.sh gates on: if the firewall never initialized, workspace
-    setup refuses to run rather than running with open egress."""
+def test_firewall_overlay_grants_required_capabilities():
     import treebox.assets as assets
 
     tpl = assets.template_dir("default")
     fw = json.loads((tpl / "firewall.json").read_text())
     assert fw["env"]["TREEBOX_FIREWALL"] == "1"
     assert "--cap-add=NET_ADMIN" in fw["runArgs"]
-
-    post_create = (tpl / "post-create.sh").read_text()
-    gate = post_create.index("/run/treebox-firewall-ready")
-    assert gate < post_create.index("&& uv sync")  # gate precedes workspace code
-
-    init_fw = (tpl / "init-firewall.sh").read_text()
-    assert "touch" in init_fw and "/run/treebox-firewall-ready" in init_fw
 
 
 def test_template_dir_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1289,7 +1338,14 @@ def test_docker_prepare_entry_restarts_stopped_container_and_relocks_egress(
     assert start < firewall
 
 
-def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fake_common_dir):
+def test_docker_prepare_entry_relocks_egress_of_a_running_container(
+    tmp_path: Path, fake_common_dir
+):
+    """A container restarted outside treebox (`docker restart`) is already
+    running when the operator enters, but its rules are gone (issue #59). So
+    every entry runs the guarded firewall init - the script itself skips the
+    rebuild only when the ready flag AND the live DROP policy are present -
+    and never restarts a running container."""
     cfg = Config(isolation="docker")
     wt = _boxed_worktree(tmp_path)
     slug = DockerRunner(cfg)._slug(wt)
@@ -1297,7 +1353,67 @@ def test_docker_prepare_entry_is_a_noop_when_already_running(tmp_path: Path, fak
 
     DockerRunner(cfg, docker=fake).prepare_entry(wt)
 
-    assert not any(c[0] == "start" or "init-firewall.sh" in " ".join(c) for c in fake.calls)
+    assert not any(c[0] == "start" for c in fake.calls)
+    firewall = [c for c in fake.calls if "init-firewall.sh" in " ".join(c)]
+    assert len(firewall) == 1
+    assert firewall[0][firewall[0].index("-u") + 1] == "root"
+    # The treebox side never reads the ready flag: the decision to skip the
+    # rebuild is the script's alone, and it also checks the live policy.
+    assert not any("treebox-firewall-ready" in " ".join(c) for c in fake.calls)
+
+
+def test_docker_prepare_entry_firewall_failure_is_classified(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed firewall init blocks the entry with a typed error the CLI
+    classifies (FIREWALL_FAILED), carrying the script's own diagnostics."""
+    from treebox.runners.base import FirewallError
+
+    monkeypatch.setattr("treebox.git.branch_for_path", lambda repo, path: "feature/x")
+    cfg = Config(isolation="docker", firewall=True)
+    wt = _boxed_worktree(tmp_path)
+    runner = DockerRunner(cfg)
+    firewall_args = tuple(runner._firewall_command(wt)[1:])
+    fake = _FakeDocker(
+        ids="abc123\n",
+        name=runner._slug(wt),
+        running=True,
+        failures={firewall_args: "ERROR: Failed to fetch GitHub IP ranges"},
+    )
+
+    with pytest.raises(FirewallError, match="Failed to fetch GitHub IP ranges") as raised:
+        DockerRunner(cfg, docker=fake).prepare_entry(wt)
+    # Fail-closed rules block the allowlist fetch, so another entry cannot
+    # recover: the hint points at a fresh container.
+    assert raised.value.hint is not None
+    assert "treebox teardown" in raised.value.hint
+
+
+def test_docker_setup_firewall_failure_is_classified(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
+    """The setup-time lockdown fails the same typed way, and post-create (the
+    first workspace-derived code) never runs."""
+    from treebox.output import StepError
+    from treebox.runners.base import FirewallError
+
+    monkeypatch.setattr("treebox.git.branch_for_path", lambda repo, path: "feature/x")
+
+    class _FailingFirewall(_RecordingReporter):
+        def step(self, label, detail, argv, *, cwd=None, env=None):
+            super().step(label, detail, argv, cwd=cwd, env=env)
+            if "init-firewall.sh" in " ".join(argv):
+                raise StepError(label, 1, "ERROR: Invalid host port: 99999")
+            return ""
+
+    fake = _FakeDocker(ids="")
+    runner = DockerRunner(Config(isolation="docker", firewall=True), docker=fake)
+    rep = _FailingFirewall()
+
+    with pytest.raises(FirewallError, match="Invalid host port"):
+        runner.setup(_boxed_worktree(tmp_path), cold=True, reporter=rep)
+
+    assert not any("post-create.sh" in " ".join(a) for a in rep.steps)
 
 
 def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
@@ -1318,7 +1434,7 @@ def test_host_prepare_entry_is_a_noop(tmp_path: Path):
 
 def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir):
     """A labeled container this runner didn't create is an explicit error
-    pointing at teardown — not silently adopted with the wrong
+    pointing at teardown - never silently used with the wrong
     name/mounts/user."""
     fake = _FakeDocker(ids="abc123\n", name="funny_wozniak")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
@@ -1342,24 +1458,37 @@ def test_docker_setup_refuses_firewall_on_unfirewalled_container(tmp_path: Path,
         runner.setup(wt, cold=True, reporter=_RecordingReporter())
 
 
-def _reconcile(cfg, st, **kw):
-    """_reconcile_with_state with the reporter/flag boilerplate defaulted, so
+def _reconcile(cfg, rec, **kw):
+    """_reconcile_with_record with the reporter/flag boilerplate defaulted, so
     each policy assertion below reads as one line of the precedence table."""
-    from treebox.cli import _reconcile_with_state
+    from treebox.cli import _reconcile_with_record
     from treebox.output import Reporter
 
     kw.setdefault("isolation", None)
-    return _reconcile_with_state(Reporter(quiet=True), cfg, st, **kw)
+    return _reconcile_with_record(Reporter(quiet=True), cfg, rec, **kw)
+
+
+def _rec(**kw):
+    """A host-owned record with defaults for the fields a test does not pin."""
+    from treebox.record import WorktreeRecord
+
+    fields = {
+        "worktree": Path("/wts/x"),
+        "base": "main",
+        "isolation": "docker",
+        "harness": "claude",
+        "firewall": False,
+        "template": "default",
+    }
+    fields.update(kw)
+    return WorktreeRecord(**fields)
 
 
 def test_reconcile_honors_recorded_no_firewall_over_config_default(tmp_path: Path, fake_common_dir):
     """A worktree created with --no-firewall under a firewall=true config must
     reconnect cleanly: enter resolves the firewall from the recorded created-time
     choice, so setup against its unfirewalled container never hard-errors."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="claude", firewall=False)
-    cfg = _reconcile(Config(isolation="docker", firewall=True), st, honor_firewall=True)
+    cfg = _reconcile(Config(isolation="docker", firewall=True), _rec(firewall=False))
     assert cfg.firewall is False  # recorded created-time choice wins over the default
 
     wt = _boxed_worktree(tmp_path)
@@ -1371,17 +1500,10 @@ def test_reconcile_honors_recorded_no_firewall_over_config_default(tmp_path: Pat
     DockerRunner(cfg, docker=fake).setup(wt, cold=True, reporter=_RecordingReporter())
 
 
-def test_reconcile_firewall_uses_config_default_without_state():
-    """With no state to read (a worktree whose dir is gone), `enter` keeps the
-    config default instead of inventing a firewall choice — and teardown
-    (honor_firewall=False) always keeps the config default."""
-    from treebox.state import WorktreeState
-
-    assert _reconcile(Config(firewall=True), None, honor_firewall=True).firewall is True
-    assert _reconcile(Config(firewall=False), None, honor_firewall=True).firewall is False
-    # The teardown flow never reconciles the firewall, recorded or not.
-    recorded = WorktreeState(base="main", isolation="host", harness="claude", firewall=True)
-    assert _reconcile(Config(firewall=False), recorded).firewall is False
+def test_reconcile_recorded_firewall_beats_the_config_default_both_ways():
+    """The record is the authority for the firewall in either direction."""
+    assert _reconcile(Config(firewall=False), _rec(firewall=True)).firewall is True
+    assert _reconcile(Config(firewall=True), _rec(firewall=False)).firewall is False
 
 
 def test_reconcile_honors_recorded_template_over_config_default():
@@ -1389,36 +1511,21 @@ def test_reconcile_honors_recorded_template_over_config_default():
     same template even when the config default is `default` and no `--template`
     is passed: otherwise a deps-changing enter regenerates container.json from
     the wrong template (wrong user → unauthenticated agent)."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="claude", template="hardened")
+    rec = _rec(template="hardened")
     # No --template: the recorded created-time template wins over the default.
-    assert _reconcile(Config(template="default"), st).template == "hardened"
-    # An explicit --template stays a legitimate per-session override.
-    assert _reconcile(Config(template="default"), st, template="other").template == "default"
-
-
-def test_reconcile_template_uses_config_default_when_unrecorded():
-    """An unrecorded template (None) must not force a choice: enter falls back
-    to the config default."""
-    from treebox.state import WorktreeState
-
-    unrecorded = WorktreeState(base="main", isolation="docker", harness="claude")
-    assert unrecorded.template is None
-    assert _reconcile(Config(template="default"), unrecorded).template == "default"
-    assert _reconcile(Config(template="custom"), None).template == "custom"
+    assert _reconcile(Config(template="default"), rec).template == "hardened"
+    # An explicit --template stays a legitimate per-session operator override.
+    assert _reconcile(Config(template="other"), rec, template="other").template == "other"
 
 
 def test_reconcile_isolation_and_harness_policy():
     """The remaining rows of the precedence table, at the unit level (the CLI
     paths — conflict exit codes, recorded-harness launches — are pinned by the
     contract and integration suites): recorded isolation wins over the config
-    default; a matching explicit --isolation is fine; a known recorded harness
-    wins unless -H overrides; an unknown recorded harness falls back."""
-    from treebox.state import WorktreeState
-
-    st = WorktreeState(base="main", isolation="docker", harness="codex")
-    out = _reconcile(Config(isolation="host", harness="claude"), st)
+    default; a matching explicit --isolation is fine; the recorded harness
+    wins unless -H overrides (an unknown one never parses: RECORD_INVALID)."""
+    rec = _rec(isolation="docker", harness="codex")
+    out = _reconcile(Config(isolation="host", harness="claude"), rec)
     assert out.isolation == "docker"  # recorded wins over the config default
     assert out.harness == "codex"  # recorded, known -> wins
 
@@ -1426,15 +1533,9 @@ def test_reconcile_isolation_and_harness_policy():
     # override. (In the real flow the explicit values are already folded into
     # cfg by _resolve_config; reconcile just declines to second-guess them.)
     out = _reconcile(
-        Config(isolation="docker", harness="claude"), st, isolation="docker", harness="claude"
+        Config(isolation="docker", harness="claude"), rec, isolation="docker", harness="claude"
     )
     assert out.isolation == "docker" and out.harness == "claude"
-
-    # Unknown recorded harness falls back to the config default; no state at
-    # all leaves the config untouched.
-    weird = WorktreeState(base="main", isolation="host", harness="aider")
-    assert _reconcile(Config(harness="claude"), weird).harness == "claude"
-    assert _reconcile(Config(isolation="host"), None).isolation == "host"
 
 
 def test_docker_setup_cold_reuse_warns_about_frozen_mounts(tmp_path: Path, fake_common_dir):
@@ -1530,7 +1631,7 @@ def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_co
 
 
 def test_config_rejects_unknown_isolation(tmp_path: Path):
-    """No legacy isolation aliases: a config.toml naming an isolation mode that
+    """No isolation aliases: a config.toml naming an isolation mode that
     doesn't exist fails loudly instead of being silently mapped to another."""
     cfg_file = tmp_path / "config.toml"
     cfg_file.write_text('isolation = "bogus"\n')
@@ -1581,7 +1682,7 @@ def test_docker_teardown_keeps_foreign_image_and_volumes_by_default(tmp_path: Pa
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
 
 
-def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
+def test_docker_teardown_reports_everything_remaining_when_docker_unavailable(tmp_path: Path):
     from treebox.output import Reporter
 
     fake = _FakeDocker(info_rc=1)  # daemon unreachable
@@ -1592,30 +1693,48 @@ def test_docker_teardown_skips_when_docker_unavailable(tmp_path: Path):
 
     assert result.container == "skipped"
     assert result.volumes_removed is False
+    assert result.remaining == ("Docker resources (Docker is not reachable)",)
     # No daemon → nothing beyond the availability probe touches docker.
     assert fake.calls == [["info"]]
 
 
 @pytest.mark.parametrize(
-    ("failed_resource", "expected_container", "expected_volumes_removed", "image_rm_attempted"),
+    ("failed_resource", "expected_container", "volumes_removed", "image_rm", "remaining"),
     [
-        ("container", "failed", True, False),
-        ("image", "failed", True, True),
-        ("volume", "cleaned", False, True),
+        (
+            "container",
+            "failed",
+            False,
+            False,
+            [
+                "container abc123 (docker rm failed)",
+                "image {image} (in use by the container)",
+                "volumes treebox-claude-config (in use by the container)",
+            ],
+        ),
+        ("image", "failed", True, True, ["image {image} (docker image rm failed)"]),
+        (
+            "volume",
+            "cleaned",
+            False,
+            True,
+            ["volumes treebox-claude-config (docker volume rm failed)"],
+        ),
     ],
 )
 def test_docker_teardown_continues_past_destructive_command_failure(
     tmp_path: Path,
     failed_resource: str,
     expected_container: str,
-    expected_volumes_removed: bool,
-    image_rm_attempted: bool,
+    volumes_removed: bool,
+    image_rm: bool,
+    remaining: list[str],
 ):
-    """One failed removal must not abort the rest of the cleanup — the caller
-    deletes the state that could retry it right after teardown, so every
-    remaining step still runs (only a doomed image rm after a failed container
-    rm is skipped) and the result reports each resource's outcome honestly:
-    a failed volume rm alone leaves the container status accurate."""
+    """One failed removal does not abort the rest of the cleanup: every step
+    that can still succeed runs (only the image and volume removals a still
+    present container would block are skipped), the result names each
+    resource that remains, and the sandbox files dir - which holds the
+    resource manifest the retry needs - is kept."""
     from treebox.output import Reporter
 
     wt = _boxed_worktree(tmp_path)
@@ -1640,18 +1759,23 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     result = runner.teardown(wt, reporter=Reporter(quiet=True))
 
     assert result.container == expected_container
-    assert result.volumes_removed is expected_volumes_removed
+    assert result.volumes_removed is volumes_removed
+    assert list(result.remaining) == [r.format(image=image) for r in remaining]
     assert list(failed_command) in fake.calls
-    assert (["image", "rm", image] in fake.calls) is image_rm_attempted
-    assert ["volume", "rm", "treebox-claude-config"] in fake.calls
-    assert not cfg_dir.exists()
+    assert (["image", "rm", image] in fake.calls) is image_rm
+    assert (["volume", "rm", "treebox-claude-config"] in fake.calls) is (
+        failed_resource != "container"
+    )
+    assert (cfg_dir / "treebox-resources.json").is_file()
 
 
-@pytest.mark.parametrize("config_dir_exists", [True, False], ids=["legacy", "manually-deleted"])
+@pytest.mark.parametrize(
+    "config_dir_exists", [True, False], ids=["config-dir-left", "config-dir-deleted"]
+)
 def test_docker_teardown_without_manifest_never_guesses_volumes(
     tmp_path: Path, config_dir_exists: bool
 ):
-    """A legacy worktree or manually deleted metadata dir is cleaned safely:
+    """A missing manifest (with or without its config dir) is cleaned safely:
     no volume lookup/removal guess, a warning, and any config dir is removed."""
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), remove_volumes=True, docker=fake)
@@ -1791,19 +1915,15 @@ def test_docker_teardown_empty_manifest_does_not_rederive(tmp_path: Path, fake_c
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
 
 
-def test_docker_create_records_workspace_volumes_in_host_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_common_dir
-):
+def test_docker_create_records_workspace_volumes_in_host_manifest(tmp_path: Path, fake_common_dir):
     """Create persists derived per-workspace volume names outside every
-    sandbox mount before setup, and worktree state carries no ownership data."""
-    from treebox import git, provision, state
+    sandbox mount before setup, and writes nothing into the git dir."""
     from treebox.runners.docker import _sanitize
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path / "gitdir"))
     runner = DockerRunner(Config(isolation="docker"))
     wt = _boxed_worktree(tmp_path)
 
-    provision._record_runner(wt, runner, "claude", False, "default")
+    runner.initialize(wt)
 
     manifest = json.loads(runner._resource_manifest_file(wt).read_text())
     assert manifest == {
@@ -1812,9 +1932,7 @@ def test_docker_create_records_workspace_volumes_in_host_manifest(
         "image": runner._slug(wt),
         "volumes": [f"treebox-shellhistory-{_sanitize('feature--x')}"],
     }
-    st = state.load(wt.path)
-    assert st is not None
-    assert "volumes" not in json.loads((tmp_path / "gitdir" / "treebox-state.json").read_text())
+    assert not runner._resource_manifest_file(wt).is_relative_to(wt.path)
 
 
 def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, fake_common_dir):
@@ -1829,37 +1947,47 @@ def test_docker_config_regeneration_preserves_resource_manifest(tmp_path: Path, 
     assert runner._resource_manifest_file(wt).read_text() == before
 
 
-def test_teardown_runner_recovers_created_time_template(tmp_path, monkeypatch):
-    """teardown has no --template flag, so its runner must recover the created-time
-    template from state for the non-destructive runner configuration."""
-    from treebox import git, state
+@pytest.mark.parametrize(
+    ("record_state", "manifest", "want"),
+    [
+        ("docker", False, "docker"),  # the record decides when it is valid
+        ("host", True, "host"),
+        ("missing", True, "docker"),  # no record: the resource manifest decides
+        ("missing", False, "host"),
+        ("invalid", True, "docker"),
+        ("invalid", False, "host"),
+    ],
+)
+def test_teardown_runner_reads_only_host_owned_files(tmp_path, record_state, manifest, want):
+    """teardown is the recovery for a missing or invalid record, so it picks
+    the runner without one: from the record when valid, else from the docker
+    runner's host-owned resource manifest. Never the config default."""
+    from treebox import record
     from treebox.cli import _teardown_runner
     from treebox.config import Config
-    from treebox.output import Reporter
     from treebox.resolve import Candidate
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-    monkeypatch.setattr(git, "registered_gitdir", lambda repo, p: tmp_path)
-    state.save(
-        tmp_path,
-        state.WorktreeState(base="main", isolation="docker", harness="claude", template="hardened"),
-    )
-    cand = Candidate(name="work", branch="treebox/work", path=str(tmp_path))
+    work = tmp_path / "work"
+    work.mkdir()
+    if record_state in ("docker", "host"):
+        record.save(_record_for(work, isolation=record_state))
+    elif record_state == "invalid":
+        record.record_path(work).parent.mkdir(parents=True)
+        record.record_path(work).write_text('{"schemaVersion": 2}')
+    if manifest:
+        path = tmp_path / ".containers" / "work" / "treebox-resources.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    cand = Candidate(name="work", branch="work", path=str(work))
 
-    run = _teardown_runner(
-        Reporter(quiet=True),
-        Config(isolation="docker", template="default"),
-        cand,
-        str(tmp_path),
-        explicit=None,
-        remove_volumes=True,
-        json_out=False,
-    )
-    assert run is not None
-    assert run.config.template == "hardened"  # recovered from state, not the config default
+    config_default = "host" if want == "docker" else "docker"
+    run = _teardown_runner(Config(isolation=config_default), cand, remove_volumes=True)
+    assert run.name == want
 
 
-def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatch):
+def test_docker_doctor_gates_on_binary_and_daemon(
+    monkeypatch: pytest.MonkeyPatch, non_root_identity
+):
     """doctor is the only safety gate before a sandboxed create: each missing
     dependency must raise its own loud PreflightError carrying a stable machine
     code and a remediation hint. Docker is the whole dependency: the binary and
@@ -1886,6 +2014,29 @@ def test_docker_doctor_gates_on_binary_and_daemon(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
     runner.preflight(rep)  # all dependencies present → no raise
+
+
+def test_docker_preflight_refuses_root_before_any_other_gate(monkeypatch: pytest.MonkeyPatch):
+    """Docker isolation as uid 0 is refused up front: the sandbox user would be
+    root (it could delete its own firewall rules) and the template cannot add a
+    second uid-0 user. The root gate comes first, so a root user with no docker
+    is told the real blocker. The host runner stays usable as root."""
+    from treebox.output import Reporter
+    from treebox.runners import docker as dr
+    from treebox.runners.base import PreflightError
+    from treebox.runners.host import HostRunner
+
+    rep = Reporter(quiet=True)
+    monkeypatch.setattr(dr.system, "identity", lambda: dr.system.Identity(uid=0, gid=0))
+    monkeypatch.setattr(dr.system, "have", lambda c: False)
+    monkeypatch.setattr(dr, "_docker_available", lambda: False)
+
+    with pytest.raises(PreflightError, match="root") as exc_info:
+        DockerRunner(Config(isolation="docker")).preflight(rep)
+    assert exc_info.value.error_code == "RUNNING_AS_ROOT"
+    assert "useradd" in (exc_info.value.hint or "")
+
+    HostRunner(Config()).preflight(rep)  # host isolation as root: no raise
 
 
 def test_docker_preflight_hints_are_platform_aware(monkeypatch: pytest.MonkeyPatch):
@@ -1968,6 +2119,8 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
 
     worktree = tmp_path / "wt"
     worktree.mkdir()
+    # The branch declares the same (untrusted) submodule paths.
+    (worktree / ".gitmodules").write_text((repo / ".gitmodules").read_text())
     # A checked-out branch can plant a symlink where a submodule's parent goes.
     (worktree / "pkg").symlink_to(outside)
 
@@ -1989,6 +2142,71 @@ def test_copy_submodules_skips_unsafe_sources_and_rejects_destination_conflicts(
     assert not (worktree / "vendor").exists()
     # Nothing was written through the symlinked destination parent.
     assert list(outside.iterdir()) == [outside / "secret.txt"]
+
+
+def test_plan_submodules_refuses_unsafe_paths_before_any_copy(tmp_path: Path):
+    """The shared selection rule (real run and dry-run plan) refuses unsafe
+    ``.gitmodules`` paths and skips one the main checkout does not have."""
+    from treebox.provision import SubmoduleStep, plan_submodules
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".gitmodules").write_text(
+        '[submodule "up"]\n\tpath = ../outside\n\turl = x\n'
+        '[submodule "link"]\n\tpath = vendor\n\turl = x\n'
+        '[submodule "ok"]\n\tpath = sub\n\turl = x\n'
+    )
+    (repo / "vendor").symlink_to(outside)
+    (repo / "sub").mkdir()
+
+    steps = plan_submodules(str(repo), ["../outside", "vendor", "sub", "libB"])
+
+    assert steps == [
+        SubmoduleStep("../outside", "refuse", "skipping submodule with unsafe path: '../outside'"),
+        SubmoduleStep("vendor", "refuse", "skipping submodule behind a symlink: 'vendor'"),
+        SubmoduleStep("sub", "copy"),
+        SubmoduleStep("libB", "skip", f"skipped libB · not checked out in {repo}"),
+    ]
+    assert plan_submodules(str(repo), []) == []
+
+
+def test_submodule_paths_at_revision_reads_only_a_regular_gitmodules(tmp_path: Path):
+    """Like ``has_gitmodules`` on a checked-out tree: a tracked symlink or
+    directory named ``.gitmodules`` declares nothing, and no file is checked out."""
+    import subprocess
+
+    from treebox import git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def commit(message: str) -> str:
+        run = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@e"]
+        subprocess.run([*run, "add", "-A"], check=True)
+        subprocess.run([*run, "commit", "-qm", message, "--allow-empty"], check=True)
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    empty = commit("empty")
+    (repo / "real.ini").write_text('[submodule "a"]\n\tpath = libA\n\turl = x\n')
+    (repo / ".gitmodules").write_text('[submodule "b"]\n\tpath = libB\n\turl = x\n')
+    regular = commit("regular")
+    (repo / ".gitmodules").unlink()
+    (repo / ".gitmodules").symlink_to("real.ini")
+    symlink = commit("symlink")
+    (repo / ".gitmodules").unlink()
+    (repo / ".gitmodules").mkdir()
+    (repo / ".gitmodules" / "x").write_text('[submodule "c"]\n\tpath = libC\n')
+    directory = commit("directory")
+
+    assert git.submodule_paths_at_revision(repo, empty) == []
+    assert git.submodule_paths_at_revision(repo, regular) == ["libB"]
+    assert git.submodule_paths_at_revision(repo, symlink) == []
+    assert git.submodule_paths_at_revision(repo, directory) == []
 
 
 def test_copy_env_is_force_ignored_in_the_worktree(tmp_path: Path):
@@ -2027,7 +2245,9 @@ def test_git_argv_uses_end_of_options_separator(monkeypatch: pytest.MonkeyPatch)
     git.worktree_add("/r", "/wt", git.BranchPlan("new", "b", "--detach"))
     git.delete_branch("/r", "b")
 
-    local, new, delete = calls
+    resolve, *_ = [c for c in calls if "rev-parse" in c]
+    assert resolve[-2:] == ["--end-of-options", "--detach^{commit}"]
+    local, new, delete = [c for c in calls if "rev-parse" not in c]
     assert local[-3:] == ["--", "/wt", "b"]
     assert new[-5:] == ["-b", "b", "--", "/wt", "--detach"]
     assert delete[-2:] == ["--", "b"]
@@ -2051,78 +2271,194 @@ def test_files_at_revision_excludes_trees_and_gitlinks(monkeypatch: pytest.Monke
     ) == {"uv.lock"}
 
 
-def test_state_provisioned_roundtrips(tmp_path, monkeypatch):
-    """The provisioned flag round-trips; a state file missing the key (corrupt or
-    truncated) reads as not-provisioned rather than silently half-built."""
+def test_record_setup_result_roundtrips(tmp_path):
+    """The setup result lives in the host-owned record, as a required key of
+    its one schema version (a record without it is invalid, see
+    test_record_invalid_contents_are_classified)."""
+    from treebox import lifecycle, record
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    for setup in (
+        lifecycle.SetupResult(),
+        lifecycle.SetupResult.failed("setup · hook 1", 7),
+        lifecycle.SetupResult.done("abc"),
+        lifecycle.SetupResult.done(""),  # a repo without lockfiles
+    ):
+        record.save(_record_for(wt, setup=setup))
+        assert record.load(wt).setup == setup
+        assert record.load(wt).same_policy(_record_for(wt))
+
+
+def test_record_port_block_roundtrips(tmp_path):
+    """The record keeps the copy of the worktree's port block, as a required
+    key of its one schema version (null or a base and count; a record without
+    it is invalid, see test_record_invalid_contents_are_classified). The block
+    is not policy: a resumed create never conflicts over it."""
+    import dataclasses
+
+    from treebox import record
+    from treebox.models import PortBlock
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    for block in (PortBlock(20010, 10), None):
+        rec = dataclasses.replace(_record_for(wt), ports=block)
+        record.save(rec)
+        assert record.load(wt) == rec
+        assert rec.same_policy(_record_for(wt))
+
+
+def test_sandbox_written_state_file_is_never_read(tmp_path, monkeypatch):
+    """A treebox-state.json in the sandbox-writable git dir is inert:
+    a forged "provisioned: true" with a matching hash can make neither list
+    report fresh nor enter skip setup - only the host-owned record can."""
+    from treebox import lifecycle
+
+    pending = lifecycle.SetupResult()
+    assert lifecycle.freshness(pending, "h") == "unknown"
+    assert lifecycle.setup_reason(pending, "h") is not None
+    failed = lifecycle.SetupResult.failed("setup · uv", 1)
+    assert lifecycle.freshness(failed, "") == "unknown"
+    assert "setup · uv" in (lifecycle.setup_reason(failed, "") or "")
+    done = lifecycle.SetupResult.done("h")
+    assert lifecycle.freshness(done, "h") == "fresh"
+    assert lifecycle.freshness(done, "other") == "stale"
+    assert lifecycle.setup_reason(done, "h") is None
+    assert lifecycle.setup_reason(done, "other") is not None
+    assert [lifecycle.resumable(r) for r in (pending, failed, done)] == [True, True, False]
+
+
+def _record_for(path: Path, **kw):
+    from treebox import record
+
+    fields = {
+        "worktree": path,
+        "base": "main",
+        "isolation": "docker",
+        "harness": "claude",
+        "firewall": True,
+        "template": "hardened",
+    }
+    fields.update(kw)
+    return record.WorktreeRecord(**fields)
+
+
+def test_record_lives_outside_the_worktree_and_roundtrips(tmp_path):
+    """The record sits beside the worktree (outside every sandbox mount), is
+    versioned, and round-trips exactly."""
     import json
 
-    from treebox import git, state
+    from treebox import record
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
+    wt = tmp_path / "wts" / "feature--x"
+    wt.mkdir(parents=True)
+    rec = _record_for(wt)
+    record.save(rec)
 
-    state.save(tmp_path, state.WorktreeState(base="main", isolation="docker", harness="claude"))
-    assert state.load(tmp_path).provisioned is False  # our default for fresh objects
+    path = record.record_path(wt)
+    assert path == tmp_path / "wts" / ".records" / "feature--x.json"
+    assert not path.is_relative_to(wt)
+    assert json.loads(path.read_text())["schemaVersion"] == record.SCHEMA_VERSION
+    assert record.load(wt) == rec
+    assert [p.name for p in path.parent.iterdir()] == ["feature--x.json"]  # no temp left
 
-    state.save(
-        tmp_path,
-        state.WorktreeState(base="main", isolation="docker", harness="claude", provisioned=True),
-    )
-    assert state.load(tmp_path).provisioned is True
-
-    # A file missing the "provisioned" key reads as not-provisioned.
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).provisioned is False
+    record.remove(wt)
+    record.remove(wt)  # idempotent
+    with pytest.raises(record.RecordMissingError):
+        record.load(wt)
 
 
-def test_state_firewall_roundtrips(tmp_path, monkeypatch):
-    """The recorded firewall choice round-trips so `enter` honors the created-time
-    decision; fresh objects and a file missing the key both read as False."""
+def test_record_save_is_atomic(tmp_path, monkeypatch):
+    """A failed write leaves the previous record intact and no temp file."""
+    from treebox import record
+
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(_record_for(wt))
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(record.os, "replace", boom)
+    with pytest.raises(OSError):
+        record.save(_record_for(wt, isolation="host"))
+    monkeypatch.undo()
+    assert record.load(wt).isolation == "docker"
+    assert [p.name for p in record.record_path(wt).parent.iterdir()] == ["w.json"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda d: d.update(schemaVersion=2), "schemaVersion"),
+        (lambda d: d.update(schemaVersion=0), "schemaVersion"),
+        (lambda d: d.update(resources={"memory": "lots"}), "memory"),
+        (lambda d: d.update(resources={"swap": "1g"}), "unknown key"),
+        (lambda d: d.pop("resources"), "missing key"),
+        (lambda d: d.update(schemaVersion=True), "schemaVersion"),
+        (lambda d: d.pop("ports"), "missing key"),
+        (lambda d: d.update(ports={"base": 20000}), "ports"),
+        (lambda d: d.update(ports={"base": "1", "count": 10}), "ports"),
+        (lambda d: d.pop("setup"), "missing key"),
+        (lambda d: d.update(setup={"status": "done"}), "setup must be an object"),
+        (lambda d: d["setup"].update(status="ready"), "setup.status"),
+        (lambda d: d["setup"].update(exitStatus="7"), "exitStatus"),
+        (lambda d: d["setup"].update(lockfileHash="h"), "only when setup is done"),
+        (lambda d: d.update(worktree="/elsewhere/w"), "bound to worktree"),
+        (lambda d: d.update(template="/etc"), "not a template name"),
+        (lambda d: d.update(template="../x"), "not a template name"),
+        (lambda d: d.update(firewall="yes"), "firewall"),
+        (lambda d: d.update(isolation="bogus"), "unknown isolation mode"),
+        (lambda d: d.update(harness="aider"), "unknown harness"),
+        (lambda d: d.update(limits={}), "unknown key"),
+        (lambda d: d.pop("isolation"), "missing key"),
+    ],
+)
+def test_record_invalid_contents_are_classified(tmp_path, mutate, reason):
+    """Anything the reader cannot trust is RecordInvalidError - never a silent
+    default. Unknown or missing keys (``setup`` included) and any other
+    schemaVersion are refused: there is one version."""
     import json
 
-    from treebox import git, state
+    from treebox import record
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-
-    for choice in (True, False):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", firewall=choice),
-        )
-        assert state.load(tmp_path).firewall is choice
-
-    # Fresh objects and files missing the "firewall" key both read as False.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").firewall is False
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).firewall is False
+    wt = tmp_path / "wts" / "w"
+    wt.mkdir(parents=True)
+    record.save(_record_for(wt))
+    path = record.record_path(wt)
+    data = json.loads(path.read_text())
+    mutate(data)
+    path.write_text(json.dumps(data))
+    with pytest.raises(record.RecordInvalidError, match=reason) as exc:
+        record.load(wt)
+    assert exc.value.path == path
+    path.write_text("{not json")
+    with pytest.raises(record.RecordInvalidError, match="invalid JSON"):
+        record.load(wt)
 
 
-def test_state_template_roundtrips(tmp_path, monkeypatch):
-    """The recorded template round-trips so `enter`/`teardown` render the same
-    container; an unrecorded template (no key) reads as None so the caller falls
-    back to the config default rather than drifting to a wrong template."""
-    import json
+@pytest.mark.parametrize("name", ["/etc", "../etc", "a/b", ".", "..", "", "x y"])
+def test_template_names_are_identifiers_never_paths(name, tmp_path, monkeypatch):
+    """A template name selects a directory under the operator-owned locations
+    only: paths and traversal are refused by the resolver and by config
+    validation alike (issue #57)."""
+    from treebox import assets
+    from treebox.config import validate_config
 
-    from treebox import git, state
+    monkeypatch.setenv("TREEBOX_HOME", str(tmp_path))
+    with pytest.raises(assets.TemplateNameError):
+        assets.template_dir(name)
+    with pytest.raises(ValueError, match="Invalid template name"):
+        validate_config(Config(template=name))
 
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
 
-    for tpl in ("hardened", "default"):
-        state.save(
-            tmp_path,
-            state.WorktreeState(base="main", isolation="docker", harness="claude", template=tpl),
-        )
-        assert state.load(tmp_path).template == tpl
+def test_template_dir_override_still_wins_for_any_valid_name(tmp_path, monkeypatch):
+    """$TREEBOX_TEMPLATE_DIR stays the operator's explicit override."""
+    from treebox import assets
 
-    # Fresh objects and files missing the "template" key both read as None.
-    assert state.WorktreeState(base="main", isolation="docker", harness="claude").template is None
-    (tmp_path / "treebox-state.json").write_text(
-        json.dumps({"base": "main", "isolation": "docker", "harness": "claude"})
-    )
-    assert state.load(tmp_path).template is None
+    monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tmp_path))
+    assert assets.template_dir("anything") == tmp_path
 
 
 def test_host_git_pins_exec_shaped_config(monkeypatch: pytest.MonkeyPatch):
@@ -2878,29 +3214,18 @@ def test_runner_dry_run_setup_protocol_cannot_drift():
 
 
 def test_runner_facts_pin_doctor_vocabulary():
-    """Doctor's per-runner strings and login gate come from RunnerFacts: the
-    host runner hard-requires a subscription login (the agent runs with the
-    live host dirs); the docker runner stages copies, so a missing login is
-    advisory."""
+    """Doctor's per-runner strings and where the agent runs come from
+    RunnerFacts: the host runner runs it on the host (binary on PATH, host
+    login); the docker runner in a sandbox (a staged copy of the login file)."""
     from treebox.runners import DockerRunner, HostRunner
 
     host = HostRunner(Config()).facts()
     assert host.preflight_detail == "no container dependencies"
-    assert host.login_required is True
+    assert host.sandboxed is False
 
     boxed = DockerRunner(Config(isolation="docker")).facts()
     assert boxed.preflight_detail == "docker daemon ok"
-    assert boxed.login_required is False
-
-
-def test_state_load_corrupt_json_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A corrupt state file reads as 'no state' (list shows deps=unknown),
-    never a crash."""
-    from treebox import git, state
-
-    monkeypatch.setattr(git, "git_dir", lambda p: str(tmp_path))
-    (tmp_path / "treebox-state.json").write_text("{not json")
-    assert state.load(tmp_path) is None
+    assert boxed.sandboxed is True
 
 
 def test_config_setup_hook_string_normalizes_to_list(tmp_path: Path):
@@ -3172,7 +3497,8 @@ def test_fetch_origin_interactive_prompt_is_last_resort(monkeypatch: pytest.Monk
     order: list[str] = []
 
     def fake_run(argv, **kw):
-        silent = "stdout" in kw  # _silent_fetch captures; _fetch_prompt inherits stdio
+        # The silent attempts run under the batch env; the prompt fetch may ask.
+        silent = kw["env"].get("GIT_TERMINAL_PROMPT") == "0"
         order.append("silent" if silent else "prompt")
         return subprocess.CompletedProcess(argv, 1 if silent else 0, "", "")
 
@@ -3300,7 +3626,10 @@ def test_host_auto_setup_skips_missing_tools(tmp_path: Path, monkeypatch: pytest
     assert ("setup · uv", "uv not found; skipped") in rec.notes
 
 
-def test_host_auto_setup_failure_is_nonfatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_host_auto_setup_failure_fails_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failed setup step is a failed setup: the StepError (step, exit
+    status, output) reaches provisioning, which records it and fails."""
+    from treebox.output import StepError
     from treebox.runners import host as host_mod
 
     wt = _host_worktree(tmp_path)
@@ -3308,9 +3637,11 @@ def test_host_auto_setup_failure_is_nonfatal(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(host_mod, "have", lambda c: True)
     rec = _HostRecorder(fail_labels={"setup · uv"})
 
-    host_mod.HostRunner(Config()).setup(wt, cold=False, reporter=rec)  # must not raise
+    with pytest.raises(StepError) as exc:
+        host_mod.HostRunner(Config()).setup(wt, cold=False, reporter=rec)
 
-    assert any("uv setup failed; continuing" in w for w in rec.warnings)
+    assert (exc.value.label, exc.value.returncode) == ("setup · uv", 1)
+    assert rec.warnings == []
 
 
 def test_host_auto_setup_notes_when_no_manifests(tmp_path: Path):
@@ -3342,18 +3673,19 @@ def test_host_cold_setup_uses_throwaway_cache_and_cleans_it(
     assert not Path(cold_cache).parent.exists()  # throwaway removed after setup
 
 
-def test_host_override_hook_failure_warns_and_continues(tmp_path: Path):
+def test_host_override_hook_failure_stops_setup(tmp_path: Path):
+    from treebox.output import StepError
     from treebox.runners import host as host_mod
 
     # cache_env creates the configured cache dir, so it must live under tmp_path.
     shared_cache = str(tmp_path / "shared" / "uv")
     rec = _HostRecorder(fail_labels={"setup · hook 1"})
     cfg = Config(setup_hook=["exit 1", "echo ok"], caches={"uv": shared_cache})
-    host_mod.HostRunner(cfg).setup(_host_worktree(tmp_path), cold=False, reporter=rec)
+    with pytest.raises(StepError, match="setup · hook 1"):
+        host_mod.HostRunner(cfg).setup(_host_worktree(tmp_path), cold=False, reporter=rec)
 
     labels = [label for (label, _, _, _) in rec.steps]
-    assert labels == ["setup · hook 1", "setup · hook 2"]  # second hook still ran
-    assert any("hook step 1 failed" in w for w in rec.warnings)
+    assert labels == ["setup · hook 1"]  # a failed step ends setup
     # Custom hooks get the shared cache env too.
     assert rec.steps[0][3]["UV_CACHE_DIR"] == shared_cache
     assert rec.steps[0][1] == ["sh", "-c", "exit 1"]
@@ -3388,10 +3720,12 @@ def test_host_launch_missing_harness_is_instructive(
     from treebox.runners import host as host_mod
 
     monkeypatch.setattr(host_mod, "have", lambda c: False)
-    with pytest.raises(RuntimeError, match=r"not found on PATH.*writes ~/\.claude"):
+    with pytest.raises(host_mod.PreflightError, match=r"not found on PATH") as caught:
         host_mod.HostRunner(Config()).launch(
             _host_worktree(tmp_path), harness=get_harness("claude"), args=[]
         )
+    assert caught.value.error_code == "HARNESS_MISSING"
+    assert caught.value.hint and "writes ~/.claude" in caught.value.hint
 
 
 # --- output: degradation matrix & step contract ------------------------------------
@@ -3600,10 +3934,10 @@ def test_render_doctor_verdict_branches():
         r.render_doctor_verdict(**kw)
         return buf.getvalue()
 
-    assert "blocked: repo" in verdict(problems=["repo"], has_login=True)
-    assert "usable, but" in verdict(problems=[], has_login=True, advisories=["a"])
-    assert "no subscription login" in verdict(problems=[], has_login=False)
-    assert "everything looks good" in verdict(problems=[], has_login=True)
+    assert "blocked: repo" in verdict(problems=["repo"])
+    assert "blocked: login: claude" in verdict(problems=["login: claude"])
+    assert "usable, but" in verdict(problems=[], advisories=["a"])
+    assert "everything looks good" in verdict(problems=[])
 
 
 # --- teardown pickers: wiring around questionary -----------------------------------
@@ -3966,6 +4300,30 @@ def test_template_init_json_reports_validity(template_home: Path):
     assert payload["template"]["missing"] == []
 
 
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def test_template_init_output_is_the_bundled_template(template_home: Path):
+    # `template init` must hand the operator the exact bundled template - the
+    # same pinned build, byte for byte - so a scaffolded template never drifts
+    # from the image the default builds.
+    import treebox.assets as assets
+
+    bundled = assets.template_dir("default")
+    assert _cli(["template", "init", "webdev"]).exit_code == 0
+    assert _tree_bytes(template_home / "templates" / "webdev") == _tree_bytes(bundled)
+
+
+def test_bundled_container_json_build_arguments(template_home: Path):
+    from treebox import assets
+
+    config = assets.load_template_json("default", assets.CONFIG_FILE)
+    assert config["build"] == {"dockerfile": "Dockerfile", "args": {"TZ": "UTC"}}
+
+
 def test_template_init_refuses_overwrite_without_force(template_home: Path):
     assert _cli(["template", "init", "webdev"]).exit_code == 0
     # A second init is a conflict (exit 5), never a silent clobber.
@@ -4003,22 +4361,144 @@ def test_template_init_unknown_from_is_not_found_under_env_override(
     assert json.loads(res.stderr)["error"]["code"] == "TEMPLATE_NOT_FOUND"
 
 
-def test_template_init_overwrite_removal_failure_has_distinct_code(
+def _tree_bytes(root: Path) -> dict[str, bytes | None]:
+    """Every entry under ``root`` by relative path: file bytes, or None for a dir."""
+    return {
+        str(p.relative_to(root)): (None if p.is_dir() else p.read_bytes())
+        for p in sorted(root.rglob("*"))
+    }
+
+
+def _customized_template(template_home: Path) -> Path:
+    """A `webdev` template an operator has edited: a changed Dockerfile and a
+    scripts/ dir that only this template has."""
+    assert _cli(["template", "init", "webdev"]).exit_code == 0
+    dest = template_home / "templates" / "webdev"
+    with (dest / "Dockerfile").open("a") as fh:
+        fh.write("# operator customization\n")
+    (dest / "scripts").mkdir()
+    (dest / "scripts" / "setup.sh").write_text("echo custom\n")
+    return dest
+
+
+def _staging_entries(template_home: Path) -> list[str]:
+    import treebox.assets as assets
+
+    staging = template_home / "templates" / assets.STAGING_DIR
+    return sorted(p.name for p in staging.iterdir()) if staging.is_dir() else []
+
+
+def test_template_init_force_move_aside_failure_keeps_old_template(
     template_home: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # A failed --force cleanup is not the source==destination TEMPLATE_CONFLICT;
-    # an agent must be able to tell "copy onto itself" from "removal failed".
-    import treebox.cli as cli_mod
+    # The first step of the swap (moving the old template aside) fails: a clean
+    # OVERWRITE_FAILED, the old template byte-identical, no staging residue.
+    dest = _customized_template(template_home)
+    before = _tree_bytes(dest)
+    real = Path.rename
 
-    assert _cli(["template", "init", "webdev"]).exit_code == 0
+    def rename(self: Path, target: str | Path) -> Path:
+        if self == dest:
+            raise OSError("permission denied")
+        return real(self, target)
 
-    def boom(_path: Path) -> None:
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(cli_mod.shutil, "rmtree", boom)
+    monkeypatch.setattr(Path, "rename", rename)
     res = _cli(["template", "init", "webdev", "--force", "--json"])
     assert res.exit_code == 1
     assert json.loads(res.stderr)["error"]["code"] == "OVERWRITE_FAILED"
+    assert _tree_bytes(dest) == before
+    assert _staging_entries(template_home) == []
+
+
+def test_template_init_force_failure_mid_swap_restores_old_template(
+    template_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The old template is already moved aside when the new one fails to move in:
+    # the old one goes back, byte-identical, and the run is a clean COPY_FAILED.
+    dest = _customized_template(template_home)
+    before = _tree_bytes(dest)
+    real = Path.rename
+    calls: list[tuple[Path, Path]] = []
+
+    def rename(self: Path, target: str | Path) -> Path:
+        calls.append((self, Path(target)))
+        if self.name == "new" and Path(target) == dest:
+            raise OSError("injected rename failure")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    res = _cli(["template", "init", "webdev", "--force", "--json"])
+    assert res.exit_code == 1
+    assert json.loads(res.stderr)["error"]["code"] == "COPY_FAILED"
+    assert [c[0].name for c in calls] == ["webdev", "new", "old"]  # aside, in, back
+    assert _tree_bytes(dest) == before
+    assert _staging_entries(template_home) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_template_init_force_read_only_subdir_replaces_template_completely(
+    template_home: Path,
+):
+    # The reported case: a read-only subdir inside the existing template used to
+    # fail with OVERWRITE_FAILED after most of the template was deleted. Now the
+    # new template replaces the old one completely (the old-only scripts/ is
+    # gone), and the old copy that could not be deleted stays out of the way.
+    import treebox.assets as assets
+
+    dest = _customized_template(template_home)
+    (dest / "scripts").chmod(0o555)
+    fresh = _tree_bytes(assets.template_dir("default"))
+    try:
+        res = _cli(["template", "init", "webdev", "--force"])
+        assert res.exit_code == 0, res.stderr
+        assert "could not remove the previous template copy" in res.stderr
+        assert _tree_bytes(dest) == fresh
+        assert not (dest / "scripts").exists()
+        listed = json.loads(_cli(["template", "list", "--json"]).stdout)
+        assert [t["name"] for t in listed["templates"]] == ["default", "webdev"]
+    finally:
+        for p in (template_home / "templates").rglob("scripts"):
+            p.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_template_init_force_ignores_leftover_from_interrupted_run(template_home: Path):
+    # An interrupted run can leave a staging dir that cannot even be deleted. It
+    # must not break the next --force, and `template list` must not show it.
+    import treebox.assets as assets
+
+    dest = _customized_template(template_home)
+    leftover = template_home / "templates" / assets.STAGING_DIR / "webdev.interrupted"
+    (leftover / "new" / "ro").mkdir(parents=True)
+    (leftover / "new" / "ro" / "f").write_text("x")
+    (leftover / "new" / "ro").chmod(0o555)
+    try:
+        res = _cli(["template", "init", "webdev", "--force", "--json"])
+        assert res.exit_code == 0, res.stderr
+        assert _tree_bytes(dest) == _tree_bytes(assets.template_dir("default"))
+        assert _staging_entries(template_home) == ["webdev.interrupted"]
+        listed = json.loads(_cli(["template", "list", "--json"]).stdout)
+        assert [t["name"] for t in listed["templates"]] == ["default", "webdev"]
+    finally:
+        (leftover / "new" / "ro").chmod(0o755)
+
+
+def test_template_init_force_success_leaves_no_staging_residue(template_home: Path):
+    import treebox.assets as assets
+
+    dest = _customized_template(template_home)
+    res = _cli(["template", "init", "webdev", "--force", "--json"])
+    assert res.exit_code == 0, res.stderr
+    assert _tree_bytes(dest) == _tree_bytes(assets.template_dir("default"))
+    assert _staging_entries(template_home) == []
+
+
+def test_template_init_rejects_reserved_staging_name(template_home: Path):
+    import treebox.assets as assets
+
+    res = _cli(["template", "init", assets.STAGING_DIR, "--json"])
+    assert res.exit_code == 2
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_NAME"
 
 
 def test_template_init_copy_failure_is_structured_and_preserves_existing(
@@ -4027,12 +4507,10 @@ def test_template_init_copy_failure_is_structured_and_preserves_existing(
     # A copytree failure must be a clean COPY_FAILED (not a bare traceback), and
     # under --force the pre-existing template must survive because the copy is
     # staged and swapped in only on success.
-    import treebox.assets as assets
     import treebox.cli as cli_mod
 
-    assert _cli(["template", "init", "webdev"]).exit_code == 0
-    dest = template_home / "templates" / "webdev"
-    before = sorted(p.name for p in dest.iterdir())
+    dest = _customized_template(template_home)
+    before = _tree_bytes(dest)
 
     def boom(_src: Path, _dst: Path) -> None:
         raise OSError("disk full")
@@ -4042,10 +4520,8 @@ def test_template_init_copy_failure_is_structured_and_preserves_existing(
     assert res.exit_code == 1
     assert json.loads(res.stderr)["error"]["code"] == "COPY_FAILED"
     # The existing template is intact, and no staging residue is left behind.
-    assert dest.is_dir()
-    assert sorted(p.name for p in dest.iterdir()) == before
-    assert assets.missing_template_files(dest) == []
-    assert not (dest.parent / ".webdev.treebox-tmp").exists()
+    assert _tree_bytes(dest) == before
+    assert _staging_entries(template_home) == []
 
 
 def test_template_path_resolves_default_and_named(template_home: Path):
@@ -4261,24 +4737,6 @@ def test_template_list_human_view_shows_default_highlights(template_home: Path):
         assert needle in res.stdout
 
 
-def test_default_template_highlights_match_bundled_dockerfile(template_home: Path):
-    # The curated highlight copy hand-duplicates version facts from the bundled
-    # Dockerfile; this pins them together so a version bump there can't silently
-    # stale the user-facing list.
-    import treebox.assets as assets
-
-    dockerfile = (assets.template_dir("default") / "Dockerfile").read_text()
-    highlights = "\n".join(assets.DEFAULT_TEMPLATE_HIGHLIGHTS)
-
-    python_version = re.search(r"Python (\d+\.\d+)", highlights)
-    assert python_version is not None
-    assert f"python:{python_version.group(1)}" in dockerfile
-
-    node_major = re.search(r"Node\.js (\d+)", highlights)
-    assert node_major is not None
-    assert f"NODE_MAJOR={node_major.group(1)}" in dockerfile
-
-
 def test_template_ls_is_alias_for_list(template_home: Path):
     # `ls` is muscle-memory parity with the top-level list alias.
     listed = _cli(["template", "list"])
@@ -4299,3 +4757,127 @@ def test_template_list_hides_highlights_when_default_is_overridden(
     assert res.exit_code == 0
     assert "Bundled 'default' template includes" not in res.stdout
     assert "overrides every template" in res.stderr
+
+
+def test_render_list_shows_unfinished_setup_and_unusable_worktrees():
+    """A worktree whose setup did not finish, or that git cannot use, says so
+    in the DEPS column (never a freshness it cannot have) and in the summary."""
+    import io
+
+    from rich.console import Console
+
+    from treebox.output import THEME, Reporter
+
+    def row(name: str, health: str, setup: str) -> dict[str, object]:
+        return {
+            "name": name,
+            "branch": name,
+            "unnamed": False,
+            "missing": health in ("directory_missing", "invalid_linkage"),
+            "last_commit": "init",
+            "commit_epoch": 0,
+            "path": f"/repo/{name}",
+            "base": "main",
+            "isolation": "host",
+            "harness": "claude",
+            "deps": "unknown",
+            "env": "absent",
+            "health": health,
+            "setup": setup,
+        }
+
+    buf = io.StringIO()
+    reporter = Reporter()
+    reporter.data_console = Console(
+        file=buf, width=120, theme=THEME, highlight=False, color_system=None
+    )
+    reporter.render_list(
+        [
+            row("broken-setup", "healthy", "failed"),
+            row("cut-short", "healthy", "pending"),
+            row("no-pointer", "invalid_linkage", "done"),
+        ],
+        "/repo",
+    )
+    out = buf.getvalue()
+    assert "✗ setup failed" in out
+    assert "◐ setup unfinished" in out
+    assert "⚠ invalid linkage" in out
+    assert "Summary: 3 worktrees · 2 setup unfinished · 1 unhealthy" in out
+
+
+def test_docker_launch_cancel_signals_the_agent_inside_the_container(
+    tmp_path: Path, fake_common_dir, monkeypatch: pytest.MonkeyPatch
+):
+    """Stopping the local `docker exec` client alone leaves the agent running
+    in the container, so launch wraps the agent to record its pid, and a
+    cancel signal is sent to the agent's process group in the container, as
+    the agent's own user. treebox then waits for the agent itself, and the
+    session is CANCELLED (the container keeps running)."""
+    import signal
+    import subprocess
+
+    from treebox import system
+    from treebox.harnesses import get_harness
+    from treebox.runners import docker as docker_mod
+
+    wt = _boxed_worktree(tmp_path)
+    cfg = Config(isolation="docker")
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=True)
+    gone = {"yes": False}
+
+    def engine(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if docker_mod._AGENT_ALIVE in args:
+            fake.calls.append(list(args))
+            return subprocess.CompletedProcess(args, 1 if gone["yes"] else 0, "", "")
+        return fake(args)
+
+    launched: list[list[str]] = []
+
+    def fake_run_agent(argv, *, cwd=None, stop=None, grace=system.STOP_GRACE_SECONDS):
+        launched.append(argv)
+        stop(None, signal.SIGTERM)  # what the handler does when SIGTERM arrives
+        gone["yes"] = True
+        return 143, signal.SIGTERM
+
+    monkeypatch.setattr(docker_mod, "run_agent", fake_run_agent)
+    runner = DockerRunner(cfg, docker=engine)
+    with pytest.raises(system.SessionCancelled, match="container keeps running") as caught:
+        runner.launch(wt, harness=get_harness("claude"), args=["-p", "task"])
+    assert caught.value.signum == signal.SIGTERM
+
+    (argv,) = launched
+    at = argv.index(slug)
+    assert argv[at + 1 : at + 4] == ["sh", "-c", docker_mod._AGENT_WRAPPER]
+    pidfile = argv[at + 4]
+    assert pidfile.startswith("/tmp/treebox-agent-")
+    assert argv[at + 5 :] == ["claude", "--dangerously-skip-permissions", "-p", "task"]
+    kill = next(c for c in fake.calls if docker_mod._AGENT_SIGNAL in c)
+    assert kill[:3] == ["exec", "-u", "agent"] and kill[-2:] == [pidfile, "TERM"]
+    assert ["exec", "-u", "agent", slug, "rm", "-f", pidfile] in fake.calls
+
+
+def test_docker_launch_without_the_harness_binary_is_classified(tmp_path: Path, fake_common_dir):
+    """The harness binary is part of the image: a launch probes it in the
+    container first, and a missing one is HARNESS_MISSING, not an agent exit
+    of 127."""
+    from treebox.harnesses import get_harness
+    from treebox.runners.base import PreflightError
+
+    wt = _boxed_worktree(tmp_path)
+    cfg = Config(isolation="docker")
+    slug = DockerRunner(cfg)._slug(wt)
+    fake = _FakeDocker(ids="abc123\n", name=slug, running=True)
+
+    def engine(args: list[str]):
+        import subprocess
+
+        if "command -v" in " ".join(args):
+            fake.calls.append(list(args))
+            return subprocess.CompletedProcess(args, 1, "", "")
+        return fake(args)
+
+    with pytest.raises(PreflightError, match="not found in the sandbox") as caught:
+        DockerRunner(cfg, docker=engine).launch(wt, harness=get_harness("claude"), args=[])
+    assert caught.value.error_code == "HARNESS_MISSING"

@@ -10,25 +10,24 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-import subprocess
 import tempfile
 from typing import TYPE_CHECKING
 
 from .. import ecosystems
 from ..harnesses import Harness
 from ..models import Worktree
-from ..output import Reporter, StepError
-from ..system import have
-from .base import RunnerFacts, RunnerTeardownResult
+from ..output import Reporter
+from ..resources import ResourceLimitError, ResourceLimits
+from ..system import SessionCancelled, have, run_agent, signal_name
+from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 
 if TYPE_CHECKING:
     from ..config import Config
 
-# A subscription login is the host runner's only hard requirement: the agent
-# runs directly with the host's ~/.claude / ~/.codex. Beyond git (checked
-# globally) and the agent CLI (verified at launch) there is nothing
-# container-specific to check.
-_FACTS = RunnerFacts(preflight_detail="no container dependencies", login_required=True)
+# The agent runs directly on the host, with the host login (~/.claude /
+# ~/.codex, or the macOS Keychain) and the harness binary on PATH; `doctor`
+# checks both. There is nothing container-specific to check.
+_FACTS = RunnerFacts(preflight_detail="no container dependencies", sandboxed=False)
 _DRY_RUN_COLD_ROOT = "<temporary-dir>/treebox-cold-XXXXXXXX"
 
 
@@ -39,6 +38,8 @@ def _render_cache_env(command: str, env: dict[str, str]) -> str:
 
 class HostRunner:
     name = "host"
+    # No sandbox, so no cgroup to cap: the agent runs as the operator.
+    supported_resources: frozenset[str] = frozenset()
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -49,6 +50,17 @@ class HostRunner:
 
     def facts(self) -> RunnerFacts:
         return _FACTS
+
+    def template_resources(self) -> ResourceLimits:
+        return ResourceLimits()
+
+    def check_resources(self, limits: ResourceLimits) -> None:
+        # The CLI refuses explicit limits for this runner first; this keeps a
+        # direct caller from silently running uncapped.
+        if limits.names():
+            raise ResourceLimitError(
+                limits.names()[0], "The host runner cannot apply resource limits."
+            )
 
     def initialize(self, wt: Worktree) -> None:
         # The host runner owns no per-worktree resources outside the worktree.
@@ -83,30 +95,22 @@ class HostRunner:
                 continue
             env = dict(os.environ)
             env.update(step.env)
+            env.update(wt.treebox_env())
             detail = "from-source (cold)" if cold_root else "cache-backed"
-            try:
-                reporter.step(f"setup · {step.name}", detail, step.argv, cwd=str(wt.path), env=env)
-            except StepError:
-                # Setup failures are non-fatal: the tree is still usable and the
-                # operator can fix deps inside the agent session.
-                reporter.warn(f"{step.name} setup failed; continuing")
+            # A failing step raises StepError: a failed setup is a failed
+            # create/enter (the setup model in lifecycle.py records it).
+            reporter.step(f"setup · {step.name}", detail, step.argv, cwd=str(wt.path), env=env)
 
     def _run_override(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
         cache_env = ecosystems.cache_env(self.config.caches, cold_cache_root=cold_root)
         ecosystems.ensure_cache_dirs(cache_env.values())
         env = dict(os.environ)
         env.update(cache_env)
+        env.update(wt.treebox_env())
         for i, command in enumerate(self.config.setup_hook or []):
-            try:
-                reporter.step(
-                    f"setup · hook {i + 1}",
-                    "done",
-                    ["sh", "-c", command],
-                    cwd=str(wt.path),
-                    env=env,
-                )
-            except StepError:
-                reporter.warn(f"setup hook step {i + 1} failed; continuing")
+            reporter.step(
+                f"setup · hook {i + 1}", "done", ["sh", "-c", command], cwd=str(wt.path), env=env
+            )
 
     def dry_run_setup(
         self,
@@ -150,15 +154,33 @@ class HostRunner:
         # --print/--json emit must carry the worktree directory, or pasting it
         # launches a full-autonomy agent in whatever dir the user happens to be
         # in — typically the main checkout treebox exists to keep agents out of.
+        # The TREEBOX_* variables ride in the command too, so a replayed
+        # command gives the agent the same values as a direct launch.
         argv = harness.launch_argv(args)
-        return ["sh", "-c", f"cd {shlex.quote(str(wt.path))} && exec {shlex.join(argv)}"]
+        exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in wt.treebox_env().items())
+        return [
+            "sh",
+            "-c",
+            f"cd {shlex.quote(str(wt.path))} && export {exports} && exec {shlex.join(argv)}",
+        ]
 
     def launch(self, wt: Worktree, *, harness: Harness, args: list[str]) -> int:
         cmd = harness.launch_argv(args)
         if not have(cmd[0]):
-            raise RuntimeError(f"'{cmd[0]}' not found on PATH. {harness.login_hint()}")
-        proc = subprocess.run(cmd, cwd=str(wt.path))
-        return proc.returncode
+            raise PreflightError(
+                f"'{cmd[0]}' not found on PATH.",
+                error_code="HARNESS_MISSING",
+                hint=harness.login_hint(),
+            )
+        # A cancel signal to treebox is passed on to the agent (the child
+        # process), which is killed if it has not exited after the grace time.
+        code, cancelled = run_agent(cmd, cwd=str(wt.path), env={**os.environ, **wt.treebox_env()})
+        if cancelled is not None:
+            name = signal_name(cancelled)
+            raise SessionCancelled(
+                cancelled, f"Cancelled by {name}: the agent was sent {name} and has exited."
+            )
+        return code
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
         # Nothing host-side to tear down beyond the worktree itself; the note
