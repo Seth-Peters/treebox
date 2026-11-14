@@ -1880,7 +1880,9 @@ def h10(ctx: Ctx) -> None:
     records = (payload or {}).get("worktrees", [])
     rec = records[0] if records else {}
     ctx.eq((rec.get("container"), rec.get("complete")), ("failed", False), "record")
-    ctx.check(any(name in r for r in rec.get("remaining", [])), f"remaining names {name}")
+    remaining = rec.get("remaining", [])
+    ctx.check(any(r.startswith("container ") for r in remaining), f"remaining: {remaining}")
+    ctx.check(any(name in r for r in remaining), f"remaining names the image of {name}")
     ctx.check("TEARDOWN_INCOMPLETE" in failed.stderr, "stderr carries TEARDOWN_INCOMPLETE")
     manifest = ctx.root / ".containers" / "e2e-fail-rm" / "treebox-resources.json"
     kept = wt(ctx, "e2e-fail-rm").is_dir() and record_file(ctx, "e2e-fail-rm").is_file()

@@ -1243,7 +1243,16 @@ def stream_violations(run: RunRecord) -> list[str]:
             except json.JSONDecodeError:
                 problems.append(f"{who}: stdout is not one JSON document")
         elif run.exit in DOCUMENTED_EXIT_CODES:
-            if run.stdout.strip():
+            # A teardown that did not finish prints its records first, then
+            # fails with TEARDOWN_INCOMPLETE (docs/usage.md): stdout is that
+            # one payload. Every other failure writes nothing to stdout.
+            incomplete = run.command in ("teardown", "rm") and '"TEARDOWN_INCOMPLETE"' in run.stderr
+            if incomplete:
+                try:
+                    json.loads(run.stdout)
+                except json.JSONDecodeError:
+                    problems.append(f"{who}: incomplete teardown's stdout is not one JSON document")
+            elif run.stdout.strip():
                 problems.append(f"{who}: failed --json run wrote to stdout")
             try:
                 payload = json.loads(run.stderr)

@@ -107,3 +107,13 @@ def test_no_real_agent_on_path(tmp_path: Path) -> None:
         assert "real 'claude'" in str(exc)
     else:
         raise AssertionError("a second claude on PATH must be refused")
+
+
+def test_an_incomplete_teardown_may_print_its_records_before_the_error() -> None:
+    error = '{"schemaVersion": 1, "error": {"code": "TEARDOWN_INCOMPLETE", "message": "m"}}'
+    records = '{"schemaVersion": 1, "worktrees": [], "warnings": []}'
+    td = run(["teardown", "x", "--json"], 1, stdout=records, stderr=error)
+    assert harness.stream_violations(td) == []
+    assert harness.stream_violations(run(["teardown", "x", "--json"], 1, "garbage", error))
+    other = '{"schemaVersion": 1, "error": {"code": "DIRTY_WORKTREE", "message": "m"}}'
+    assert harness.stream_violations(run(["teardown", "x", "--json"], 5, records, other))
