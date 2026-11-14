@@ -361,7 +361,7 @@ architecture decision).
 
 ## Software factory
 
-`factory/` and the `delegate`, `implement`, `verify`, `review`,
+`factory/` and the `delegate`, `implement`, `verify-treebox`, `review`,
 `improve-factory`, `garden`, and `grilling` skills define a code-first software factory
 that turns a developer's spec (one GitHub issue) into a verified, reviewed
 draft PR in a Claude Managed Agents session. It is separate

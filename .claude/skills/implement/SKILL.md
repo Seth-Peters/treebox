@@ -31,7 +31,7 @@ description: How a treebox factory worker implements a task and opens its pull r
 - Add or update tests that would fail without your change.
 - Keep commits scoped, with Conventional Commit subjects (`fix(cli): ...`).
 
-Then follow the `verify` skill, then the `review` skill.
+Then follow the `verify-treebox` skill, then the `review` skill.
 
 ## Open the pull request
 
@@ -52,7 +52,7 @@ Closes #<issue>
 <anything you decided that the spec didn't say, or "None">
 
 ## Verification
-<the evidence block from the verify skill>
+<the evidence block from the verify-treebox skill>
 
 ## Adversarial review
 Verdict: <approve | changes-requested> after <n> round(s)

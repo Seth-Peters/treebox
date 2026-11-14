@@ -10,7 +10,7 @@ developer (Claude Code, spec in hand)
    │  delegate skill → factory delegate
    ▼
 GitHub issue (label `factory`) ──► Managed Agents worker session (cloud sandbox, repo mounted)
-   ▲                                 implement → verify → review (reviewer subagent) → fix ≤2
+   ▲                                 implement → verify-treebox → review (reviewer subagent) → fix ≤2
    │  factory steer (mid-run)        └─► draft PR "Closes #N"
    │
 improve-factory (manual, after many runs): full transcripts + issues/PRs → retro → one PR to factory code
@@ -38,7 +38,7 @@ merges and applies them.
 | `src/factory_cli/` | The `factory` CLI |
 
 Skills live in the repo's `.claude/skills/`, loaded by the cloud worker and by
-your local Claude Code session: `delegate`, `implement`, `verify`, `review`,
+your local Claude Code session: `delegate`, `implement`, `verify-treebox`, `review`,
 `improve-factory`, `garden`, and `grilling` (vendored from Matt Pocock's
 skills, MIT).
 
