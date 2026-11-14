@@ -14,7 +14,9 @@ uv run --extra dev mypy
 
 echo "== shell assets =="
 shell_files=(src/treebox/assets/container/*.sh src/treebox/assets/container/treebox-fetch
-  src/treebox/assets/container/treebox-online src/treebox/assets/pre-push scripts/*.sh)
+  src/treebox/assets/container/treebox-online src/treebox/assets/pre-push scripts/*.sh
+  .claude/skills/treebox-e2e/fixture.sh tests/e2e/stub-agent tests/e2e/fakes/*
+  tests/e2e/offline-template/init-firewall.sh tests/e2e/offline-template/allowed-domains.sh)
 for f in "${shell_files[@]}"; do bash -n "$f"; done
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "${shell_files[@]}"

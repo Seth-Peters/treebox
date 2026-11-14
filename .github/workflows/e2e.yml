@@ -1,0 +1,82 @@
+name: E2E evidence
+
+# Runs the treebox end-to-end scenarios against the real CLI and writes an
+# evidence bundle (tests/e2e/run.py; scenarios in
+# .claude/skills/treebox-e2e/references/scenarios.md). On Linux the docker
+# group runs on the runner's real Docker engine with the offline template and
+# the stub agent; GitHub's macOS runners have no Docker, so there the docker
+# group is reported as skipped. The bundle is uploaded as an artifact and the
+# pass / fail / skip table is the job summary.
+
+on:
+  pull_request:
+    paths:
+      - "src/treebox/runners/**"
+      - "src/treebox/assets/**"
+      - "tests/e2e/**"
+      - ".claude/skills/treebox-e2e/**"
+      - ".github/workflows/e2e.yml"
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    name: e2e evidence · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A missing engine fails this job: Linux runners must run the docker group.
+          - os: ubuntu-latest
+            require: docker
+          - os: macos-latest
+            require: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags, so the manifest names the real treebox version
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Docker engine
+        if: runner.os == 'Linux'
+        run: docker version
+
+      - name: Evidence
+        env:
+          REQUIRE: ${{ matrix.require }}
+        run: >-
+          uv run python tests/e2e/run.py evidence
+          --out "$RUNNER_TEMP/e2e-evidence"
+          ${REQUIRE:+--require "$REQUIRE"}
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/e2e-evidence/summary.md" ]; then
+            cat "$RUNNER_TEMP/e2e-evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No evidence summary was written (the run did not start)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload evidence bundle
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/e2e-evidence
+          if-no-files-found: warn
+          retention-days: 30

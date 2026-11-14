@@ -1,0 +1,15 @@
+#!/bin/sh
+# Failure-injecting docker shim for treebox end-to-end runs. BOUNDARY
+# EVIDENCE ONLY: it passes every call to the real docker CLI, except that the
+# subcommand named in $TREEBOX_E2E_DOCKER_FAIL (for example "rm") fails with
+# an engine-like error. A scenario that uses it proves how treebox handles an
+# engine failure, not that a real engine fails that way.
+#
+# $TREEBOX_E2E_REAL_DOCKER is the absolute path of the real docker CLI.
+set -eu
+
+if [ -n "${TREEBOX_E2E_DOCKER_FAIL:-}" ] && [ "${1:-}" = "$TREEBOX_E2E_DOCKER_FAIL" ]; then
+  echo "Error response from daemon: injected failure for 'docker $1' (treebox e2e fake)" >&2
+  exit 1
+fi
+exec "${TREEBOX_E2E_REAL_DOCKER:?}" "$@"
