@@ -432,8 +432,8 @@ class DockerRunner:
 
     def check_resources(self, limits: ResourceLimits) -> None:
         """Docker refuses ``--cpus`` above the engine's CPU count at ``docker
-        run``, after the image build: refuse it here instead. Skipped when the
-        engine cannot be asked (preflight reports that on a real run)."""
+        run``, after the image build: refuse it here instead. The CLI calls
+        this only after ``preflight`` passed, so the engine is there to ask."""
         if limits.cpus is None:
             return
         proc = self._engine(["info", "--format", "{{.NCPU}}"])

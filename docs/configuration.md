@@ -121,8 +121,13 @@ is ever read from the target repo.
 **Validation happens before provisioning.** A bad value (`--memory lots`,
 `--cpus 0`, `--pids-limit -5`, `--memory 1m`, or `--cpus 99` on an engine with
 fewer CPUs) exits `2` with `INVALID_RESOURCE` and leaves no worktree, branch,
-image or container behind. A bad `[resources]` table is `INVALID_CONFIG`
-(exit `2`); a bad template `resources` object is `TEMPLATE_INVALID` (exit `1`).
+image or container behind. The value checks need no engine and come first.
+The CPU count check asks the engine, so it runs after the runner preflight:
+with no Docker CLI or no reachable daemon, `create` gives the same
+`MISSING_DEPENDENCY` / `DOCKER_UNAVAILABLE` error (exit `1`) with or without a
+limit, and `create --dry-run`, which skips the preflight, skips this check
+too. A bad `[resources]` table is `INVALID_CONFIG` (exit `2`); a bad template
+`resources` object is `TEMPLATE_INVALID` (exit `1`).
 
 **The limits are fixed when the sandbox is created.** The effective limits are
 written to the worktree's [host-owned record](how-it-works.md#the-host-owned-record),

@@ -207,7 +207,9 @@ path it would skip. A dry run does not copy submodules or inspect their
 destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
 It also skips the runner preflight, including the
-[Docker user requirement](install.md#what-each-isolation-mode-needs).
+[Docker user requirement](install.md#what-each-isolation-mode-needs), and the
+check of `--cpus` against the engine's CPU count that follows it, so a dry run
+needs no Docker engine.
 Nothing on disk or in git changes.
 
 With `--cold --dry-run`, the cache part of the plan also matches the real cold

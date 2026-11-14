@@ -611,15 +611,21 @@ def b21(ctx: Ctx) -> None:
     ctx.check(not branch_exists(ctx, "e2e-broken"), "no branch")
 
 
+def no_docker_env(ctx: Ctx) -> dict[str, str]:
+    """The fixture's environment with a ``PATH`` that has no ``docker``."""
+    tools = ctx.sbx / "toolbox-nodocker"
+    if not tools.is_dir():
+        tools.mkdir()
+        for tool in ("git", "uv"):
+            found = shutil.which(tool, path=ctx.env["PATH"])
+            if found:
+                (tools / tool).symlink_to(found)
+    return dict(ctx.env, PATH=os.pathsep.join([str(ctx.fx.stub_bin), str(tools)]))
+
+
 @scenario("B22", "MISSING_DEPENDENCY without a docker CLI")
 def b22(ctx: Ctx) -> None:
-    tools = ctx.sbx / "toolbox-nodocker"
-    tools.mkdir()
-    for tool in ("git", "uv"):
-        found = shutil.which(tool, path=ctx.env["PATH"])
-        if found:
-            (tools / tool).symlink_to(found)
-    env = dict(ctx.env, PATH=os.pathsep.join([str(ctx.fx.stub_bin), str(tools)]))
+    env = no_docker_env(ctx)
     run = ctx.tb(
         "create", "e2e-nodocker", *ctx.wt_args(), "--isolation", "docker", "--json", env=env
     )
@@ -636,6 +642,19 @@ def b23(ctx: Ctx) -> None:
     )
     ctx.exit_is(run, 1)
     ctx.json_err(run, "DOCKER_UNAVAILABLE")
+    limited = ctx.tb(
+        "create",
+        "e2e-nodaemon",
+        *ctx.wt_args(),
+        "--isolation",
+        "docker",
+        "--cpus",
+        "1",
+        "--json",
+        env=env,
+    )
+    ctx.exit_is(limited, 1)
+    ctx.json_err(limited, "DOCKER_UNAVAILABLE")
     ctx.check(not wt(ctx, "e2e-nodaemon").exists(), "no worktree")
     doctor = ctx.tb("doctor", "--repo", str(ctx.repo), "--isolation", "docker", env=env)
     ctx.exit_is(doctor, 1)
@@ -667,49 +686,50 @@ def b25(ctx: Ctx) -> None:
     ctx.check(not branch_exists(ctx, "b25"), "no branch")
 
 
-@scenario(
-    "B26",
-    "resource limit flags: unsupported on host, invalid values refused",
-    known_bug=(
-        "with no docker CLI on PATH, `create --isolation docker --cpus N` (also --dry-run, "
-        "also [resources] cpus) crashes with a traceback in DockerRunner.check_resources "
-        "instead of a classified error"
-    ),
-    known_bug_signature=r"FileNotFoundError: \[Errno 2\] No such file or directory: 'docker'",
-)
+@scenario("B26", "resource limit flags: unsupported on host, invalid values refused")
 def b26(ctx: Ctx) -> None:
     host = ctx.tb("create", "b26", *ctx.wt_args(), "--memory", "4g", "--json")
     ctx.exit_is(host, 2)
     ctx.json_err(host, "RESOURCE_UNSUPPORTED")
-    bad = ctx.tb(
-        "create", "e2e-b26", *ctx.wt_args(), "--isolation", "docker", "--memory", "lots", "--json"
+    docker = ["create", "e2e-b26", *ctx.wt_args(), "--isolation", "docker"]
+    nodocker = no_docker_env(ctx)
+    for env in (ctx.env, nodocker):
+        for bad in (["--memory", "lots"], ["--cpus", "0"], ["--pids-limit", "-5"]):
+            run = ctx.tb(*docker, *bad, "--json", env=env)
+            ctx.exit_is(run, 2)
+            ctx.json_err(run, "INVALID_RESOURCE")
+    # Without a docker CLI a limit gives the preflight's classified error,
+    # exactly as no limit does - by flag or by [resources], --json or human.
+    want = ctx.json_err(ctx.tb(*docker, "--json", env=nodocker), "MISSING_DEPENDENCY")
+    limited = ctx.tb(*docker, "--cpus", "1", "--json", env=nodocker)
+    ctx.exit_is(limited, 1)
+    ctx.eq(ctx.json_err(limited, "MISSING_DEPENDENCY"), want, "same error as without a limit")
+    human = ctx.tb(*docker, "--cpus", "1", env=nodocker)
+    ctx.exit_is(human, 1)
+    ctx.check(
+        want.get("message", "?") in human.stderr and want.get("hint", "?") in human.stderr,
+        "human mode: the same message and hint",
     )
-    ctx.exit_is(bad, 2)
-    ctx.json_err(bad, "INVALID_RESOURCE")
+    ctx.check("Traceback" not in limited.stderr + human.stderr, "no traceback")
+    config = ctx.fx.treebox_home / "config.toml"
+    original = config.read_text() if config.exists() else ""
+    config.write_text(original + "\n[resources]\ncpus = 1\n")
+    from_config = ctx.tb(*docker, "--json", env=nodocker)
+    ctx.exit_is(from_config, 1)
+    ctx.json_err(from_config, "MISSING_DEPENDENCY")
+    config.write_text(original)
     for name in ("b26", "e2e-b26"):
         ctx.check(not wt(ctx, name).exists() and not branch_exists(ctx, name), f"no {name}")
-    plan = ctx.tb(
-        "create",
-        "e2e-b26",
-        *ctx.wt_args(),
-        "--isolation",
-        "docker",
-        "--cpus",
-        "1.5",
-        "--memory",
-        "512m",
-        "--pids-limit",
-        "64",
-        "--dry-run",
-        "--json",
-    )
-    ctx.exit_is(plan, 0)
-    d = ctx.json_out(plan) or {}
-    ctx.eq(d.get("resources"), {"cpus": 1.5, "memory": "512m", "pids": 64}, "planned resources")
-    run_cmd = next((c for c in d.get("commands", []) if c.startswith("docker run ")), "")
-    ctx.check(
-        "--cpus 1.5 --memory 512m --pids-limit 64" in run_cmd, "docker run carries the limits"
-    )
+    limits = ["--cpus", "1.5", "--memory", "512m", "--pids-limit", "64"]
+    for env in (ctx.env, nodocker):
+        plan = ctx.tb(*docker, *limits, "--dry-run", "--json", env=env)
+        ctx.exit_is(plan, 0)
+        d = ctx.json_out(plan) or {}
+        ctx.eq(d.get("resources"), {"cpus": 1.5, "memory": "512m", "pids": 64}, "plan")
+        run_cmd = next((c for c in d.get("commands", []) if c.startswith("docker run ")), "")
+        ctx.check(
+            "--cpus 1.5 --memory 512m --pids-limit 64" in run_cmd, "docker run carries the limits"
+        )
 
 
 @scenario("B27", "INVALID_ROOT for a root that is not a directory")

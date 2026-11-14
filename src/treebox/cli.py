@@ -349,24 +349,15 @@ def _creation_limits(
     then user config (``cfg.resources``), then the runner's template tier,
     restricted to what the runner can apply. Also returns the config limits
     this runner does not apply (shown as a note, never an error: one
-    ``[resources]`` table must not break every host worktree). Engine-refused
-    values fail here, before provisioning."""
+    ``[resources]`` table must not break every host worktree). This needs no
+    engine; a value the engine itself refuses is checked after the runner
+    preflight (``_run_session``), before provisioning."""
     _refuse_unsupported_limits(reporter, run, explicit, json_out=json_out)
     try:
         wanted = explicit.over(cfg.resources).over(run.template_resources())
-        effective = wanted.only(run.supported_resources)
-        run.check_resources(effective)
-    except ResourceLimitError as exc:
-        raise _die(
-            reporter,
-            str(exc),
-            code=EXIT_USAGE,
-            error_code="INVALID_RESOURCE",
-            hint="Pick a smaller value, or check the Docker engine's resources (docker info).",
-            json_out=json_out,
-        ) from exc
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
+    effective = wanted.only(run.supported_resources)
     ignored = [n for n in cfg.resources.names() if n not in run.supported_resources]
     return effective, ignored
 
@@ -1044,6 +1035,7 @@ def create(
         print_only=print_only,
         args=args or [],
         limits=limits,
+        check_limits=True,
     )
 
 
@@ -1218,6 +1210,7 @@ def _run_session(
     args: list[str],
     limits: ResourceLimits,
     drift: ResourceLimits | None = None,
+    check_limits: bool = False,
 ) -> None:
     """The session spine shared by ``create`` and ``enter``: runner preflight,
     the lock on the worktree at ``path``, the provisioning step, one exception
@@ -1227,9 +1220,13 @@ def _run_session(
     host runner) fail fast with a clean error + hint — before any git state
     is touched, and never surfacing a stopped docker daemon deep inside
     launch as a misleading "no container" that steers users into a
-    destructive teardown. A launch also checks the agent first (the harness
-    binary on the host; in unattended mode also its login), so a missing
-    prerequisite fails before anything is provisioned.
+    destructive teardown. With ``check_limits`` (``create``: ``limits`` are
+    the ones a new sandbox gets) the engine's own bounds on them are checked
+    next: only after preflight, because that check asks the engine, and a
+    missing or stopped engine must be the preflight's classified error. A
+    launch also checks the agent first (the harness binary on the host; in
+    unattended mode also its login), so a missing prerequisite fails before
+    anything is provisioned.
 
     Launch contract: treebox exits with the agent's exit code. When the
     agent exits non-zero, the last stderr line is ``AGENT_EXIT_PREFIX`` and
@@ -1242,6 +1239,8 @@ def _run_session(
     launching = not (json_out or print_only)
     try:
         run.preflight(reporter)
+        if check_limits:
+            run.check_resources(limits)
         if launching:
             _require_agent(run, harness, login=not _interactive())
         with locking.worktree_lock(path):
@@ -1252,6 +1251,15 @@ def _run_session(
             # outside treebox drops the rules). A failure here is classified
             # and nothing launches or is emitted.
             run.prepare_entry(outcome.worktree)
+    except ResourceLimitError as exc:
+        raise _die(
+            reporter,
+            str(exc),
+            code=EXIT_USAGE,
+            error_code="INVALID_RESOURCE",
+            hint="Pick a smaller value, or check the Docker engine's resources (docker info).",
+            json_out=json_out,
+        ) from exc
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
 

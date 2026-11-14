@@ -147,7 +147,9 @@ class Runner(Protocol):
     def check_resources(self, limits: ResourceLimits) -> None:
         """Refuse, before provisioning, limits the engine would refuse at
         sandbox creation (the docker runner: more CPUs than the engine has).
-        Raises ``resources.ResourceLimitError``."""
+        It may ask the engine, so the CLI calls it only after ``preflight``
+        (never on ``--dry-run``, which skips the preflight). Raises
+        ``resources.ResourceLimitError``."""
         ...
 
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:

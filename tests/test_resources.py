@@ -220,6 +220,93 @@ def test_resources_table_loads(home: Path):
     assert load_config().resources == ResourceLimits(cpus=2.0, memory="4g", pids=512)
 
 
+# --- no engine: the preflight error, never a crash ---------------------------
+
+
+@pytest.fixture(params=["missing", "stopped"])
+def no_engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """No usable Docker engine: no docker CLI on PATH (the real seam raises
+    like subprocess does), or a CLI whose daemon does not answer. Returns
+    the classified error ``create`` gives without any limit."""
+
+    def missing(args: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    def stopped(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["docker", *args], 1, "", "Cannot connect")
+
+    if request.param == "missing":
+        monkeypatch.setattr(dr.system, "have", lambda c: c != "docker")
+        monkeypatch.setattr(dr, "_docker", missing)
+        return "MISSING_DEPENDENCY"
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker", stopped)
+    return "DOCKER_UNAVAILABLE"
+
+
+def _create_args(repo: Path, root: str, *extra: str) -> list[str]:
+    return ["create", "lim", "--repo", str(repo), "--root", root, "--isolation", "docker", *extra]
+
+
+@pytest.mark.parametrize("source", ["none", "flag", "config"])
+def test_limits_without_an_engine_give_the_preflight_error(
+    repo: Path, root: str, home: Path, no_engine: str, source: str
+):
+    """The engine's CPU count is asked only after the preflight, so a missing
+    or stopped engine is the same classified error with or without a limit,
+    in --json and human mode, and nothing is provisioned."""
+    extra = ["--cpus", "1"] if source == "flag" else []
+    if source == "config":
+        _config(home, "[resources]\ncpus = 1\n")
+    res = _run(_create_args(repo, root, *extra, "--json"))
+    assert res.exit_code == EXIT_ERROR, res.output
+    error = json.loads(res.stderr)["error"]
+    assert error["code"] == no_engine
+    human = _run(_create_args(repo, root, *extra))
+    assert human.exit_code == EXIT_ERROR, human.output
+    assert error["message"] in human.stderr and error["hint"] in human.stderr
+    assert not Path(root).exists()
+
+
+@pytest.mark.parametrize("source", ["flag", "config"])
+def test_dry_run_with_limits_needs_no_engine(
+    repo: Path, root: str, home: Path, no_engine: str, source: str
+):
+    """A dry run skips the runner preflight, and so the engine check of the
+    limits too: it plans the limits as it plans everything else."""
+    extra = ["--cpus", "1.5"] if source == "flag" else []
+    if source == "config":
+        _config(home, "[resources]\ncpus = 1.5\n")
+    res = _dry(repo, root, *extra)
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["resources"]["cpus"] == 1.5
+    assert "--cpus 1.5" in _run_line(payload)
+
+
+@pytest.mark.parametrize("flags", [["--memory", "lots"], ["--cpus", "0"], ["--pids-limit", "-5"]])
+def test_bad_limit_without_an_engine_is_still_invalid_resource(
+    repo: Path, root: str, home: Path, no_engine: str, flags: list[str]
+):
+    for extra in ([], ["--dry-run"]):
+        res = _run(_create_args(repo, root, *flags, *extra, "--json"))
+        assert res.exit_code == EXIT_USAGE, res.output
+        assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+    assert not Path(root).exists()
+
+
+def test_engine_cpu_check_runs_after_preflight_and_not_on_dry_run(
+    repo: Path, root: str, home: Path, engine
+):
+    res = _dry(repo, root, "--cpus", "99")
+    assert res.exit_code == 0, res.output
+    assert ["info", "--format", "{{.NCPU}}"] not in engine
+    res = _run(_create_args(repo, root, "--cpus", "99", "--json"))
+    assert res.exit_code == EXIT_USAGE, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+    assert engine.index(["info"]) < engine.index(["info", "--format", "{{.NCPU}}"])
+
+
 # --- precedence and the template tier --------------------------------------------
 
 

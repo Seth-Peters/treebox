@@ -200,9 +200,10 @@ owns this setup; none needs B1 to run first.
       with a `PATH` that has no `docker`
       Expect: exit 1, `MISSING_DEPENDENCY`; no worktree (preflight runs first).
 - [ ] **B23 DOCKER_UNAVAILABLE** - the same with
-      `DOCKER_HOST=unix://$SBX/no-daemon.sock` (a real CLI, no daemon); also
-      `tb doctor --isolation docker`
-      Expect: create exits 1, `DOCKER_UNAVAILABLE`, no worktree; doctor exits 1.
+      `DOCKER_HOST=unix://$SBX/no-daemon.sock` (a real CLI, no daemon), also
+      with `--cpus 1`; also `tb doctor --isolation docker`
+      Expect: create exits 1, `DOCKER_UNAVAILABLE` (with the limit too), no
+      worktree; doctor exits 1.
       SKIP without a docker CLI.
 - [ ] **B24 --cold** - `tb create cold-x … --cold --print`
       Expect: exit 0; stderr reports the setup as `from-source (cold)`; `.venv`
@@ -214,18 +215,21 @@ owns this setup; none needs B1 to run first.
       Expect: exit 1 each; stderr says `No claude login for an unattended
       launch`; the agent never starts; no worktree, no branch.
 - [ ] **B26 resource flags without an engine** - `tb create b26 … --memory 4g
-      --json` (host isolation); `tb create e2e-b26 … --isolation docker
-      --memory lots --json`; `… --isolation docker --cpus 1.5 --memory 512m
-      --pids-limit 64 --dry-run --json`
-      Expect: exit 2 `RESOURCE_UNSUPPORTED`; exit 2 `INVALID_RESOURCE`; neither
-      leaves a worktree or branch; the plan has `resources: {cpus: 1.5,
-      memory: "512m", pids: 64}` and its `docker run` carries `--cpus 1.5
-      --memory 512m --pids-limit 64`. Known product bug on `main` (14d79ba):
-      with no docker CLI on `PATH`, a `--cpus` limit (flag or `[resources]`)
-      makes `create --isolation docker` crash with a traceback
-      (`FileNotFoundError: … 'docker'`) instead of a classified error, also
-      under `--dry-run`. Hosts without docker (the macOS CI runner) report B26
-      as KNOWN-BUG by that signature only.
+      --json` (host isolation); `tb create e2e-b26 … --isolation docker` with
+      `--memory lots`, `--cpus 0` and `--pids-limit -5` (`--json`), each with
+      the fixture's `PATH` and with a `PATH` that has no `docker`; with no
+      `docker`: `… --isolation docker --json` without a limit, with `--cpus 1`
+      (`--json` and human), and with `[resources] cpus = 1` in the config;
+      `… --cpus 1.5 --memory 512m --pids-limit 64 --dry-run --json` with and
+      without `docker`
+      Expect: exit 2 `RESOURCE_UNSUPPORTED`; exit 2 `INVALID_RESOURCE` for each
+      bad value, with or without `docker`; without `docker` a limit (flag or
+      `[resources]`) gives exit 1 `MISSING_DEPENDENCY` with the same message
+      and hint as no limit, in both modes, and no traceback; nothing leaves a
+      worktree or branch; the plan exits 0 either way, has `resources: {cpus:
+      1.5, memory: "512m", pids: 64}`, and its `docker run` carries `--cpus
+      1.5 --memory 512m --pids-limit 64` (a dry run skips the preflight and
+      the engine's CPU check with it).
 - [ ] **B27 INVALID_ROOT** - a plain file `$SBX/afile`; `create`, `enter`,
       `list` and `teardown` with `--root "$SBX/afile"` and with
       `--root "$SBX/afile/below"` (`--json`)
