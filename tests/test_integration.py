@@ -950,7 +950,8 @@ def test_human_output_off_a_terminal_is_never_wrapped_or_cut(
     base = ["--repo", str(repo), "--root", str(root)]
     assert _run(["create", "wide", *base, "--print"]).exit_code == 0
     subject = "a commit subject that is longer than the forty columns a terminal shows"
-    assert _git(root / "wide", "commit", "--allow-empty", "-qm", subject).returncode == 0
+    who = ["-c", "user.name=t", "-c", "user.email=t@e"]
+    assert _git(root / "wide", *who, "commit", "--allow-empty", "-qm", subject).returncode == 0
     monkeypatch.setenv("COLUMNS", "40")
     res = _run(["list", *base])
     assert res.exit_code == 0, res.output
