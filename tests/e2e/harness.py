@@ -15,6 +15,8 @@ Every run is hermetic:
   then the system directories. The harness refuses to run when any other
   ``claude`` or ``codex`` binary is reachable, so no scenario can start a real
   autonomous agent, even by mistake.
+- The stub dir also holds a fake macOS ``security`` that finds no Keychain
+  item, so on macOS no scenario reads the developer's real Keychain login.
 - The CLI is the console script beside ``sys.executable``, called directly:
   no ``uv run`` wrapper adds lines to a scenario's stderr.
 
@@ -63,6 +65,12 @@ DOCKER_PREFIX = "treebox-e2e-"
 DOCKER_VOLUME_PREFIXES = (DOCKER_PREFIX, "treebox-shellhistory-e2e-")
 
 AGENT_NAMES = ("claude", "codex")
+# The macOS Keychain tool treebox reads a login from when the login file is
+# absent. The fixture's copy finds nothing ("item not found" is status 44).
+FAKE_SECURITY = "#!/bin/sh\n# treebox e2e: no Keychain item, never the real Keychain.\nexit 44\n"
+# Opt-in for the scenario that builds the bundled sandbox image (about
+# 5.6 GB, needs the network): set to 1.
+BUNDLED_IMAGE_OPT_IN = "TREEBOX_E2E_BUNDLED_IMAGE"
 DOCUMENTED_EXIT_CODES = frozenset({0, 1, 2, 3, 4, 5})
 
 # "known-bug": the scenario failed exactly as a documented, unfixed product
@@ -292,6 +300,9 @@ class Fixture:
             d.mkdir(parents=True, exist_ok=True)
         for agent in AGENT_NAMES:
             (self.stub_bin / agent).symlink_to(STUB_AGENT)
+        security = self.stub_bin / "security"
+        security.write_text(FAKE_SECURITY)
+        security.chmod(0o755)
         for tool in ("git", "uv", "docker"):
             found = _tool(tool)
             if found:
@@ -501,6 +512,25 @@ def probe_prerequisites(base_env: Mapping[str, str]) -> dict[str, Prerequisite]:
         "non-root",
         os.geteuid() != 0,
         "file-permission failures need a non-root user (root ignores modes)",
+    )
+    add(
+        "root",
+        os.geteuid() == 0,
+        "running as root (uid 0)" if os.geteuid() == 0 else "the run is not root (uid 0)",
+    )
+    add(
+        "macos",
+        sys.platform == "darwin",
+        f"platform {sys.platform} (the Keychain login source is macOS only)",
+    )
+    opted = base_env.get(BUNDLED_IMAGE_OPT_IN) == "1"
+    add(
+        "bundled-image",
+        opted and found["docker"].available,
+        "opted in"
+        if opted
+        else f"opt-in: set {BUNDLED_IMAGE_OPT_IN}=1 to build the bundled image "
+        "(about 5.6 GB, needs the network)",
     )
     shell_ok = _shell_detection_works()
     add(
@@ -860,6 +890,15 @@ class Background:
     def running(self) -> bool:
         return self.proc.poll() is None
 
+    def stdout_so_far(self) -> str:
+        """What the process wrote to stdout until now (it may still run)."""
+        # pread: the child shares this file's offset, so never move it.
+        fd = self._out.fileno()
+        return os.pread(fd, os.fstat(fd).st_size, 0).decode("utf-8", "replace")
+
+    def signal(self, signum: int) -> None:
+        self.proc.send_signal(signum)
+
     def wait(self, timeout: float = 600) -> RunRecord:
         try:
             code = self.proc.wait(timeout=timeout)
@@ -1175,7 +1214,7 @@ def render_summary(results: Sequence[Result], manifest: Mapping[str, Any]) -> st
 
 
 def _group_order(letter: str) -> tuple[int, str]:
-    order = "ABCDEFGHIPRXZ"
+    order = "ABCDEFGHIPRUXZ"
     return (order.index(letter) if letter in order else len(order), letter)
 
 

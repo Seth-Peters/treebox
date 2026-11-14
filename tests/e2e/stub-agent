@@ -10,6 +10,12 @@
 #
 # Agent-role controls (pass them as agent args after `--`):
 #   --stub-exit=N      exit with status N (default 0)
+#   --stub-kill=SIG    after the record, kill itself with signal SIG
+#   --stub-sleep=N     after the record, sleep N seconds in this process (a
+#                      cancel signal to treebox must stop it)
+#
+# The record carries the process id and the worktree identity treebox
+# exports (TREEBOX_NAME, TREEBOX_ID, TREEBOX_PORT_BASE, TREEBOX_PORT_COUNT).
 #
 # On the host the e2e harness puts symlinks named claude and codex first on
 # PATH. In the offline template (tests/e2e/offline-template) this file is
@@ -26,6 +32,8 @@ if [ "$role" = "post-create.sh" ]; then
 fi
 
 status=0
+kill_with=""
+sleep_for=""
 in_container=no
 [ -f /.dockerenv ] && in_container=yes
 api_key="unset"
@@ -33,15 +41,29 @@ api_key="unset"
 
 echo "TREEBOX_E2E_STUB_BEGIN"
 echo "name=$role"
+echo "pid=$$"
 echo "cwd=$(pwd)"
 echo "uid=$(id -u)"
 echo "in_container=$in_container"
 echo "api_key=$api_key"
+echo "treebox_name=${TREEBOX_NAME:-}"
+echo "treebox_id=${TREEBOX_ID:-}"
+echo "treebox_port_base=${TREEBOX_PORT_BASE:-}"
+echo "treebox_port_count=${TREEBOX_PORT_COUNT:-}"
 for arg in "$@"; do
   case "$arg" in
     --stub-exit=*) status="${arg#--stub-exit=}" ;;
+    --stub-kill=*) kill_with="${arg#--stub-kill=}" ;;
+    --stub-sleep=*) sleep_for="${arg#--stub-sleep=}" ;;
   esac
   printf 'arg=%s\n' "$arg"
 done
 echo "TREEBOX_E2E_STUB_END"
+if [ -n "$kill_with" ]; then
+  kill -s "$kill_with" "$$"
+fi
+if [ -n "$sleep_for" ]; then
+  # exec: the sleep keeps this pid, so a signal to it stops the stub itself.
+  exec sleep "$sleep_for"
+fi
 exit "$status"
