@@ -663,8 +663,8 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       --isolation docker --firewall --print` with the default template
       Expect: exit 0; `claude`, `codex`, `uv` and `gh` are on the agent's
       `PATH`; `/opt/google/chrome/chrome --headless --no-sandbox --dump-dom
-      about:blank` exits 0 as the agent (Chromium needs no sandbox of its
-      own); `curl https://example.com` fails (egress lockdown) and `iptables
+      about:blank` exits 0 as the agent and `PLAYWRIGHT_MCP_SANDBOX` is
+      `false` (Chromium runs without its own sandbox); `curl https://example.com` fails (egress lockdown) and `iptables
       -S OUTPUT` has `REJECT` and no blanket `ACCEPT` for the host gateway (the
       template's `ALLOWED_HOST_PORTS` is empty). After `docker restart` the
       rules are gone; the next `enter --print` puts them back. SKIP unless

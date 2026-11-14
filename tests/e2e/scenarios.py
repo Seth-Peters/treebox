@@ -2103,8 +2103,10 @@ def h18(ctx: Ctx) -> None:
     chrome = agent(
         "/opt/google/chrome/chrome", "--headless", "--no-sandbox", "--dump-dom", "about:blank"
     )
-    ctx.eq(chrome.exit, 0, "Chromium runs headless in the container")
-    ctx.check("No usable sandbox" not in chrome.stderr, "Chromium needs no sandbox of its own")
+    ctx.eq(chrome.exit, 0, "Chromium runs headless in the container without its own sandbox")
+    ctx.check("No usable sandbox" not in chrome.stderr, "no sandbox abort")
+    sandbox = agent("printenv", "PLAYWRIGHT_MCP_SANDBOX").stdout.strip()
+    ctx.eq(sandbox, "false", "playwright-cli launches Chromium without its own sandbox")
     blocked = agent("curl", "-sS", "--max-time", "5", "https://example.com")
     ctx.check(blocked.exit != 0, "egress to a host outside the allowlist is blocked")
     ctx.check("REJECT" in rules(), "the egress lockdown is in place")
