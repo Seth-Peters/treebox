@@ -599,10 +599,15 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       and `git status`; `touch <repo>/.git/hooks/planted` in the container
       Expect: branch `e2e-launch`, status exits 0; the touch fails (the shared
       hooks are read-only) and nothing appears on the host.
-- [ ] **H9 missing container** - create `e2e-gone`, `docker rm -f` its container,
-      `tb enter e2e-gone … --json`
-      Expect: exit 1, `ERROR`, message `No container exists …` (never a dead
-      `docker exec` command).
+- [ ] **H9 removed container** - create `e2e-gone` with `--cpus 1 --memory
+      512m --pids-limit 64`, `docker rm -f` its container, `tb enter e2e-gone …
+      --json`, then `--print`; `docker rm -f` it again and `tb teardown
+      e2e-gone … --force --json`
+      Expect: enter exits 0 and re-creates the container from the host-owned
+      record (`docker inspect` shows `NanoCpus` 1000000000, `Memory`
+      536870912, `PidsLimit` 64); the second enter does not re-create it.
+      Teardown exits 0 and removes the image the resource manifest records,
+      though no container is left, and the sandbox files.
 - [ ] **H10 incomplete teardown** (boundary) - put `tests/e2e/fakes` first on
       `PATH` with `TREEBOX_E2E_DOCKER_FAIL=rm` and `TREEBOX_E2E_REAL_DOCKER`
       set. Create `e2e-gone`, remove its container by hand, and tear it down

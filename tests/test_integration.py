@@ -1047,6 +1047,9 @@ def test_enter_always_refreshes_runner_state(repo: Path, root: str, hermetic_con
         def refresh(self, wt, *, reporter):
             calls.append("refresh")
 
+        def setup_reason(self, wt):
+            return None
+
         def dry_run_setup(self, wt, *, cold, source_ref):
             return []
 
@@ -1787,6 +1790,8 @@ def test_enter_prefers_recorded_runner(
     # a running daemon (e.g. macOS CI) — this test is about runner selection.
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    # The simulated container exists: enter never re-creates it on the real engine.
+    monkeypatch.setattr(dr.DockerRunner, "setup_reason", lambda self, wt: None)
     # No real container exists in this fixture; entry readiness has its own test.
     monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, wt: None)
 
@@ -1811,6 +1816,8 @@ def test_enter_print_and_json_make_the_sandbox_entry_ready_before_emitting(
 
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    # The simulated container exists: enter never re-creates it on the real engine.
+    monkeypatch.setattr(dr.DockerRunner, "setup_reason", lambda self, wt: None)
     prepared: list[str] = []
     monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, w: prepared.append(w.name))
 
@@ -1846,6 +1853,8 @@ def test_enter_firewall_failure_is_classified_and_never_launches(
 
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    # The simulated container exists: enter never re-creates it on the real engine.
+    monkeypatch.setattr(dr.DockerRunner, "setup_reason", lambda self, wt: None)
 
     def _fail(self: dr.DockerRunner, w: object) -> None:
         raise FirewallError("firewall initialization failed: ERROR: boom", hint="re-create")
@@ -3648,6 +3657,8 @@ def test_sandbox_written_state_cannot_choose_the_next_session(
 
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    # The simulated container exists: enter never re-creates it on the real engine.
+    monkeypatch.setattr(dr.DockerRunner, "setup_reason", lambda self, wt: None)
     monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, wt: None)
     res = _run(["enter", "boxed", *base, "--print"])
     assert res.exit_code == 0, res.output
@@ -3829,6 +3840,8 @@ def test_enter_template_flag_stays_a_per_session_override(
     seen: list[str] = []
     monkeypatch.setattr(dr.system, "have", lambda c: True)
     monkeypatch.setattr(dr, "_docker_available", lambda: True)
+    # The simulated container exists: enter never re-creates it on the real engine.
+    monkeypatch.setattr(dr.DockerRunner, "setup_reason", lambda self, wt: None)
     monkeypatch.setattr(
         dr.DockerRunner, "prepare_entry", lambda self, wt: seen.append(self.config.template)
     )

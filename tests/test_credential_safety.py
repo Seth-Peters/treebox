@@ -136,6 +136,7 @@ def test_enter_refresh_uses_safe_credentials_and_classified_errors(
     # Only the engine is simulated. Entry, state, Git, and credential I/O are real.
     monkeypatch.setattr(DockerRunner, "preflight", lambda self, reporter: None)
     monkeypatch.setattr(DockerRunner, "prepare_entry", lambda self, wt: None)
+    monkeypatch.setattr(DockerRunner, "setup_reason", lambda self, wt: None)
     live = tmp_path / "login"
     live.mkdir()
     (live / "auth.json").write_text("synthetic token")

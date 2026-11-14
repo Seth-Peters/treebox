@@ -1420,12 +1420,25 @@ def test_docker_setup_firewall_failure_is_classified(
     assert not any("post-create.sh" in " ".join(a) for a in rep.steps)
 
 
-def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
+def test_docker_prepare_entry_without_container_points_at_enter(tmp_path: Path, fake_common_dir):
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
 
-    with pytest.raises(RuntimeError, match="treebox teardown"):
+    with pytest.raises(RuntimeError, match="run `treebox enter` again"):
         runner.prepare_entry(_boxed_worktree(tmp_path))
+
+
+def test_docker_setup_reason_is_a_removed_container(tmp_path: Path):
+    """``enter`` re-runs setup (which re-creates the container) only when the
+    worktree's container is gone; the host runner never asks for it."""
+    from treebox.runners.host import HostRunner
+
+    wt = _boxed_worktree(tmp_path)
+    gone = DockerRunner(Config(isolation="docker"), docker=_FakeDocker(ids=""))
+    present = DockerRunner(Config(isolation="docker"), docker=_FakeDocker(ids="abc123\n"))
+    assert gone.setup_reason(wt) == "the sandbox container is gone - re-creating it"
+    assert present.setup_reason(wt) is None
+    assert HostRunner(Config()).setup_reason(wt) is None
 
 
 def test_host_prepare_entry_is_a_noop(tmp_path: Path):

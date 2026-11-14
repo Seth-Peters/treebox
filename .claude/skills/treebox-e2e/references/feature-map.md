@@ -108,7 +108,7 @@ code, a config key or an environment variable.
 | `error DESTINATION_CONFLICT` | `provision.py::DestinationConflictError` | R45 |
 | `error DIRTY_WORKTREE` | `cli.py::teardown` | E2 |
 | `error DOCKER_UNAVAILABLE` | `runners/docker.py::DockerRunner.preflight` | B23 |
-| `error ERROR` | `cli.py::_classify`, `runners/docker.py::DockerRunner.prepare_entry` | H9, B16 |
+| `error ERROR` | `cli.py::_classify` | B16 |
 | `error FETCH_FAILED` | `git.py::FetchError` | B9 |
 | `error FIREWALL_FAILED` | `runners/base.py::FirewallError`, `runners/docker.py::DockerRunner.prepare_entry` | H14 |
 | `error GIT_MISSING` | `git.py::GitMissingError` | B20 |
@@ -215,12 +215,13 @@ code, a config key or an environment variable.
 | `behavior sandbox config outside the mount` | `runners/docker.py::DockerRunner._write_config` | H2 |
 | `behavior staged credential copies` | `harnesses.py::Harness.stage_credentials` | H2, R44 |
 | `behavior stopped container revived` | `runners/docker.py::DockerRunner.prepare_entry` | H5 |
+| `behavior removed container re-created on enter` | `runners/docker.py::DockerRunner.setup_reason`, `provision.py::enter` | H9 |
 | `behavior firewall on every entry` | `runners/docker.py::DockerRunner.prepare_entry`, `runners/docker.py::DockerRunner.setup` | H14, H18 |
 | `behavior resource limits and drift` | `runners/docker.py::DockerRunner.check_resources`, `cli.py::_check_entry_resources` | H12, G16 |
 | `behavior bundled sandbox image` | `assets.py::template_dir` | H18 |
 | `behavior bundled firewall host ports` | `assets.py::template_dir` | H18 |
 | `behavior in-container git` | `runners/docker.py::DockerRunner._inject` | H8 |
-| `behavior cleanup model` | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown` | H6, H10 |
+| `behavior cleanup model` | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown` | H6, H9, H10 |
 | `behavior .env or .gitmodules directory` | `provision.py::copy_env` | R37 |
 | `behavior stray directory hint` | `provision.py::SlugConflictError` | R38 |
 | `behavior nested worktree roots` | `models.py::Worktree.at`, `resolve.py::Candidate.registered` | R43 |

@@ -732,6 +732,11 @@ class DockerRunner:
         self._refresh_credentials(wt)
         reporter.ok("credentials", "scoped copies refreshed")
 
+    def setup_reason(self, wt: Worktree) -> str | None:
+        if self._container_ids(wt):
+            return None
+        return "the sandbox container is gone - re-creating it"
+
     # --- docker argv builders --------------------------------------------------
     # Builders return the full argv (leading "docker" included) so they can be
     # shown verbatim by --dry-run and reporter steps; _run_engine executes one.
@@ -1106,8 +1111,8 @@ class DockerRunner:
         ids = self._container_ids(wt)
         if not ids:
             raise RuntimeError(
-                f"No container exists for this worktree — re-create it: "
-                f"treebox teardown {wt.name} && treebox create {wt.name} --isolation {self.name}"
+                "No container exists for this worktree - run `treebox enter` again: "
+                "it re-creates the container from the host-owned record"
             )
         name, running, _ = self._container_state(ids[0])
         self._require_own_container(wt, name)

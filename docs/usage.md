@@ -302,6 +302,10 @@ gives this warning. See
 ### Docker entry and firewall recovery
 
 treebox restarts a stopped container before entry. If the container was
+removed (a manual `docker rm`), `enter` runs setup again, which re-creates it
+from the host-owned record: the same template, firewall choice and resource
+limits as at `create` (an `enter --template` override applies, as on any
+setup). If the container was
 created with the firewall enabled, treebox runs `init-firewall.sh` on every
 entry, including entries to running containers. This step occurs before the
 agent starts or treebox emits a `--print` or `--json` command. It restores

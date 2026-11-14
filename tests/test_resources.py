@@ -782,6 +782,45 @@ def test_restart_does_not_recreate_the_container(tmp_path: Path, fake_common_dir
     assert not any(c[0] == "run" for c in calls)
 
 
+@pytest.mark.parametrize("container", [False, True], ids=["removed", "present"])
+def test_enter_recreates_a_removed_container_from_the_record(
+    repo: Path, root: str, home: Path, monkeypatch: pytest.MonkeyPatch, container: bool
+):
+    """After a manual ``docker rm``, ``enter`` runs setup, which re-creates the
+    container from the record (limits chosen by flag included), never from
+    config defaults that changed since. A present container skips setup."""
+    ids = {"ps": ""}
+
+    def fake(args: list[str]) -> subprocess.CompletedProcess[str]:
+        out = "4\n" if args[:3] == ["info", "--format", "{{.NCPU}}"] else ""
+        if args[0] == "ps":
+            out = ids["ps"]
+        return subprocess.CompletedProcess(["docker", *args], 0, out, "")
+
+    setups: list[Config] = []
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker", fake)
+    monkeypatch.setattr(
+        dr.DockerRunner, "setup", lambda self, w, cold, reporter: setups.append(self.config)
+    )
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, w: None)
+    monkeypatch.setattr(dr.DockerRunner, "refresh", lambda self, w, reporter: None)
+    _create(repo, root, "--cpus", "1.5", "--memory", "4g", "--print")
+    _config(home, '[resources]\nmemory = "8g"\npids = 64\n')
+    ids["ps"] = "abc\n" if container else ""
+
+    res = _enter(repo, root, "--print")
+
+    assert res.exit_code == 0, res.output
+    if not container:
+        assert len(setups) == 2
+        assert setups[1].resources == ResourceLimits(cpus=1.5, memory="4g")
+        assert "the sandbox container is gone - re-creating it" in res.stderr
+    else:
+        assert len(setups) == 1
+    assert record.load(Path(root) / "lim").setup.status == "done"
+
+
 @pytest.fixture
 def fake_common_dir_resources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     from treebox import git

@@ -1004,7 +1004,8 @@ def enter(
 ) -> Outcome:
     """Re-prepare an existing worktree: refresh .env, and run setup when the
     setup model says so (``lifecycle.setup_reason``: setup pending or failed,
-    or the lockfile changed since it finished). The branch is read live - the
+    or the lockfile changed since it finished) or the runner does
+    (``Runner.setup_reason``: its sandbox is gone). The branch is read live - the
     agent may have renamed it since create. ``config`` is already reconciled
     with the host-owned record (``cli._reconcile_with_record``) and ``base``
     is the recorded base; nothing here reads sandbox-writable state."""
@@ -1031,7 +1032,9 @@ def enter(
     # not ride the lockfile-hash cache that gates setup below.
     runner.refresh(wt, reporter=reporter)
 
-    reason = lifecycle.setup_reason(rec.setup, ecosystems.lockfile_hash(wt.path))
+    reason = lifecycle.setup_reason(
+        rec.setup, ecosystems.lockfile_hash(wt.path)
+    ) or runner.setup_reason(wt)
     if reason is not None:
         reporter.info(reason)
         _run_setup(runner, wt, rec, cold=cold, reporter=reporter)

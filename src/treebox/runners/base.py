@@ -162,6 +162,13 @@ class Runner(Protocol):
         lockfile-hash skip that gates ``setup`` — auth is not a cache."""
         ...
 
+    def setup_reason(self, wt: Worktree) -> str | None:
+        """Why ``enter`` must run ``setup`` although the setup model would
+        skip it, or None. The docker runner: the worktree's container is gone
+        (a manual ``docker rm``), and ``setup`` re-creates it from the policy
+        the CLI read from the host-owned record. Called after ``preflight``."""
+        ...
+
     def dry_run_setup(
         self,
         wt: Worktree,

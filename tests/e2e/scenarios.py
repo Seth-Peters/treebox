@@ -1879,15 +1879,35 @@ def h8(ctx: Ctx) -> None:
     ctx.check(touch.exit != 0 and not (hooks / "planted").exists(), "hooks dir is read-only")
 
 
-@scenario("H9", "a missing container is a clean error, not a dead command")
+@scenario("H9", "a removed container is re-created by enter; teardown removes its image")
 def h9(ctx: Ctx) -> None:
-    created(ctx, "e2e-gone", *docker_args(ctx)[2:], root=ctx.root)
+    limits = ["--cpus", "1", "--memory", "512m", "--pids-limit", "64"]
+    created(ctx, "e2e-gone", *docker_args(ctx)[2:], *limits, root=ctx.root)
+    host_config = "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}"
     name, _ = container(ctx, "e2e-gone")
+    image = ctx.sh("docker", "inspect", name, "--format", "{{.Config.Image}}").stdout.strip()
     ctx.sh("docker", "rm", "-f", name)
     run = ctx.tb("enter", "e2e-gone", *ctx.wt_args(), "--json")
-    ctx.exit_is(run, 1)
-    err = ctx.json_err(run, "ERROR")
-    ctx.check("No container exists" in err.get("message", ""), "message says why")
+    ctx.exit_is(run, 0)
+    ctx.eq(
+        (ctx.json_out(run) or {}).get("resources"),
+        {"cpus": 1, "memory": "512m", "pids": 64},
+        "recorded resources",
+    )
+    again, state = container(ctx, "e2e-gone")
+    ctx.eq((again, state), (name, "running"), "the container is back")
+    if again:
+        limits_now = ctx.sh("docker", "inspect", again, "--format", host_config).stdout.strip()
+        ctx.eq(limits_now, "1000000000 536870912 64", "with the recorded limits")
+    replay = ctx.tb("enter", "e2e-gone", *ctx.wt_args(), "--print")
+    ctx.exit_is(replay, 0)
+    ctx.check("re-creating" not in replay.stderr, "a present container is not re-created")
+    ctx.sh("docker", "rm", "-f", name)
+    down = ctx.tb("teardown", "e2e-gone", *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(down, 0)
+    gone = ctx.sh("docker", "image", "inspect", image, check=False)
+    ctx.check(bool(image) and gone.exit != 0, f"teardown removed image {image}")
+    ctx.check(not (ctx.root / ".containers" / "e2e-gone").exists(), "sandbox files removed")
 
 
 @scenario(
