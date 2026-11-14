@@ -41,9 +41,9 @@ export TREEBOX_NON_INTERACTIVE=1
 
 - The SSH worker is not part of the fixture. `ssh` exit 255, a dropped connection and a worker restart (runs lost or `CANCELLED`) are the coordinator's side of the contract; read them in `docs/remote-workers.md`, they are not driven here.
 - `TREEBOX_NON_INTERACTIVE` passes through the fixture's launcher; `unset TREEBOX_NON_INTERACTIVE` when you are done, or later drives in this shell refuse every prompt.
-- The `CANCELLED` and `SLUG_CONFLICT` hints suggest `treebox enter <name>` / `treebox teardown <name>`: a coordinator replaces the name with the stored path.
+- Every hint that names a worktree (`CANCELLED`, `SLUG_CONFLICT`, `SETUP_FAILED`, `RECORD_*`, `SANDBOX_FAILED`, …) gives its absolute path, shell-quoted where needed, in human and `--json` output: the command in a hint is an exact ref and is safe to run as it is.
 - Name ref retries are unsafe: after `t-1` is removed, `teardown t-1` can match `t-12`. Always store and use the path.
-- A sandbox that stopped or restarted under the agent is a treebox failure (exit 1), not an agent status ([Docker sandbox](./docker-sandbox.md), H15).
+- A sandbox that stopped or restarted under the agent is a treebox failure (exit 1, `SANDBOX_FAILED`), not an agent status ([Docker sandbox](./docker-sandbox.md), H15).
 - `teardown --yes` keeps the template's per-worktree volume (`treebox-e2e-vol-e2e-t-1` here); add `--remove-volumes` when the task's volume must go too. `e2e_cleanup` reaps it in the fixture.
 - `TEARDOWN_INCOMPLETE` keeps the worktree, record and port block so the same teardown retries (H10).
 - Scenarios: C18, H10, H15, H17, U3, U4, P2.

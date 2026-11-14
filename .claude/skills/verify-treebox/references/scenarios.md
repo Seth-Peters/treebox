@@ -129,7 +129,9 @@ owns this setup; none needs B1 to run first.
       at `--checkout` as the resume path; `$SBX/wts2/fix-auth` not created.
 - [ ] **B7 SLUG_CONFLICT on re-create** - `treebox create fix-auth --repo "$REPO" --root "$ROOT" --json` (again, same root)
       Expect: exit 5 (re-`create` of a fully provisioned name is never an
-      idempotent enter); hint points at `enter`.
+      idempotent enter); the hint gives `treebox enter <path>` and `treebox
+      teardown <path>` with the worktree's absolute path (an exact ref), never
+      the name.
 - [ ] **B8 invalid name** - `treebox create "Bad Name" --repo "$REPO" --root "$ROOT"`
       Expect: exit 2; usage error explaining the slug rule.
 - [ ] **B9 fetch required / --no-fetch escape** -
@@ -249,6 +251,13 @@ owns this setup; none needs B1 to run first.
       `treebox create e2e-root … --isolation docker --json`
       Expect: exit 1 `RUNNING_AS_ROOT`; nothing provisioned. SKIP when the run
       is not root (the Mac and the CI runners are not).
+- [ ] **B30 the generic ERROR** (non-root) - create `b30-first`, make
+      `$REPO/.git/worktrees` read-only (`chmod 555`), `treebox create b30 …
+      --json`, then restore the mode
+      Expect: exit 1 `ERROR` (the one catch-all: a git failure treebox does not
+      classify) whose message is git's `could not create directory …`; no
+      `$ROOT/b30`, no `b30` branch, and the ledger holds only `b30-first`'s
+      block. SKIP as root (root ignores the mode).
 
 ## C. enter
 
@@ -326,8 +335,8 @@ Setup: `treebox create fix-auth … --json` (as B1).
       removes the directory and the registration.
 - [ ] **C16 RECORD_MISSING: recreate** - `treebox create e2e-norec … --print`, then
       `rm "$ROOT/.records/e2e-norec.json"` and `treebox enter e2e-norec … --json`
-      Expect: exit 5, `RECORD_MISSING`, hint names `treebox teardown e2e-norec`
-      and `treebox create`; nothing is emitted; `list` shows isolation `""`
+      Expect: exit 5, `RECORD_MISSING`, hint names `treebox teardown
+      $ROOT/e2e-norec` (the absolute path) and `treebox create`; nothing is emitted; `list` shows isolation `""`
       and `health: "unreadable_state"`. `treebox teardown e2e-norec … --force
       --json` (no extra flag): exit 0, the worktree is gone.
 - [ ] **C17 RECORD_CONFLICT** - with `setup_hook = ["exit 7"]`,
@@ -352,9 +361,12 @@ Setup: `d-one`, `d-two` (its branch renamed to `feature/renamed`), and `d-raw`,
 a registration treebox never provisioned (`git -C "$REPO" worktree add -b d-raw
 "$ROOT/d-raw" main`).
 
-- [ ] **D1 human table** - `treebox list --repo "$REPO" --root "$ROOT"`
+- [ ] **D1 human table** - `COLUMNS=30 treebox list --repo "$REPO" --root "$ROOT"`
+      (stdout is a pipe)
       Expect: exit 0; one row per worktree with name, live branch, isolation,
-      deps freshness, `.env` presence, plus one worktree-root footer; renamed
+      last commit, deps freshness, `.env` presence, plus one worktree-root
+      footer, `  Root: $ROOT` on one line: off a terminal nothing wraps and no
+      column is dropped, whatever `COLUMNS` says; renamed
       branches (C4) show the new branch under the stable name. A registration
       without readable Treebox state shows isolation as `unknown`, never the
       current config default.
@@ -391,9 +403,10 @@ Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
       Expect: exit 5 (dirty), worktree intact; then with `--force`: removed.
 - [ ] **E3 force removes, branch survives** - force-remove this scenario's
       `fix-auth` worktree with `treebox teardown fix-auth … --force --json`
-      Expect: exit 0; directory gone; `git -C "$REPO" worktree list` no longer
-      mentions it; the branch (`fix/auth-renamed`) still exists - branches are
-      kept by default.
+      Expect: exit 0; `container` is `skipped` (host isolation has no
+      container, so no cleanup ran); directory gone; `git -C "$REPO" worktree
+      list` no longer mentions it; the branch (`fix/auth-renamed`) still
+      exists - branches are kept by default.
 - [ ] **E4 --delete-branch** - create a throwaway `del-me`, then
       `treebox teardown del-me … --force --delete-branch --json`
       Expect: exit 0; JSON record of what was removed on stdout; local branch
@@ -513,12 +526,15 @@ Each writes `$TREEBOX_CONFIG`, runs, then restores the empty file (`: > "$TREEBO
       Expect: `templateDirOverride` is the dir and wins for any name; the plan's
       build carries `--build-arg TZ=Europe/Helsinki`. (`TREEBOX_HOME` is F3,
       `TREEBOX_CONFIG` is G1.)
-- [ ] **G14 [ports]** - `[ports] start = 30000, end = 30019, block_size = 10`;
+- [ ] **G14 [ports]** - create `g14-out` with the default range (block
+      20000); then `[ports] start = 30000, end = 30019, block_size = 10`;
       create `g14-a`, `g14-b`, then `g14-c`; tear down `g14-a`; create `g14-c`
       again; `treebox enter g14-b … --json`
       Expect: `port_base` 30000 and 30010; `g14-c` exits 5 `PORTS_EXHAUSTED`
-      with `error.path` = `$TREEBOX_HOME/ports.json` and leaves no worktree or
-      branch; after the teardown `g14-c` gets 30000; the enter keeps 30010.
+      with `error.path` = `$TREEBOX_HOME/ports.json`, the message `No free
+      port block of 10 is left in 30000-30019: the range holds 2 block(s) and
+      other worktrees reserve all 2.` (the block outside the range is not
+      counted), a hint that names the ledger, and no worktree or branch; after the teardown `g14-c` gets 30000; the enter keeps 30010.
 - [ ] **G15 PORT_LEDGER_INVALID** - write `not json` to `$TREEBOX_HOME/ports.json`,
       `treebox create g15 … --json`
       Expect: exit 1 `PORT_LEDGER_INVALID`, `error.path` is the ledger, the
@@ -661,8 +677,9 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
 - [ ] **H15 sandbox restarted under the agent** - `treebox enter e2e-rst … --
       --stub-sleep=60` in the background; once the stub runs, `docker restart
       -t 1` the container
-      Expect: exit 1; stderr says the sandbox `stopped or restarted`; no agent
-      exit line (the agent's own status is unknown).
+      Expect: exit 1 (`SANDBOX_FAILED`); stderr says the sandbox `stopped or
+      restarted`; no agent exit line (the agent's own status is unknown); the
+      hint is `treebox enter <absolute path>`.
 - [ ] **H16 HARNESS_MISSING in the sandbox** - `docker exec -u root <ctr> rm
       /usr/local/bin/codex`, then `treebox enter e2e-nocodex … --harness codex`
       (launch); then a plain `treebox enter e2e-nocodex …`
@@ -684,6 +701,18 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       template's `ALLOWED_HOST_PORTS` is empty). After `docker restart` the
       rules are gone; the next `enter --print` puts them back. SKIP unless
       opted in.
+- [ ] **H19 CREDENTIAL_STAGE_FAILED** - create `e2e-credconf`; replace
+      `$ROOT/.containers/e2e-credconf/credentials/claude/settings.json` with a
+      directory that holds a file; `treebox enter e2e-credconf … --json`; remove
+      the directory; enter again
+      Expect: exit 1 `CREDENTIAL_STAGE_FAILED`, the hint names the staged
+      directory, stdout empty, the directory and its file kept; the second
+      enter exits 0.
+- [ ] **H20 SANDBOX_FAILED** - `treebox create e2e-comma --repo "$REPO" --root
+      "$SBX/wts,comma" --isolation docker --template e2e-offline --json`, then
+      `treebox teardown e2e-comma … --force --json`
+      Expect: exit 1 `SANDBOX_FAILED`: docker cannot mount a path with `,`; the
+      hint says to use paths without `,`; no container; the teardown exits 0.
 
 ## I. interactive prompts (pseudo-terminal)
 
@@ -730,8 +759,8 @@ Each fails on `e8a7fa1` (before the fixes) and passes after them.
       says `env: absent`; enter warns `.env not copied` on stderr; no
       traceback.
 - [ ] **R38 stray directory hint (#38)** - `mkdir "$ROOT/junk"`, `treebox create junk … --json`
-      Expect: exit 5 `SLUG_CONFLICT` whose hint gives `rm -rf …` and does not
-      recommend `treebox teardown junk` (which exits 3 for it); after the
+      Expect: exit 5 `SLUG_CONFLICT` whose hint gives `rm -rf $ROOT/junk` and does
+      not recommend a teardown of `junk` (which exits 3 for it); after the
       removal, create succeeds.
 - [ ] **R39 cold dry-run (#39)** - `--dry-run --json` with and without `--cold`,
       host and docker
@@ -788,8 +817,9 @@ Setup: `treebox create u1 … --json`.
       background; once the stub runs, SIGTERM the treebox process; again with
       SIGINT
       Expect: exit 143, then 130; stderr `Cancelled by SIGTERM` /
-      `Cancelled by SIGINT` (`CANCELLED`), no agent exit line; the stub
-      process is gone; the worktree is kept. (The docker case is H17.)
+      `Cancelled by SIGINT` (`CANCELLED`), no agent exit line, a hint
+      `treebox enter <absolute path of u1>`; the stub process is gone; the
+      worktree is kept. (The docker case is H17.)
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 

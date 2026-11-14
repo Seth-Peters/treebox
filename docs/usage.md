@@ -116,8 +116,8 @@ install, a `setup_hook` command, the docker image build, the firewall, or
 `error.code: "SETUP_FAILED"`. The message names the step and its exit status;
 `error.path` is the file that holds the step's output
 (`<worktree-parent>/.logs/<name>.setup.log`, outside the worktree). The
-worktree is kept and its setup is recorded as failed, so `treebox enter <name>`
-or the same `create` retries the setup. It never says ready on a failed setup.
+worktree is kept and its setup is recorded as failed, so `treebox enter <path>`
+(the hint gives the absolute path) or the same `create` retries the setup. It never says ready on a failed setup.
 
 ### Submodule copies and recovery
 
@@ -285,9 +285,10 @@ sandbox on the very next entry. The same refresh runs during `create`.
 Each staged file is replaced atomically: staged symlinks and hardlinks cannot
 redirect credential writes or permission changes to host files. A symlink at
 the staged directory itself is rejected. Conflicting directories are preserved.
-Both conditions stop `create` or `enter` with an
-[`ERROR` failure](#scripting-against-treebox); inspect their contents before
-removing the conflict.
+Both conditions stop `create` or `enter` with
+[`CREDENTIAL_STAGE_FAILED`](#scripting-against-treebox) (exit `1`; the hint
+names the staged directory); inspect their contents before removing the
+conflict.
 
 The sandbox keeps the CPU, memory and process limits it was created with
 (they are in the record). `enter --cpus` / `--memory` / `--pids-limit` only
@@ -436,7 +437,7 @@ $ treebox teardown
 
   ● teardown   calm-finch
 
-  · container       n/a (host isolation)
+  · container       skipped · host isolation
   ✓ worktree        removed .treebox/worktrees/calm-finch
   ✓ branch          deleted feat/api
 
@@ -634,8 +635,13 @@ reservations live in one ledger in the user-level treebox home,
 `$TREEBOX_HOME/ports.json` (default `~/.treebox/ports.json`), never in a
 repository; the worktree's [host-owned record](how-it-works.md#port-blocks)
 keeps a copy. A full range is a classified failure before anything is made
-(`PORTS_EXHAUSTED`, exit `5`, with a hint). A dry run shows the block a real
-run would reserve now, and reserves nothing.
+(`PORTS_EXHAUSTED`, exit `5`). Its message counts the blocks of the
+configured range and says that other worktrees reserve all of them; its hint
+names the ledger, which names the worktree and repo of each block. A block
+reserved under an earlier, wider range stays reserved to its worktree (it is
+never handed out again), but it is not part of the new range and is not
+counted. A dry run shows the block a real run would reserve now, and reserves
+nothing.
 
 What this does **not** do:
 
@@ -703,6 +709,17 @@ to **stdout**, diagnostics to **stderr**, and exit codes are stable:
 instead, and a [cancel signal](#cancellation) exits `128 + signal`; see
 [unattended use](#unattended-use) for how a caller tells the two apart.
 
+Human output (the tables and lines without `--json`) fits a terminal's
+width. When the stream is not a terminal (a pipe, a file), it has no width:
+no line is wrapped and no value is cut or dropped (a long root path, a commit
+subject, a hint), also when `COLUMNS` is set, so a program can read it line by
+line. Still prefer `--json` for anything a program decides on.
+
+Every hint that names a worktree gives its exact ref: the absolute path,
+shell-quoted where needed (for example `treebox enter /work/wts/fix-auth`).
+A name or branch ref falls back to a unique substring match, so a hint never
+offers one.
+
 The worktree commands and `doctor` take `--json`; payloads carry a
 `schemaVersion` — fields are only ever added within a version, and a breaking
 reshape or rename bumps it. Agents branch on these payloads, so treat the shape
@@ -767,8 +784,10 @@ reliable), the same cases older treebox versions reported.
 `teardown` records contain `name`, `branch`, `worktree_path`, `removed`,
 `branch_deleted`, `container`, `volumes_removed`, `complete`, and `remaining`;
 `container` is `cleaned`, `skipped`, or `failed`. Each field reports what the
-runner actually did to that resource: `container` is `skipped` when cleanup
-didn't run (`--skip-container`, or Docker unavailable) and `failed` when a
+runner actually did to that resource: `container` is `cleaned` when the
+runner's container and image cleanup ran and succeeded, `skipped` when no
+container cleanup ran (host isolation, which has no container;
+`--skip-container`; or Docker unavailable) and `failed` when a
 container or image removal failed, while `volumes_removed` is `true` only when
 docker volumes were really removed - never on host isolation, not merely
 because `--remove-volumes` was passed, and a failed volume removal leaves it
@@ -824,27 +843,29 @@ you want it live.
 | `SETUP_FAILED` | `1` | A setup step exited non-zero. The message names the step and its exit status; `error.path` is its output. The worktree is kept, marked unfinished; `enter` or the same `create` retries the setup. |
 | `TEARDOWN_INCOMPLETE` | `1` | A teardown step did not finish (a container, image or volume removal failed, Docker is not reachable, or git refused to remove the worktree). The message names what remains; the worktree and its ownership record are kept, so the same `teardown` retries. The worktree keeps its [port block](#port-blocks) too. |
 | `PORT_LEDGER_INVALID` | `1` | The [port-block ledger](#port-blocks) (`$TREEBOX_HOME/ports.json`, in `error.path`) cannot be read or trusted. treebox never rewrites it: fix it or move it aside (each worktree then takes its recorded block back on its next `enter`). |
-| `ERROR` | `1` | Runtime failure, including a staged credential refresh failure. |
+| `ERROR` | `1` | The catch-all for a runtime failure no other code covers, for example a git command that failed for a reason treebox does not classify (the message is git's own). Every failure with a known cause has its own code. |
+| `CREDENTIAL_STAGE_FAILED` | `1` | `create` or `enter` of a docker worktree cannot safely refresh the staged login copies: a directory or a symlink is in the way, or a write failed. Nothing is overwritten; the hint names the staged directory. |
+| `SANDBOX_FAILED` | `1` | The docker sandbox cannot be created or used: the engine refused to run or start the container, a path holds a `,` (docker cannot mount it), the container is gone or was not made by treebox, its resource manifest is invalid, or the container stopped or restarted while the agent ran (the agent's result is unknown). The hint gives the recovery command. |
 | `CANCELLED` | `128 + signal` | A [cancel signal](#cancellation) (SIGINT `130`, SIGTERM `143`, SIGHUP `129`) reached treebox while the agent ran; the agent was stopped. |
 | `DESTINATION_CONFLICT` | `5` | An unsafe, conflicting, or changed path prevents the [submodule copy](#submodule-copies-and-recovery). |
-| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <name>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
+| `SLUG_CONFLICT` | `5` | The worktree name is already taken, or its directory is not a healthy registered worktree - recover a registered-but-corrupt one with `treebox teardown <path>`; a stray directory git never registered is invisible to teardown and must be removed by hand (`rm -rf` it). |
 | `BRANCH_EXISTS` | `5` | `create NAME` names a branch that already exists — resume it with `--checkout`. |
 | `BRANCH_IN_USE` | `5` | The `--checkout` branch is already checked out in another worktree. |
-| `INVALID_LINKAGE` | `5` | `enter` target's `.git` pointer is missing or does not lead to its git registration (`health: invalid_linkage`) - recover with `treebox teardown <name>`. |
+| `INVALID_LINKAGE` | `5` | `enter` target's `.git` pointer is missing or does not lead to its git registration (`health: invalid_linkage`) - recover with `treebox teardown <path>`. |
 | `DIRTY_WORKTREE` | `5` | Explicit teardown target has uncommitted changes (checked before the prompt and again right before removal). |
 | `WORKTREE_LOCKED` | `5` | Teardown target is locked with `git worktree lock`; treebox never removes it (also with `--force`). Unlock it first. |
 | `MAIN_WORKTREE` | `5` | A teardown target resolves to the repo's main working tree (possible when the worktree root contains the repo, e.g. `root = ".."`) - treebox only manages linked worktrees and never removes the repo itself. |
 | `NEEDS_CONFIRMATION` | `5` | Teardown would need an interactive choice or confirmation. |
 | `LOCK_HELD` | `5` | Another treebox operation holds this worktree's lock. Also raised, rarely, when the repository lock that parallel `create` / `teardown` calls queue on has been held for over five minutes, or the machine-wide port-block ledger lock for over 30 seconds: another operation is stuck, not merely busy (the message says which lock). |
-| `PORTS_EXHAUSTED` | `5` | `create` (or `enter` of a worktree whose ledger entry is gone and whose recorded block is taken) finds no free [port block](#port-blocks) in the configured range. Nothing is made. Tear down worktrees you no longer need, or widen `[ports]` in the user config. `error.path` is the ledger. |
+| `PORTS_EXHAUSTED` | `5` | `create` (or `enter` of a worktree whose ledger entry is gone and whose recorded block is taken) finds no free [port block](#port-blocks) in the configured range: other worktrees reserve every block of it. The message counts the range's own blocks only. Nothing is made. Tear down a worktree you no longer need (the ledger names the worktree of each block), or widen `[ports]` in the user config. `error.path` is the ledger. |
 | `ISOLATION_MISMATCH` | `5` | Explicit `--isolation` disagrees with the recorded mode. |
-| `RECORD_MISSING` | `5` | `enter`: the worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (made by an older treebox, or the record was deleted) - `treebox teardown <name>`, then `treebox create` again. |
-| `RECORD_INVALID` | `5` | `enter` / resumed `create`: the host-owned record does not parse (another `schemaVersion`, an unknown isolation mode or harness, or bound to another path) - `treebox teardown <name>`, then `treebox create` again. |
+| `RECORD_MISSING` | `5` | `enter`: the worktree has no [host-owned record](how-it-works.md#the-host-owned-record) (made by an older treebox, or the record was deleted) - `treebox teardown <path>`, then `treebox create` again. |
+| `RECORD_INVALID` | `5` | `enter` / resumed `create`: the host-owned record does not parse (another `schemaVersion`, an unknown isolation mode or harness, or bound to another path) - `treebox teardown <path>`, then `treebox create` again. |
 | `RECORD_CONFLICT` | `5` | A resumed `create` of a half-built worktree asks for different settings than its record holds - re-run with the recorded settings from the hint, or tear it down. |
 | `RESOURCE_MISMATCH` | `5` | `enter` asks for a limit that differs from the one the sandbox was created with - drop the flag, or re-create with the commands in the hint. |
 | `TEMPLATE_NOT_FOUND` | `3` | A named template doesn't exist - `template init --from` / `template path`, or `create` / `enter` provisioning (including `--dry-run`) with a template that doesn't resolve. |
-| `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
-| `FIREWALL_FAILED` | `1` | The sandbox firewall failed to initialize. See [firewall recovery](#docker-entry-and-firewall-recovery). |
+| `TEMPLATE_INVALID` | `1` | A template exists but its contents can't serve the run: malformed or unreadable `container.json`, an unknown key in `container.json` or `firewall.json`, a template file the sandbox build needs is missing, or `--firewall` with a template that has no `firewall.json`. Inspect it with `treebox template path <name>`. |
+| `FIREWALL_FAILED` | `1` | The sandbox firewall failed to initialize, or the firewall is requested for a container that was created without it. See [firewall recovery](#docker-entry-and-firewall-recovery). |
 | `TEMPLATE_EXISTS` | `5` | `template init` names an existing template — pass `--force` to overwrite. |
 | `TEMPLATE_CONFLICT` | `2` | `template init` source and destination are the same template. |
 | `OVERWRITE_FAILED` | `1` | `template init --force` cannot move the existing template aside. |
@@ -951,7 +972,7 @@ If the agent is still running 10 seconds after the signal, treebox kills it
 (`SIGKILL`). treebox returns only when the agent is gone, and then fails with
 `CANCELLED` (exit `128 + signal`, never the agent exit line). The worktree is
 kept; for docker the **container keeps running**, so the next
-`treebox enter <name>` starts the agent again at once. (Stopping the local
+`treebox enter <path>` (the hint gives the absolute path) starts the agent again at once. (Stopping the local
 `docker exec` client alone would leave the agent running in the container:
 treebox signals the agent itself.)
 

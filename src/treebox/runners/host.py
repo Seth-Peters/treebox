@@ -186,7 +186,8 @@ class HostRunner:
         return code
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
-        # Nothing host-side to tear down beyond the worktree itself; the note
-        # keeps the teardown checklist honest about what was (not) touched.
-        reporter.note("container", "n/a (host isolation)")
-        return RunnerTeardownResult.cleaned()
+        # Nothing host-side to tear down beyond the worktree itself: no
+        # container cleanup ran, so the result (and the note) is "skipped",
+        # never a claim that something was cleaned.
+        reporter.note("container", "skipped · host isolation")
+        return RunnerTeardownResult.skipped()

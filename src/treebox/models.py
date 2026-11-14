@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -108,6 +109,14 @@ def worktree_id(path: Path) -> str:
     derivation of a worktree's hash: the docker runner's container and image
     names embed it, so ``TREEBOX_ID`` and the sandbox name always agree."""
     return hashlib.sha256(str(path).encode()).hexdigest()[:WORKTREE_ID_LENGTH]
+
+
+def path_ref(path: str | Path) -> str:
+    """The exact ref of the worktree at ``path`` for a command in a hint: its
+    absolute path, shell-quoted. A name or branch ref falls back to a
+    substring match (``resolve.py``), so a hint never tells a script to use
+    one: a retried hint command must not reach another worktree."""
+    return shlex.quote(os.path.abspath(path))
 
 
 def same_path(left: str | Path, right: str | Path) -> bool:

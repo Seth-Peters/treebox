@@ -88,8 +88,20 @@ def format_age(seconds: float) -> str:
     return f"{seconds / (7 * 86400):.0f}w"
 
 
-def new_console(*, stderr: bool) -> Console:
-    return Console(stderr=stderr, theme=THEME, highlight=False, soft_wrap=False)
+# The width of a console that is not a terminal (a pipe, a file). A pipe has
+# no width, and a script reads it line by line, so a table row or a path is
+# never wrapped or cut there; only a terminal's width shapes the output.
+_UNBOUNDED_WIDTH = 100_000
+
+
+def new_console(*, stderr: bool = False, file: IO[str] | None = None) -> Console:
+    """A themed console for human output. Off a terminal it has no width
+    limit (``_UNBOUNDED_WIDTH``, also when ``COLUMNS`` is set), so no line is
+    wrapped or truncated; ``--json`` output never goes through one."""
+    console = Console(stderr=stderr, file=file, theme=THEME, highlight=False, soft_wrap=False)
+    if not console.is_terminal:
+        console.width = _UNBOUNDED_WIDTH
+    return console
 
 
 @dataclass(frozen=True)
@@ -159,8 +171,8 @@ class Reporter:
         self.silent = silent
         self.quiet = quiet or silent
         self.verbose = verbose
-        self.console = Console(stderr=True, theme=THEME, highlight=False, file=stream)
-        self.data_console = new_console(stderr=False)
+        self.console = new_console(stderr=True, file=stream)
+        self.data_console = new_console()
         # Every warning, also in silent (--json) mode: success payloads carry
         # them as `warnings`, so a caller can branch on what was skipped.
         self.warnings: list[str] = []
@@ -488,13 +500,14 @@ class Reporter:
         available_width = max(console.width - indent, 1)
         table = build_table(combine_identity=False, commit_width=None)
         if natural_width(table) <= available_width:
-            max_subject_width = min(
-                40,
-                max(
-                    len("LAST COMMIT"),
-                    *(len(r["last_commit"] or "-") for r in rows),
-                ),
+            # A terminal caps the subject at 40 columns; off a terminal a row
+            # is never cut (see new_console), so the subject stays whole.
+            max_subject_width = max(
+                len("LAST COMMIT"),
+                *(len(r["last_commit"] or "-") for r in rows),
             )
+            if console.is_terminal:
+                max_subject_width = min(40, max_subject_width)
             for commit_width in range(max_subject_width, len("LAST COMMIT") - 1, -1):
                 candidate = build_table(
                     combine_identity=False,

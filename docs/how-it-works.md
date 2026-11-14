@@ -178,7 +178,7 @@ path, for example after the worktree root was moved) is invalid. `enter`
 refuses both with `RECORD_MISSING` / `RECORD_INVALID` (exit `5`) and launches
 nothing; it never falls back to the config default or to the sandbox-writable
 state. `list` still shows the worktree, with an
-unknown isolation. Fix it with `treebox teardown <name>`, then
+unknown isolation. Fix it with `treebox teardown <path>`, then
 `treebox create` again (`--checkout <branch>` keeps its branch). Teardown
 needs no record: without one, a worktree that has the runner-owned resource
 manifest below is torn down as a docker worktree, and any other as a host

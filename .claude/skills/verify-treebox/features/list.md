@@ -24,7 +24,7 @@ Used with: [Create](./create.md) and [Enter](./enter.md) change what it shows, [
 
 Preconditions: the fixture, `e2e_doctor` all `ok`. Create `d-one` and `d-two` (`treebox create d-one --repo "$REPO" --root "$ROOT" --json`, the same for `d-two`), rename `d-two`'s branch (`git -C "$ROOT/d-two" branch -m feature/renamed`), and add a registration treebox never provisioned: `git -C "$REPO" worktree add -q -b d-raw "$ROOT/d-raw" main`.
 
-- **Table.** Run `treebox list --repo "$REPO" --root "$ROOT"`. Exit 0, stderr empty. stdout has the header `NAME BRANCH ISOLATION LAST COMMIT AGE DEPS ENV`, the row `d-two  feature/renamed  host … fresh … present`, the row `d-raw  d-raw  unknown … unknown … absent`, then `Summary: 3 worktrees` and `Root: $ROOT`.
+- **Table.** Run `COLUMNS=30 treebox list --repo "$REPO" --root "$ROOT" | cat` (stdout a pipe). Exit 0, stderr empty, nothing wrapped and no column dropped: a pipe has no width, whatever `COLUMNS` says. stdout has the header `NAME BRANCH ISOLATION LAST COMMIT AGE DEPS ENV`, the row `d-two  feature/renamed  host … fresh … present`, the row `d-raw  d-raw  unknown … unknown … absent`, then `Summary: 3 worktrees` and `  Root: $ROOT` whole on one line.
 - **JSON.** Run `treebox list --repo "$REPO" --root "$ROOT" --json`. Exit 0, top-level keys `schemaVersion` and `worktrees`. Each entry has `name`, `id`, `branch`, `unnamed`, `missing`, `last_commit`, `commit_epoch`, `path`, `base`, `isolation`, `harness`, `resources`, `deps`, `env`, `health`, `setup`, `port_base`, `port_count`. `d-one`: `health` `healthy`, `setup` `done`, `deps` `fresh`, `resources` `{cpus: null, memory: null, pids: null}`. `d-raw`: `isolation` `""`, `health` `unreadable_state`, `setup` `""`, `resources` and `port_base` `null`.
 - **Empty root.** Run `treebox list --repo "$REPO" --root "$SBX/empty" --json`. Exit 0, `{"schemaVersion": 1, "worktrees": []}`. Without `--json`: exit 0 and `no worktrees yet`, with a pointer to `treebox create`.
 - **One row and a placeholder.** In a fresh root, `treebox create one --repo "$REPO" --root "$SBX/r1" --json`, then `treebox list --repo "$REPO" --root "$SBX/r1"`: one row and a `Root:` line, no `Summary:` line. After `treebox create --repo "$REPO" --root "$SBX/r1" --json` (a placeholder), the list marks that row `⚠ unnamed`, the summary has `· 1 unnamed`, and a footer gives `git branch -m`.
@@ -36,7 +36,7 @@ Preconditions: the fixture, `e2e_doctor` all `ok`. Create `d-one` and `d-two` (`
 
 - A registration without a readable record shows isolation `unknown` (`""` in JSON), never the config default.
 - `deps` is `stale` after a manifest change in the worktree and `fresh` again after the next enter; check it before and after.
-- The table wraps a long root path at the terminal width (80 columns when piped). Assert on JSON, not on the table text.
+- Off a terminal (a pipe, a file) no human line is wrapped or cut: the full root path, every column and the whole commit subject. On a terminal the table fits its width (the subject is capped at 40 columns). Assert on JSON, not on the table text.
 - `--root` must match the root used at create. A different root lists other worktrees, or none.
-- On a narrow terminal the branch moves under the name instead of its own column.
+- On a narrow terminal the branch moves under the name instead of its own column. Only a real terminal is narrow: drive it on a pseudo-terminal (`script -q /dev/null …`).
 - Scenarios: D1, D2, D3, D4, B20, C15.

@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 from treebox.cli import app
 from treebox.config import Config
 from treebox.models import Worktree
+from treebox.runners import SandboxError
 from treebox.runners.docker import DockerRunner
 
 runner = CliRunner()
@@ -195,5 +196,5 @@ def test_docker_launch_reports_a_lost_sandbox_apart_from_the_agent_exit(
     if expected is not None:
         assert run.launch(wt, harness=get_harness("claude"), args=[]) == expected
     else:
-        with pytest.raises(RuntimeError, match="stopped or restarted while the agent ran"):
+        with pytest.raises(SandboxError, match="stopped or restarted while the agent ran"):
             run.launch(wt, harness=get_harness("claude"), args=[])

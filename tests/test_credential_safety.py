@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from treebox import record
 from treebox.cli import app
 from treebox.config import Config
-from treebox.harnesses import Harness
+from treebox.harnesses import CredentialStageError, Harness
 from treebox.models import Worktree
 from treebox.output import Reporter
 from treebox.runners.docker import DockerRunner
@@ -61,7 +61,7 @@ def test_credential_directory_conflict_preserves_contents(tmp_path, logged_in):
     (conflict / "keep").write_text("user data")
     if not logged_in:
         (live / "auth.json").unlink()
-    with pytest.raises(RuntimeError, match="Cannot safely refresh credentials"):
+    with pytest.raises(CredentialStageError, match="Cannot safely refresh credentials"):
         harness.stage_credentials(dest)
     assert (conflict / "keep").read_text() == "user data"
     assert sorted(p.name for p in dest.parent.iterdir()) == ["mounted"]
@@ -81,7 +81,7 @@ def test_credential_refresh_rejects_symlink_mount_root(tmp_path):
     target.mkdir()
     dest.rmdir()
     dest.symlink_to(target, target_is_directory=True)
-    with pytest.raises(RuntimeError, match="Cannot safely refresh credentials"):
+    with pytest.raises(CredentialStageError, match="Cannot safely refresh credentials"):
         harness.stage_credentials(dest)
     assert list(target.iterdir()) == []
 
@@ -157,7 +157,9 @@ def test_enter_refresh_uses_safe_credentials_and_classified_errors(
         assert result.stdout == ""
         error = json.loads(result.stderr)
         assert error["schemaVersion"] == 1
+        assert error["error"]["code"] == "CREDENTIAL_STAGE_FAILED"
         assert "Cannot safely refresh credentials" in error["error"]["message"]
+        assert str(staged) in error["error"]["hint"]
         assert (staged / "auth.json" / "keep").read_text() == "preserved"
     else:
         assert result.exit_code == 0, result.output

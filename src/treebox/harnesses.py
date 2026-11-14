@@ -27,6 +27,7 @@ import getpass
 import json
 import os
 import secrets
+import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -36,6 +37,16 @@ from pathlib import Path
 
 # Seconds a Keychain read may wait for a person to answer a macOS dialog.
 KEYCHAIN_TIMEOUT = 30
+
+
+class CredentialStageError(RuntimeError):
+    """The staged login copies of a sandbox cannot be refreshed safely: a
+    directory or a symlink is in the way, or the filesystem refused a write
+    (exit 1, ``CREDENTIAL_STAGE_FAILED``). ``hint`` is the recovery."""
+
+    def __init__(self, message: str, *, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
 
 
 @dataclass(frozen=True)
@@ -146,7 +157,7 @@ class Harness:
         staged copy whose source is gone (host logout) is deleted. Both a
         re-login and a revocation therefore reach the sandbox on the next
         entry. The live login dir itself is never touched. Filesystem errors
-        raise ``RuntimeError``; see ``docs/usage.md`` for recovery guidance.
+        raise ``CredentialStageError``; see ``docs/usage.md`` for recovery guidance.
 
         The caller must keep ``dest.parent`` under host control and outside
         all sandbox mounts. Only ``dest`` may be mounted into the sandbox.
@@ -173,9 +184,10 @@ class Harness:
                         with suppress(FileNotFoundError):
                             os.unlink(name, dir_fd=dest_fd)
         except OSError as exc:
-            raise RuntimeError(
-                f"Cannot safely refresh credentials at {dest}: {exc.strerror}. "
-                "Check the staged credential directory and remove conflicting directories."
+            raise CredentialStageError(
+                f"Cannot safely refresh credentials at {dest}: {exc.strerror}.",
+                hint="Inspect the staged credential directory, then remove the conflicting "
+                f"entry (a directory or a symlink) there: {shlex.quote(str(dest))}",
             ) from exc
 
     def sandbox_mount(self, staged: Path, user: str) -> tuple[Path, str]:

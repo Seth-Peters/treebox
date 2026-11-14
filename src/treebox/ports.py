@@ -67,17 +67,24 @@ class PortsError(RuntimeError):
 
 
 class PortsExhaustedError(PortsError):
-    """No free block is left in the configured range (exit 5, PORTS_EXHAUSTED)."""
+    """No free block is left in the configured range (exit 5, PORTS_EXHAUSTED).
 
-    def __init__(self, ports: PortRange, taken: int) -> None:
+    Every block of the range overlaps a block the ledger holds for another
+    worktree, so the message counts the range's own blocks only: a ledger
+    block outside the range (reserved under an earlier, wider range) still
+    stays taken, but it is not part of this range."""
+
+    def __init__(self, ports: PortRange) -> None:
+        blocks = len(_range_blocks(ports))
         super().__init__(
             f"No free port block of {ports.block_size} is left in {ports.start}-{ports.end}: "
-            f"{taken} block(s) are reserved by other worktrees."
+            f"the range holds {blocks} block(s) and other worktrees reserve all {blocks}."
         )
         self.path = ledger_path()
         self.hint = (
-            "Tear down worktrees you no longer need (treebox teardown <name>), or widen "
-            "[ports] start / end (or lower block_size) in the user config."
+            f"The ledger {self.path} names the worktree and repo of each reserved block. "
+            "Tear down one you no longer need (treebox teardown <worktree path> --repo "
+            "<repo>), or widen [ports] start / end (or lower block_size) in the user config."
         )
 
 
@@ -129,7 +136,7 @@ def reserve(
             else _first_free(ports, taken)
         )
         if block is None:
-            raise PortsExhaustedError(ports, len(taken))
+            raise PortsExhaustedError(ports)
         _save([*live, _Entry(block, str(worktree), repo)])
         return block, True
 
@@ -160,7 +167,7 @@ def preview(worktree: Path, ports: PortRange, *, preferred: PortBlock | None = N
         return preferred
     block = _first_free(ports, taken)
     if block is None:
-        raise PortsExhaustedError(ports, len(taken))
+        raise PortsExhaustedError(ports)
     return block
 
 
@@ -170,17 +177,24 @@ def _own(entries: list[_Entry], worktree: Path) -> _Entry | None:
     return next((e for e in entries if same_path(e.worktree, worktree)), None)
 
 
+def _range_blocks(ports: PortRange) -> list[PortBlock]:
+    """Every block the configured range holds, lowest first."""
+    last = ports.end - ports.block_size + 1
+    return [
+        PortBlock(base, ports.block_size) for base in range(ports.start, last + 1, ports.block_size)
+    ]
+
+
 def _first_free(ports: PortRange, taken: list[PortBlock]) -> PortBlock | None:
     """The lowest block of the range that overlaps no taken block. Taken
     blocks may come from another range or block size (the config changed),
-    so the check is overlap, not equal bases."""
-    base = ports.start
-    while base + ports.block_size - 1 <= ports.end:
-        candidate = PortBlock(base, ports.block_size)
-        if not any(candidate.overlaps(t) for t in taken):
-            return candidate
-        base += ports.block_size
-    return None
+    so the check is overlap, not equal bases: a taken block outside the range
+    is never handed out again, and one that straddles its edge takes the
+    range blocks it overlaps."""
+    return next(
+        (block for block in _range_blocks(ports) if not any(block.overlaps(t) for t in taken)),
+        None,
+    )
 
 
 def _stale(entry: _Entry) -> bool:

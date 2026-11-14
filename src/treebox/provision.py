@@ -33,6 +33,7 @@ from .models import (
     Worktree,
     expand_user,
     is_placeholder,
+    path_ref,
     same_path,
     worktree_root,
 )
@@ -87,8 +88,8 @@ class SlugConflictError(ProvisionError):
     def __init__(self, name: str, path: Path) -> None:
         super().__init__(f"Worktree '{name}' already exists at {path}.")
         self.hint = (
-            f"Enter it (treebox enter {name}), tear it down "
-            f"(treebox teardown {name}), or pick another name."
+            f"Enter it (treebox enter {path_ref(path)}), tear it down "
+            f"(treebox teardown {path_ref(path)}), or pick another name."
         )
 
 
@@ -133,7 +134,7 @@ class RecordConflictError(ProvisionError):
             f"Finish it with the recorded settings: treebox create {name} "
             f"--isolation {prior.isolation} {firewall} --template {prior.template} "
             f"-H {prior.harness} --base {prior.base}{limits} - or tear it down "
-            f"(treebox teardown {name}) and create it again."
+            f"(treebox teardown {path_ref(prior.worktree)}) and create it again."
         )
 
 
@@ -149,7 +150,7 @@ class SetupFailedError(ProvisionError):
         self.path = log
         self.hint = (
             "The worktree is kept and marked unfinished. Fix the cause, then retry the "
-            f"setup: treebox enter {wt.name} (or run the same treebox create again)."
+            f"setup: treebox enter {path_ref(wt.path)} (or run the same treebox create again)."
         )
 
 
@@ -166,10 +167,10 @@ class InvalidLinkageError(ProvisionError):
         super().__init__(f"Worktree '{path.name}' has an invalid git linkage: {reason}.")
         self.path = path
         self.hint = (
-            f"Recover with `treebox teardown {path.name}` (it removes the directory and "
-            "git's stale registration), then create it again."
+            f"Recover with `treebox teardown {path_ref(path)}` (it removes the directory "
+            "and git's stale registration), then create it again."
             if health == "invalid_linkage"
-            else f"Remove the stray directory by hand: rm -rf {path}"
+            else f"Remove the stray directory by hand: rm -rf {path_ref(path)}"
         )
 
 
@@ -727,22 +728,23 @@ def _slug_conflict_for_existing_path(repo: str, wt: Worktree) -> SlugConflictErr
     if health == "unreadable_state":
         conflict.hint = (
             "It has no usable host-owned record (missing or invalid). Tear it down "
-            f"and create it again: treebox teardown {wt.name}, then treebox create "
+            f"and create it again: treebox teardown {path_ref(wt.path)}, then treebox create "
             "(add --checkout <branch> to keep its branch)."
         )
     elif health == "invalid_linkage":
         conflict.hint = (
             "The directory is not a healthy registered worktree (likely leftover "
-            f"from an interrupted teardown). Recover with `treebox teardown {wt.name}` "
-            "— it clears both the directory and git's stale registration — then "
-            f"re-run. By hand: rm -rf {wt.path} && git -C {repo} worktree prune "
-            "(a bare rm -rf leaves the registration behind and re-create fails)."
+            f"from an interrupted teardown). Recover with `treebox teardown {path_ref(wt.path)}` "
+            "- it clears both the directory and git's stale registration - then "
+            f"re-run. By hand: rm -rf {path_ref(wt.path)} && "
+            f"git -C {path_ref(repo)} worktree prune (a bare rm -rf leaves the "
+            "registration behind and re-create fails)."
         )
     else:
         conflict.hint = (
             "The directory is not a registered worktree (a stray directory git "
             "does not know about), so `treebox teardown` cannot see it. Remove "
-            f"it by hand: rm -rf {wt.path} — then re-run."
+            f"it by hand: rm -rf {path_ref(wt.path)} - then re-run."
         )
     return conflict
 
@@ -886,7 +888,7 @@ def _add_worktree(
             reporter.warn(
                 f"placeholder {branch} has commits not on {start} — resuming that "
                 f"work, NOT a fresh {start}. To start over: "
-                f"treebox teardown {name} --delete-branch"
+                f"treebox teardown {path_ref(wt.path)} --delete-branch"
             )
 
     plan = git.resolve_branch(repo, branch, base)

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import git
-from .models import path_is_under, same_path, worktree_root
+from .models import path_is_under, path_ref, same_path, worktree_root
 from .provision import NotFoundError, ProvisionError
 
 
@@ -31,7 +31,8 @@ class AmbiguousRefError(ProvisionError):
     def __init__(self, ref: str, matches: list[Candidate]) -> None:
         shown = ", ".join(f"{c.name} ({c.branch})" if c.branch else c.name for c in matches)
         super().__init__(f"'{ref}' matches more than one worktree: {shown}.")
-        self.hint = "Use the full name or branch (treebox list shows both)."
+        exact = " or ".join(path_ref(c.path) for c in matches)
+        self.hint = f"Pass the absolute path of one, the exact ref: {exact}."
 
 
 @dataclass(frozen=True)

@@ -90,7 +90,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from .. import assets, git, system
 from ..ecosystems import ECOSYSTEMS
 from ..harnesses import HARNESSES, Harness
-from ..models import Worktree, derive_name, expand_user, is_valid_name
+from ..models import Worktree, derive_name, expand_user, is_valid_name, path_ref
 from ..output import Reporter, StepError
 from ..resources import (
     RESOURCE_NAMES,
@@ -103,7 +103,13 @@ from ..resources import (
     parse_pids,
 )
 from ..system import STOP_GRACE_SECONDS, SessionCancelled, run_agent, signal_name
-from .base import FirewallError, PreflightError, RunnerFacts, RunnerTeardownResult
+from .base import (
+    FirewallError,
+    PreflightError,
+    RunnerFacts,
+    RunnerTeardownResult,
+    SandboxError,
+)
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -249,10 +255,11 @@ def _mount(
     instead of a baffling daemon error after the image build already ran."""
     for p in (source, target):
         if "," in str(p):
-            raise RuntimeError(
+            raise SandboxError(
                 f"Cannot mount a path containing ',': {p} "
-                "(docker --mount syntax cannot express it). "
-                "Rename the branch/path and re-create."
+                "(docker --mount syntax cannot express it).",
+                hint="Use a repo and a worktree root whose paths have no ',', "
+                "then create the worktree there.",
             )
     spec = f"type={kind},source={source},target={target}"
     if readonly:
@@ -299,7 +306,10 @@ class DockerRunner:
         proc = self._engine(args)
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
-            raise RuntimeError(detail or f"docker {' '.join(args)} failed")
+            raise SandboxError(
+                detail or f"docker {' '.join(args)} failed",
+                hint="Check the Docker engine (docker info), then run the same command again.",
+            )
 
     def _engine_attempt(self, args: list[str], *, reporter: Reporter) -> bool:
         """Run a destructive docker command best-effort: warn with the
@@ -511,36 +521,43 @@ class DockerRunner:
         temporary.replace(manifest_file)
 
     def _read_resource_manifest(self, wt: Worktree) -> ResourceManifest:
-        """Read and validate the host-owned deletion authority."""
+        """Read and validate the host-owned deletion authority. An invalid
+        one is a ``SandboxError``: what the sandbox owns cannot be trusted, so
+        the recovery is a teardown (which tolerates it) and a new create."""
         manifest_file = self._resource_manifest_file(wt)
+
+        def invalid(reason: str) -> SandboxError:
+            return SandboxError(
+                reason,
+                hint=f"Tear it down and create it again: treebox teardown {path_ref(wt.path)}",
+            )
+
         try:
             data = json.loads(manifest_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            raise RuntimeError(f"{manifest_file} is missing (deleted metadata)") from None
+            raise invalid(f"{manifest_file} is missing (deleted metadata)") from None
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"cannot read {manifest_file}: {exc}") from exc
+            raise invalid(f"cannot read {manifest_file}: {exc}") from exc
 
         if not isinstance(data, dict):
-            raise RuntimeError(f"{manifest_file} must contain a JSON object")
+            raise invalid(f"{manifest_file} must contain a JSON object")
         if data.get("schemaVersion") != _RESOURCE_SCHEMA_VERSION:
-            raise RuntimeError(
+            raise invalid(
                 f"{manifest_file} has unsupported schemaVersion {data.get('schemaVersion')!r}"
             )
         if data.get("workspace") != str(wt.path):
-            raise RuntimeError(
+            raise invalid(
                 f"{manifest_file} belongs to workspace {data.get('workspace')!r}, "
                 f"not {str(wt.path)!r}"
             )
         image = data.get("image")
         if image != self._slug(wt):
-            raise RuntimeError(
-                f"{manifest_file} records image {image!r}, expected {self._slug(wt)!r}"
-            )
+            raise invalid(f"{manifest_file} records image {image!r}, expected {self._slug(wt)!r}")
         volumes = data.get("volumes")
         if not isinstance(volumes, list) or any(
             not isinstance(volume, str) or not volume for volume in volumes
         ):
-            raise RuntimeError(f"{manifest_file} has an invalid volumes list")
+            raise invalid(f"{manifest_file} has an invalid volumes list")
         return {
             "schemaVersion": _RESOURCE_SCHEMA_VERSION,
             "workspace": str(wt.path),
@@ -555,7 +572,7 @@ class DockerRunner:
         # or malformed contents, so every caller (setup, prepare_entry, the
         # _user fallback) surfaces a classified error instead of a traceback.
         config = assets.load_template_json(self.config.template, assets.CONFIG_FILE)
-        return _require_known_keys(config, assets.CONFIG_FILE)
+        return _require_known_keys(config, assets.CONFIG_FILE, self.config.template)
 
     def _user(self, wt: Worktree) -> str:
         """The in-container user agent execs run as: from the rendered
@@ -575,7 +592,7 @@ class DockerRunner:
         config = self._template_config()
         if self.config.firewall:
             fw = assets.load_template_json(self.config.template, assets.FIREWALL_FILE)
-            _require_known_keys(fw, assets.FIREWALL_FILE)
+            _require_known_keys(fw, assets.FIREWALL_FILE, self.config.template)
             # The merge is shape-agnostic (recursive JSON); both sides were
             # validated above, so the result is still a ContainerConfig.
             _deep_merge(cast("dict[str, Any]", config), fw)
@@ -691,7 +708,9 @@ class DockerRunner:
         for f in assets.TEMPLATE_FILES:
             src = tpl / f
             if not src.is_file():
-                raise RuntimeError(f"{f} not found in template dir: {tpl}")
+                raise assets.TemplateInvalidError(
+                    self.config.template, f"{f} not found in template dir: {tpl}"
+                )
             shutil.copy(src, dc / f)
         for f in assets.TEMPLATE_HELPER_FILES:
             src = tpl / f
@@ -820,11 +839,11 @@ class DockerRunner:
         state = self._container_state(container_id)
         self._require_own_container(wt, state.name)
         if self.config.firewall and not state.firewall:
-            raise RuntimeError(
-                "The firewall was requested, but this worktree's container "
-                "was created without it. Re-create the sandbox: "
-                f"treebox teardown {wt.name} && "
-                f"treebox create {wt.name} --isolation {self.name} --firewall"
+            raise FirewallError(
+                "The firewall was requested, but this worktree's container was created without it.",
+                hint="Re-create the sandbox: "
+                f"treebox teardown {path_ref(wt.path)} && "
+                f"treebox create {wt.name} --isolation {self.name} --firewall",
             )
         return container_id, state
 
@@ -897,7 +916,7 @@ class DockerRunner:
             branch = None
         if branch and (derive_name(branch) == wt.name or is_valid_name(wt.name)):
             location = ["--repo", wt.repo, "--root", str(wt.path.parent)]
-            teardown = shlex.join(["treebox", "teardown", *location, "--", wt.name])
+            teardown = f"{shlex.join(['treebox', 'teardown', *location])} {path_ref(wt.path)}"
             name_args = [] if derive_name(branch) == wt.name else ["--", wt.name]
             create = shlex.join(
                 [
@@ -934,9 +953,9 @@ class DockerRunner:
         mounts, and user don't match what exec expects, so entering it would
         misbehave."""
         if name != self._slug(wt):
-            raise RuntimeError(
-                f"This worktree's container '{name}' was not created by the docker "
-                f"runner. Remove it and re-create: treebox teardown {wt.name}"
+            raise SandboxError(
+                f"This worktree's container '{name}' was not created by the docker runner.",
+                hint=f"Remove it and re-create: treebox teardown {path_ref(wt.path)}",
             )
 
     # --- launch / teardown ---------------------------------------------------
@@ -1017,7 +1036,7 @@ class DockerRunner:
                 error_code="HARNESS_MISSING",
                 hint="Install it in the operator template's Dockerfile "
                 f"(treebox template path {self.config.template}), then re-create the "
-                f"sandbox: treebox teardown {wt.name} && treebox create {wt.name} "
+                f"sandbox: treebox teardown {path_ref(wt.path)} && treebox create {wt.name} "
                 f"--isolation {self.name}",
             )
         # The wrapper records the agent's pid (it execs into the agent), so a
@@ -1042,10 +1061,10 @@ class DockerRunner:
                 # status the agent never returned. Passing it on as the
                 # agent's exit would make a lost sandbox look like a finished
                 # task, so it is a treebox failure.
-                raise RuntimeError(
+                raise SandboxError(
                     f"The sandbox of '{wt.name}' stopped or restarted while the agent "
-                    f"ran (docker exec exited {code}): the agent's result is unknown. "
-                    f"Start the agent again: treebox enter {wt.name}"
+                    f"ran (docker exec exited {code}): the agent's result is unknown.",
+                    hint=f"Start the agent again: treebox enter {path_ref(wt.path)}",
                 )
             self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
             return code
@@ -1110,9 +1129,10 @@ class DockerRunner:
         rules are live. A failed init raises ``FirewallError``."""
         ids = self._container_ids(wt)
         if not ids:
-            raise RuntimeError(
-                "No container exists for this worktree - run `treebox enter` again: "
-                "it re-creates the container from the host-owned record"
+            raise SandboxError(
+                f"No container exists for worktree '{wt.name}'.",
+                hint=f"Run treebox enter {path_ref(wt.path)} again: it re-creates "
+                "the container from the host-owned record.",
             )
         name, running, _ = self._container_state(ids[0])
         self._require_own_container(wt, name)
@@ -1267,15 +1287,16 @@ class ContainerState(NamedTuple):
     firewall: bool
 
 
-def _require_known_keys(config: dict[str, Any], source: str) -> ContainerConfig:
+def _require_known_keys(config: dict[str, Any], source: str, template: str) -> ContainerConfig:
     """Reject unknown top-level keys instead of silently ignoring them. A
     passing config is the schema ``_KNOWN_KEYS`` enforces, so this is also
     where a freshly-parsed dict is narrowed to ``ContainerConfig``."""
     unknown = sorted(set(config) - _KNOWN_KEYS)
     if unknown:
-        raise RuntimeError(
-            f"Unsupported key(s) in {source}: {', '.join(unknown)}. "
-            f"Supported keys: {', '.join(sorted(_KNOWN_KEYS))}."
+        raise assets.TemplateInvalidError(
+            template,
+            f"Unsupported key(s) in {source} of template '{template}': {', '.join(unknown)}. "
+            f"Supported keys: {', '.join(sorted(_KNOWN_KEYS))}.",
         )
     return cast(ContainerConfig, config)
 

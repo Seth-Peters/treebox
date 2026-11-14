@@ -66,6 +66,19 @@ class FirewallError(RuntimeError):
         self.hint = hint
 
 
+class SandboxError(RuntimeError):
+    """The worktree's sandbox cannot be created or used: the engine refused
+    to run or start its container, a path cannot be mounted, the container
+    is gone or was not made by this runner, or it stopped under the agent.
+
+    The CLI classifies this (``SANDBOX_FAILED``, exit 1, with the recovery
+    ``hint``); the message names the cause."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
 RunnerTeardownStatus = Literal["cleaned", "skipped", "failed"]
 
 
