@@ -209,6 +209,23 @@ def test_bad_resources_table_is_invalid_config(repo: Path, root: str, home: Path
     assert json.loads(res.stderr)["error"]["code"] == "INVALID_CONFIG"
 
 
+def test_internal_config_fields_are_unknown_keys(home: Path):
+    """``explicit_resources`` is set by the CLI, never by TOML: a config that
+    names it is an unknown key, and a typo is never pointed at it."""
+    from dataclasses import fields
+
+    from treebox.config import USER_KEYS
+
+    assert {f.name for f in fields(Config)} - USER_KEYS == {"explicit_resources"}
+    _config(home, 'explicit_resources = ["cpus"]\n')
+    with pytest.raises(ValueError, match="unknown key 'explicit_resources'"):
+        load_config()
+    _config(home, 'explicit_resourcez = ["cpus"]\n')
+    with pytest.raises(ValueError, match="unknown key") as exc:
+        load_config()
+    assert "explicit_resources" not in str(exc.value).replace("explicit_resourcez", "")
+
+
 def test_resources_must_be_a_table(home: Path):
     _config(home, 'resources = "4g"\n')
     with pytest.raises(ValueError, match="resources"):
@@ -218,6 +235,93 @@ def test_resources_must_be_a_table(home: Path):
 def test_resources_table_loads(home: Path):
     _config(home, '[resources]\ncpus = 2\nmemory = "4g"\npids = 512\n')
     assert load_config().resources == ResourceLimits(cpus=2.0, memory="4g", pids=512)
+
+
+# --- no engine: the preflight error, never a crash ---------------------------
+
+
+@pytest.fixture(params=["missing", "stopped"])
+def no_engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """No usable Docker engine: no docker CLI on PATH (the real seam raises
+    like subprocess does), or a CLI whose daemon does not answer. Returns
+    the classified error ``create`` gives without any limit."""
+
+    def missing(args: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    def stopped(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["docker", *args], 1, "", "Cannot connect")
+
+    if request.param == "missing":
+        monkeypatch.setattr(dr.system, "have", lambda c: c != "docker")
+        monkeypatch.setattr(dr, "_docker", missing)
+        return "MISSING_DEPENDENCY"
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker", stopped)
+    return "DOCKER_UNAVAILABLE"
+
+
+def _create_args(repo: Path, root: str, *extra: str) -> list[str]:
+    return ["create", "lim", "--repo", str(repo), "--root", root, "--isolation", "docker", *extra]
+
+
+@pytest.mark.parametrize("source", ["none", "flag", "config"])
+def test_limits_without_an_engine_give_the_preflight_error(
+    repo: Path, root: str, home: Path, no_engine: str, source: str
+):
+    """The engine's CPU count is asked only after the preflight, so a missing
+    or stopped engine is the same classified error with or without a limit,
+    in --json and human mode, and nothing is provisioned."""
+    extra = ["--cpus", "1"] if source == "flag" else []
+    if source == "config":
+        _config(home, "[resources]\ncpus = 1\n")
+    res = _run(_create_args(repo, root, *extra, "--json"))
+    assert res.exit_code == EXIT_ERROR, res.output
+    error = json.loads(res.stderr)["error"]
+    assert error["code"] == no_engine
+    human = _run(_create_args(repo, root, *extra))
+    assert human.exit_code == EXIT_ERROR, human.output
+    assert error["message"] in human.stderr and error["hint"] in human.stderr
+    assert not Path(root).exists()
+
+
+@pytest.mark.parametrize("source", ["flag", "config"])
+def test_dry_run_with_limits_needs_no_engine(
+    repo: Path, root: str, home: Path, no_engine: str, source: str
+):
+    """A dry run skips the runner preflight, and so the engine check of the
+    limits too: it plans the limits as it plans everything else."""
+    extra = ["--cpus", "1.5"] if source == "flag" else []
+    if source == "config":
+        _config(home, "[resources]\ncpus = 1.5\n")
+    res = _dry(repo, root, *extra)
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["resources"]["cpus"] == 1.5
+    assert "--cpus 1.5" in _run_line(payload)
+
+
+@pytest.mark.parametrize("flags", [["--memory", "lots"], ["--cpus", "0"], ["--pids-limit", "-5"]])
+def test_bad_limit_without_an_engine_is_still_invalid_resource(
+    repo: Path, root: str, home: Path, no_engine: str, flags: list[str]
+):
+    for extra in ([], ["--dry-run"]):
+        res = _run(_create_args(repo, root, *flags, *extra, "--json"))
+        assert res.exit_code == EXIT_USAGE, res.output
+        assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+    assert not Path(root).exists()
+
+
+def test_engine_cpu_check_runs_after_preflight_and_not_on_dry_run(
+    repo: Path, root: str, home: Path, engine
+):
+    res = _dry(repo, root, "--cpus", "99")
+    assert res.exit_code == 0, res.output
+    assert ["info", "--format", "{{.NCPU}}"] not in engine
+    res = _run(_create_args(repo, root, "--cpus", "99", "--json"))
+    assert res.exit_code == EXIT_USAGE, res.output
+    assert json.loads(res.stderr)["error"]["code"] == "INVALID_RESOURCE"
+    assert engine.index(["info"]) < engine.index(["info", "--format", "{{.NCPU}}"])
 
 
 # --- precedence and the template tier --------------------------------------------
@@ -676,6 +780,45 @@ def test_restart_does_not_recreate_the_container(tmp_path: Path, fake_common_dir
     runner.prepare_entry(wt)
     assert ["start", "abc"] in calls
     assert not any(c[0] == "run" for c in calls)
+
+
+@pytest.mark.parametrize("container", [False, True], ids=["removed", "present"])
+def test_enter_recreates_a_removed_container_from_the_record(
+    repo: Path, root: str, home: Path, monkeypatch: pytest.MonkeyPatch, container: bool
+):
+    """After a manual ``docker rm``, ``enter`` runs setup, which re-creates the
+    container from the record (limits chosen by flag included), never from
+    config defaults that changed since. A present container skips setup."""
+    ids = {"ps": ""}
+
+    def fake(args: list[str]) -> subprocess.CompletedProcess[str]:
+        out = "4\n" if args[:3] == ["info", "--format", "{{.NCPU}}"] else ""
+        if args[0] == "ps":
+            out = ids["ps"]
+        return subprocess.CompletedProcess(["docker", *args], 0, out, "")
+
+    setups: list[Config] = []
+    monkeypatch.setattr(dr.system, "have", lambda c: True)
+    monkeypatch.setattr(dr, "_docker", fake)
+    monkeypatch.setattr(
+        dr.DockerRunner, "setup", lambda self, w, cold, reporter: setups.append(self.config)
+    )
+    monkeypatch.setattr(dr.DockerRunner, "prepare_entry", lambda self, w: None)
+    monkeypatch.setattr(dr.DockerRunner, "refresh", lambda self, w, reporter: None)
+    _create(repo, root, "--cpus", "1.5", "--memory", "4g", "--print")
+    _config(home, '[resources]\nmemory = "8g"\npids = 64\n')
+    ids["ps"] = "abc\n" if container else ""
+
+    res = _enter(repo, root, "--print")
+
+    assert res.exit_code == 0, res.output
+    if not container:
+        assert len(setups) == 2
+        assert setups[1].resources == ResourceLimits(cpus=1.5, memory="4g")
+        assert "the sandbox container is gone - re-creating it" in res.stderr
+    else:
+        assert len(setups) == 1
+    assert record.load(Path(root) / "lim").setup.status == "done"
 
 
 @pytest.fixture

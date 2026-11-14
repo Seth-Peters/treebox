@@ -77,6 +77,9 @@ class HostRunner:
             if cold_root:
                 shutil.rmtree(cold_root, ignore_errors=True)
 
+    def setup_reason(self, wt: Worktree) -> str | None:
+        return None  # no sandbox that can disappear
+
     def refresh(self, wt: Worktree, *, reporter: Reporter) -> None:
         # Nothing staged per-worktree: the agent runs with the live host
         # ~/.claude / ~/.codex, so host logins/logouts apply immediately.

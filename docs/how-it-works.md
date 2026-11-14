@@ -195,9 +195,10 @@ as anything else.
 Before first Docker setup, the runner also writes exact per-workspace image
 and volume ownership to
 `<worktree-parent>/.containers/<name>/treebox-resources.json`, outside every
-sandbox mount. `teardown --remove-volumes` validates and trusts only that
-manifest, so it can still remove volumes when the container and user template
-are both gone.
+sandbox mount. `teardown` validates and trusts only that manifest for the
+image, and `teardown --remove-volumes` for the volumes, so it can still remove
+them when the container (a manual `docker rm`) and user template are both
+gone. An image the manifest does not name is never removed.
 
 If an operator manually deletes the rendered config directory (and with it the
 manifest) of a docker worktree that still has its record, the worktree stays

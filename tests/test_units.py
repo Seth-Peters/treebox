@@ -1168,6 +1168,7 @@ class _FakeDocker:
         volume_ls: str = "",
         info_rc: int = 0,
         failures: dict[tuple[str, ...], str] | None = None,
+        images: tuple[str, ...] = (),
     ) -> None:
         self.calls: list[list[str]] = []
         self._ids = ids
@@ -1179,6 +1180,7 @@ class _FakeDocker:
         self._volume_ls = volume_ls
         self._info_rc = info_rc
         self._failures = failures or {}
+        self._images = images
 
     def __call__(self, args: list[str]):
         import subprocess
@@ -1193,6 +1195,8 @@ class _FakeDocker:
             stdout = self._ids
         elif args[:2] == ["volume", "ls"]:
             stdout = self._volume_ls
+        elif args[:2] == ["image", "inspect"]:
+            rc = 0 if args[2] in self._images else 1  # the engine's image store
         elif args[0] == "inspect":
             fmt = args[-1]
             if fmt == "{{.Config.Image}}":
@@ -1416,12 +1420,25 @@ def test_docker_setup_firewall_failure_is_classified(
     assert not any("post-create.sh" in " ".join(a) for a in rep.steps)
 
 
-def test_docker_prepare_entry_without_container_points_at_recreate(tmp_path: Path, fake_common_dir):
+def test_docker_prepare_entry_without_container_points_at_enter(tmp_path: Path, fake_common_dir):
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
 
-    with pytest.raises(RuntimeError, match="treebox teardown"):
+    with pytest.raises(RuntimeError, match="run `treebox enter` again"):
         runner.prepare_entry(_boxed_worktree(tmp_path))
+
+
+def test_docker_setup_reason_is_a_removed_container(tmp_path: Path):
+    """``enter`` re-runs setup (which re-creates the container) only when the
+    worktree's container is gone; the host runner never asks for it."""
+    from treebox.runners.host import HostRunner
+
+    wt = _boxed_worktree(tmp_path)
+    gone = DockerRunner(Config(isolation="docker"), docker=_FakeDocker(ids=""))
+    present = DockerRunner(Config(isolation="docker"), docker=_FakeDocker(ids="abc123\n"))
+    assert gone.setup_reason(wt) == "the sandbox container is gone - re-creating it"
+    assert present.setup_reason(wt) is None
+    assert HostRunner(Config()).setup_reason(wt) is None
 
 
 def test_host_prepare_entry_is_a_noop(tmp_path: Path):
@@ -1680,6 +1697,41 @@ def test_docker_teardown_keeps_foreign_image_and_volumes_by_default(tmp_path: Pa
     assert ["rm", "-f", "abc123"] in fake.calls
     assert not any(c[:2] == ["image", "rm"] for c in fake.calls)
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
+
+
+@pytest.mark.parametrize("image_left", [True, False], ids=["image-left", "image-gone"])
+def test_docker_teardown_removes_the_manifest_image_without_a_container(
+    tmp_path: Path, image_left: bool
+):
+    """After a manual ``docker rm`` the host-owned manifest still authorizes
+    its exact image: teardown removes it (an image already gone is no
+    error), and nothing remains."""
+    wt = _boxed_worktree(tmp_path)
+    image = DockerRunner(Config(isolation="docker"))._slug(wt)
+    fake = _FakeDocker(ids="", images=(image,) if image_left else ())
+    runner = DockerRunner(Config(isolation="docker"), docker=fake)
+    _write_resource_manifest(runner, wt, [])
+
+    result = runner.teardown(wt, reporter=_RecordingReporter())
+
+    assert result.container == "cleaned"
+    assert result.remaining == ()
+    assert (["image", "rm", image] in fake.calls) is image_left
+    assert not any(c[:2] == ["image", "rm"] and c[2] != image for c in fake.calls)
+    assert not runner._config_dir(wt).exists()
+
+
+def test_docker_teardown_never_removes_an_image_the_manifest_does_not_name(tmp_path: Path):
+    """No manifest, no image removal: with or without a container, an image
+    is removed only on the host-owned manifest's authority."""
+    wt = _boxed_worktree(tmp_path)
+    image = DockerRunner(Config(isolation="docker"))._slug(wt)
+    fake = _FakeDocker(ids="", images=(image,))
+    runner = DockerRunner(Config(isolation="docker"), docker=fake)
+
+    runner.teardown(wt, reporter=_RecordingReporter())
+
+    assert not any(c[0] == "image" for c in fake.calls)
 
 
 def test_docker_teardown_reports_everything_remaining_when_docker_unavailable(tmp_path: Path):

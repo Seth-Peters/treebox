@@ -104,7 +104,11 @@ Module map:
   generic resource limits it can apply (`supported_resources`, from
   `resources.py`'s `cpus` / `memory` / `pids`) and maps them itself; the CLI
   resolves them (flag > `[resources]` config > template tier) before
-  provisioning and the record holds the effective values. Doctor-facing vocabulary
+  provisioning and the record holds the effective values. `check_resources`
+  (docker: `--cpus` against the engine's CPU count) asks the engine, so
+  `_run_session` calls it only after `preflight`; `--dry-run` skips both.
+  On `enter`, `Runner.setup_reason` (docker: the container was removed) makes
+  setup run again, which re-creates the sandbox from the record. Doctor-facing vocabulary
   (preflight detail, whether a login is a hard gate) lives in `RunnerFacts`,
   not in the run methods; teardown options (docker's `remove_volumes`) arrive
   at the runner's constructor, never through the protocol. Docker image and

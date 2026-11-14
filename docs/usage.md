@@ -207,7 +207,9 @@ path it would skip. A dry run does not copy submodules or inspect their
 destination paths, so it cannot detect
 [submodule copy conflicts](#submodule-copies-and-recovery).
 It also skips the runner preflight, including the
-[Docker user requirement](install.md#what-each-isolation-mode-needs).
+[Docker user requirement](install.md#what-each-isolation-mode-needs), and the
+check of `--cpus` against the engine's CPU count that follows it, so a dry run
+needs no Docker engine.
 Nothing on disk or in git changes.
 
 With `--cold --dry-run`, the cache part of the plan also matches the real cold
@@ -300,6 +302,10 @@ gives this warning. See
 ### Docker entry and firewall recovery
 
 treebox restarts a stopped container before entry. If the container was
+removed (a manual `docker rm`), `enter` runs setup again, which re-creates it
+from the host-owned record: the same template, firewall choice and resource
+limits as at `create` (an `enter --template` override applies, as on any
+setup). If the container was
 created with the firewall enabled, treebox runs `init-firewall.sh` on every
 entry, including entries to running containers. This step occurs before the
 agent starts or treebox emits a `--print` or `--json` command. It restores

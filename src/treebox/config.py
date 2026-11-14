@@ -140,6 +140,26 @@ class Config:
         return replace(self, **applied)
 
 
+# The top-level keys a user config may set: each one is the Config field of
+# the same name. Every other Config field is internal (set by the CLI, never
+# read from TOML), so a config that names it is an unknown key.
+USER_KEYS: frozenset[str] = frozenset(
+    {
+        "isolation",
+        "harness",
+        "base",
+        "root",
+        "env_file",
+        "firewall",
+        "template",
+        "setup_hook",
+        "caches",
+        "resources",
+        "ports",
+    }
+)
+
+
 def treebox_home() -> Path:
     """The home-level treebox directory: ``$TREEBOX_HOME`` or ``~/.treebox``.
 
@@ -207,9 +227,9 @@ def load_config(path: Path | None = None) -> Config:
     # Reject unknown top-level keys loudly: a typo'd `isolatoin`/`firewal` is
     # security posture silently not applied, the exact failure the module
     # docstring's INVALID_CONFIG contract exists to prevent. The vocabulary
-    # is the Config fields themselves (they match the accepted TOML keys
-    # one-to-one), so it cannot drift from the dataclass.
-    known = sorted(f.name for f in fields(Config))
+    # is USER_KEYS, never every Config field: an internal field is not a key
+    # a user config can set or be pointed at.
+    known = sorted(USER_KEYS)
     for key in data:
         if key not in known:
             close = difflib.get_close_matches(key, known, n=1)

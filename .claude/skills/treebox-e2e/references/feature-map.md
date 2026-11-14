@@ -41,7 +41,7 @@ code, a config key or an environment variable.
 | `create --no-fetch` | `git.py::fetch_origin` | B9 |
 | `create --firewall` | `runners/docker.py::DockerRunner._overlaid_config` | G10 |
 | `create --template` | `assets.py::template_dir` | H1, H3, B21 |
-| `create --cpus` | `cli.py::_creation_limits`, `resources.py::parse_cpus` | B26, H12 |
+| `create --cpus` | `cli.py::_creation_limits`, `resources.py::parse_cpus`, `runners/docker.py::DockerRunner.check_resources` | B26, B23, H12 |
 | `create --memory` | `cli.py::_creation_limits`, `resources.py::parse_memory` | B26, H12 |
 | `create --pids-limit` | `cli.py::_creation_limits`, `resources.py::parse_pids` | B26, H12 |
 | `create --dry-run` | `cli.py::_dry_run`, `provision.py::dry_run_plan` | B10, B10b, R39 |
@@ -108,7 +108,7 @@ code, a config key or an environment variable.
 | `error DESTINATION_CONFLICT` | `provision.py::DestinationConflictError` | R45 |
 | `error DIRTY_WORKTREE` | `cli.py::teardown` | E2 |
 | `error DOCKER_UNAVAILABLE` | `runners/docker.py::DockerRunner.preflight` | B23 |
-| `error ERROR` | `cli.py::_classify`, `runners/docker.py::DockerRunner.prepare_entry` | H9, B16 |
+| `error ERROR` | `cli.py::_classify` | B16 |
 | `error FETCH_FAILED` | `git.py::FetchError` | B9 |
 | `error FIREWALL_FAILED` | `runners/base.py::FirewallError`, `runners/docker.py::DockerRunner.prepare_entry` | H14 |
 | `error GIT_MISSING` | `git.py::GitMissingError` | B20 |
@@ -117,13 +117,13 @@ code, a config key or an environment variable.
 | `error INVALID_CONFIG` | `cli.py::_resolve_config`, `config.py::load_config` | G1, G3, G12, G16 |
 | `error INVALID_LINKAGE` | `provision.py::InvalidLinkageError` | C15 |
 | `error INVALID_NAME` | `cli.py::_validate_name`, `cli.py::template_init` | B8, F8 |
-| `error INVALID_RESOURCE` | `resources.py::ResourceLimitError`, `cli.py::_creation_limits` | B26 |
+| `error INVALID_RESOURCE` | `resources.py::ResourceLimitError`, `cli.py::_resource_flags`, `cli.py::_run_session` | B26 |
 | `error INVALID_ROOT` | `cli.py::_check_root` | B27 |
 | `error ISOLATION_MISMATCH` | `cli.py::_reconcile_with_record` | C7 |
 | `error LOCK_HELD` | `locking.py::worktree_lock` | P3 |
 | `error LOGIN_MISSING` | `cli.py::_require_agent`, `cli.py::_agent_login_check` | B25 |
 | `error MAIN_WORKTREE` | `cleanup.py::MainWorktreeError` | E9 |
-| `error MISSING_DEPENDENCY` | `runners/base.py::PreflightError` | B22 |
+| `error MISSING_DEPENDENCY` | `runners/base.py::PreflightError` | B22, B26 |
 | `error NEEDS_CONFIRMATION` | `cli.py::teardown` | E1, E7, U2 |
 | `error NOT_A_REPO` | `cli.py::_repo_root` | B19 |
 | `error NOT_FOUND` | `provision.py::NotFoundError` | C5, B10b, C18 |
@@ -215,12 +215,13 @@ code, a config key or an environment variable.
 | `behavior sandbox config outside the mount` | `runners/docker.py::DockerRunner._write_config` | H2 |
 | `behavior staged credential copies` | `harnesses.py::Harness.stage_credentials` | H2, R44 |
 | `behavior stopped container revived` | `runners/docker.py::DockerRunner.prepare_entry` | H5 |
+| `behavior removed container re-created on enter` | `runners/docker.py::DockerRunner.setup_reason`, `provision.py::enter` | H9 |
 | `behavior firewall on every entry` | `runners/docker.py::DockerRunner.prepare_entry`, `runners/docker.py::DockerRunner.setup` | H14, H18 |
 | `behavior resource limits and drift` | `runners/docker.py::DockerRunner.check_resources`, `cli.py::_check_entry_resources` | H12, G16 |
 | `behavior bundled sandbox image` | `assets.py::template_dir` | H18 |
 | `behavior bundled firewall host ports` | `assets.py::template_dir` | H18 |
 | `behavior in-container git` | `runners/docker.py::DockerRunner._inject` | H8 |
-| `behavior cleanup model` | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown` | H6, H10 |
+| `behavior cleanup model` | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown` | H6, H9, H10 |
 | `behavior .env or .gitmodules directory` | `provision.py::copy_env` | R37 |
 | `behavior stray directory hint` | `provision.py::SlugConflictError` | R38 |
 | `behavior nested worktree roots` | `models.py::Worktree.at`, `resolve.py::Candidate.registered` | R43 |

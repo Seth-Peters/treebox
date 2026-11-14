@@ -147,7 +147,9 @@ class Runner(Protocol):
     def check_resources(self, limits: ResourceLimits) -> None:
         """Refuse, before provisioning, limits the engine would refuse at
         sandbox creation (the docker runner: more CPUs than the engine has).
-        Raises ``resources.ResourceLimitError``."""
+        It may ask the engine, so the CLI calls it only after ``preflight``
+        (never on ``--dry-run``, which skips the preflight). Raises
+        ``resources.ResourceLimitError``."""
         ...
 
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
@@ -158,6 +160,13 @@ class Runner(Protocol):
         """Re-stage state that must never go stale between sessions (the docker
         runner's credential copies). Runs on EVERY ``enter``, independent of the
         lockfile-hash skip that gates ``setup`` — auth is not a cache."""
+        ...
+
+    def setup_reason(self, wt: Worktree) -> str | None:
+        """Why ``enter`` must run ``setup`` although the setup model would
+        skip it, or None. The docker runner: the worktree's container is gone
+        (a manual ``docker rm``), and ``setup`` re-creates it from the policy
+        the CLI read from the host-owned record. Called after ``preflight``."""
         ...
 
     def dry_run_setup(

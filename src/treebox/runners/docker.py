@@ -350,6 +350,9 @@ class DockerRunner:
         out = self._engine(["inspect", *ids, "--format", "{{.Config.Image}}"]).stdout.splitlines()
         return out[0].strip() if out else None
 
+    def _image_exists(self, image: str) -> bool:
+        return self._engine(["image", "inspect", image, "--format", "{{.Id}}"]).returncode == 0
+
     def _container_volumes(self, ids: list[str]) -> list[str]:
         out = self._engine(
             [
@@ -432,8 +435,8 @@ class DockerRunner:
 
     def check_resources(self, limits: ResourceLimits) -> None:
         """Docker refuses ``--cpus`` above the engine's CPU count at ``docker
-        run``, after the image build: refuse it here instead. Skipped when the
-        engine cannot be asked (preflight reports that on a real run)."""
+        run``, after the image build: refuse it here instead. The CLI calls
+        this only after ``preflight`` passed, so the engine is there to ask."""
         if limits.cpus is None:
             return
         proc = self._engine(["info", "--format", "{{.NCPU}}"])
@@ -728,6 +731,11 @@ class DockerRunner:
         the very next entry, not whenever dependencies happen to change."""
         self._refresh_credentials(wt)
         reporter.ok("credentials", "scoped copies refreshed")
+
+    def setup_reason(self, wt: Worktree) -> str | None:
+        if self._container_ids(wt):
+            return None
+        return "the sandbox container is gone - re-creating it"
 
     # --- docker argv builders --------------------------------------------------
     # Builders return the full argv (leading "docker" included) so they can be
@@ -1103,8 +1111,8 @@ class DockerRunner:
         ids = self._container_ids(wt)
         if not ids:
             raise RuntimeError(
-                f"No container exists for this worktree — re-create it: "
-                f"treebox teardown {wt.name} && treebox create {wt.name} --isolation {self.name}"
+                "No container exists for this worktree - run `treebox enter` again: "
+                "it re-creates the container from the host-owned record"
             )
         name, running, _ = self._container_state(ids[0])
         self._require_own_container(wt, name)
@@ -1147,10 +1155,10 @@ class DockerRunner:
         remaining: list[str] = []
         ids = self._container_ids(wt)
         manifest: ResourceManifest | None = None
-        if ids or self._remove_volumes:
-            try:
-                manifest = self._read_resource_manifest(wt)
-            except RuntimeError as exc:
+        try:
+            manifest = self._read_resource_manifest(wt)
+        except RuntimeError as exc:
+            if ids or self._remove_volumes:
                 reporter.warn(
                     "destructive Docker cleanup limited: authoritative host-owned "
                     f"resource manifest unavailable: {exc}"
@@ -1164,32 +1172,37 @@ class DockerRunner:
             # Intersect with the live engine list to keep retries quiet.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
             volumes = sorted(set(manifest["volumes"]) & existing)
+        # Only the exact image the host-owned manifest records is ours to
+        # remove, with or without a container: a manual `docker rm` must not
+        # leak it. An image a container uses but the manifest does not name is
+        # never removed.
+        image = manifest["image"] if manifest is not None else None
+        used = self._container_image(ids) if ids else None
+        if used and used != image:
+            reporter.warn(
+                f"image removal skipped: {used!r} is not authorized by "
+                "the host-owned resource manifest"
+            )
+        if image and used != image and not self._image_exists(image):
+            image = None  # already gone: nothing to remove or report
         container_failed = container_kept = False
         if ids:
-            image = self._container_image(ids)
-            owned_image = bool(image) and manifest is not None and image == manifest["image"]
             if self._engine_attempt(["rm", "-f", *ids], reporter=reporter):
                 reporter.ok("container", f"removed {' '.join(ids)}")
-                # A failed container rm skips image removal because it remains
-                # in use. Otherwise only the exact host-recorded image is ours.
-                if owned_image:
-                    if self._engine_attempt(["image", "rm", str(image)], reporter=reporter):
-                        reporter.ok("image", f"removed {image}")
-                    else:
-                        container_failed = True
-                        remaining.append(f"image {image} (docker image rm failed)")
-                elif image:
-                    reporter.warn(
-                        f"image removal skipped: {image!r} is not authorized by "
-                        "the host-owned resource manifest"
-                    )
             else:
                 container_failed = container_kept = True
                 remaining.append(f"container {' '.join(ids)} (docker rm failed)")
-                if owned_image:
-                    remaining.append(f"image {image} (in use by the container)")
         else:
             reporter.note("container", "none found")
+        if image and container_kept and used == image:
+            # A container that is still there still uses its image.
+            remaining.append(f"image {image} (in use by the container)")
+        elif image:
+            if self._engine_attempt(["image", "rm", image], reporter=reporter):
+                reporter.ok("image", f"removed {image}")
+            else:
+                container_failed = True
+                remaining.append(f"image {image} (docker image rm failed)")
         volumes_removed = False
         if self._remove_volumes:
             if volumes and not container_kept:
