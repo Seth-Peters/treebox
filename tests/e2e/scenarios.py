@@ -667,7 +667,16 @@ def b25(ctx: Ctx) -> None:
     ctx.check(not branch_exists(ctx, "b25"), "no branch")
 
 
-@scenario("B26", "resource limit flags: unsupported on host, invalid values refused")
+@scenario(
+    "B26",
+    "resource limit flags: unsupported on host, invalid values refused",
+    known_bug=(
+        "with no docker CLI on PATH, `create --isolation docker --cpus N` (also --dry-run, "
+        "also [resources] cpus) crashes with a traceback in DockerRunner.check_resources "
+        "instead of a classified error"
+    ),
+    known_bug_signature=r"FileNotFoundError: \[Errno 2\] No such file or directory: 'docker'",
+)
 def b26(ctx: Ctx) -> None:
     host = ctx.tb("create", "b26", *ctx.wt_args(), "--memory", "4g", "--json")
     ctx.exit_is(host, 2)

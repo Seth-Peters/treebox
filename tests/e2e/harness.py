@@ -1279,6 +1279,16 @@ def json_payloads(run: RunRecord) -> list[Any]:
     return payloads
 
 
+def runs_for_invariants(
+    all_runs: Sequence[tuple[str, RunRecord]], results: Sequence[Result]
+) -> list[tuple[str, RunRecord]]:
+    """The runs the X invariants judge: all but those of a scenario that
+    reproduced its known bug. That failure is reported once, as the known bug
+    (its runs stay in the bundle), not a second time as an X violation."""
+    known = {r.id for r in results if r.verdict == "known-bug"}
+    return [(sid, run) for sid, run in all_runs if sid not in known]
+
+
 def invariant_results(all_runs: Sequence[tuple[str, RunRecord]]) -> list[Result]:
     """The cross-cutting invariants, judged over every CLI run of the sweep."""
     cli = [(sid, r) for sid, r in all_runs if r.kind == "cli"]

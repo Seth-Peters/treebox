@@ -117,3 +117,13 @@ def test_an_incomplete_teardown_may_print_its_records_before_the_error() -> None
     assert harness.stream_violations(run(["teardown", "x", "--json"], 1, "garbage", error))
     other = '{"schemaVersion": 1, "error": {"code": "DIRTY_WORKTREE", "message": "m"}}'
     assert harness.stream_violations(run(["teardown", "x", "--json"], 5, records, other))
+
+
+def test_a_known_bugs_runs_are_not_judged_again_by_the_invariants() -> None:
+    crash = run(["create", "x", "--json"], 1, stderr="Traceback")
+    ok = run(["version"], 0, stdout="1.0\n")
+    results = [result("B26", "known-bug", "B"), result("A1", "pass")]
+    judged = harness.runs_for_invariants([("B26", crash), ("A1", ok)], results)
+    assert judged == [("A1", ok)]
+    x1 = next(r for r in harness.invariant_results(judged) if r.id == "X1")
+    assert x1.verdict == "pass"

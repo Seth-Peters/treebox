@@ -220,7 +220,12 @@ owns this setup; none needs B1 to run first.
       Expect: exit 2 `RESOURCE_UNSUPPORTED`; exit 2 `INVALID_RESOURCE`; neither
       leaves a worktree or branch; the plan has `resources: {cpus: 1.5,
       memory: "512m", pids: 64}` and its `docker run` carries `--cpus 1.5
-      --memory 512m --pids-limit 64`.
+      --memory 512m --pids-limit 64`. Known product bug on `main` (14d79ba):
+      with no docker CLI on `PATH`, a `--cpus` limit (flag or `[resources]`)
+      makes `create --isolation docker` crash with a traceback
+      (`FileNotFoundError: … 'docker'`) instead of a classified error, also
+      under `--dry-run`. Hosts without docker (the macOS CI runner) report B26
+      as KNOWN-BUG by that signature only.
 - [ ] **B27 INVALID_ROOT** - a plain file `$SBX/afile`; `create`, `enter`,
       `list` and `teardown` with `--root "$SBX/afile"` and with
       `--root "$SBX/afile/below"` (`--json`)

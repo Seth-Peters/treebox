@@ -241,7 +241,8 @@ def evidence(args: argparse.Namespace) -> int:
 
     # Cross-cutting invariants over every CLI run of the sweep.
     if selected is None or "X" in selected:
-        for result in harness.invariant_results(all_runs):
+        judged = harness.runs_for_invariants(all_runs, bundle.results)
+        for result in harness.invariant_results(judged):
             bundle.add(result, None)
         bundle.add(_pollution(real_treebox_home, before_home, before_status, fixture_dirs), None)
 
