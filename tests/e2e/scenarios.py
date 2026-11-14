@@ -1026,7 +1026,8 @@ def c16(ctx: Ctx) -> None:
     enter = ctx.tb("enter", "e2e-norec", *ctx.wt_args(), "--json")
     ctx.exit_is(enter, 5)
     hint = ctx.json_err(enter, "RECORD_MISSING").get("hint", "")
-    ctx.check("treebox teardown e2e-norec" in hint and "treebox create" in hint, f"hint: {hint}")
+    exact = shlex.quote(str(wt(ctx, "e2e-norec")))
+    ctx.check(f"treebox teardown {exact}," in hint and "treebox create" in hint, f"hint: {hint}")
     ctx.eq(enter.stdout, "", "nothing emitted")
     row = listed(ctx).get("e2e-norec", {})
     ctx.eq((row.get("isolation"), row.get("health")), ("", "unreadable_state"), "list row")
@@ -2492,10 +2493,12 @@ def r38(ctx: Ctx) -> None:
     run = ctx.tb("create", "junk", *ctx.wt_args(), "--json")
     ctx.exit_is(run, 5)
     hint = ctx.json_err(run, "SLUG_CONFLICT").get("hint", "")
+    exact = shlex.quote(str(stray))
     ctx.check(
-        "treebox teardown junk" not in hint, "hint does not recommend `treebox teardown junk`"
+        f"treebox teardown {exact}" not in hint and "treebox teardown junk" not in hint,
+        "hint does not recommend a teardown of junk",
     )
-    ctx.check("rm -rf" in hint, "hint gives the manual removal")
+    ctx.check(f"rm -rf {exact}" in hint, "hint gives the manual removal of the exact path")
     ctx.exit_is(ctx.tb("teardown", "junk", *ctx.wt_args(), "--force"), 3)
     stray.rmdir()
     ctx.exit_is(ctx.tb("create", "junk", *ctx.wt_args(), "--print"), 0)

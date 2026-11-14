@@ -335,8 +335,8 @@ Setup: `treebox create fix-auth … --json` (as B1).
       removes the directory and the registration.
 - [ ] **C16 RECORD_MISSING: recreate** - `treebox create e2e-norec … --print`, then
       `rm "$ROOT/.records/e2e-norec.json"` and `treebox enter e2e-norec … --json`
-      Expect: exit 5, `RECORD_MISSING`, hint names `treebox teardown e2e-norec`
-      and `treebox create`; nothing is emitted; `list` shows isolation `""`
+      Expect: exit 5, `RECORD_MISSING`, hint names `treebox teardown
+      $ROOT/e2e-norec` (the absolute path) and `treebox create`; nothing is emitted; `list` shows isolation `""`
       and `health: "unreadable_state"`. `treebox teardown e2e-norec … --force
       --json` (no extra flag): exit 0, the worktree is gone.
 - [ ] **C17 RECORD_CONFLICT** - with `setup_hook = ["exit 7"]`,
@@ -759,8 +759,8 @@ Each fails on `e8a7fa1` (before the fixes) and passes after them.
       says `env: absent`; enter warns `.env not copied` on stderr; no
       traceback.
 - [ ] **R38 stray directory hint (#38)** - `mkdir "$ROOT/junk"`, `treebox create junk … --json`
-      Expect: exit 5 `SLUG_CONFLICT` whose hint gives `rm -rf …` and does not
-      recommend `treebox teardown junk` (which exits 3 for it); after the
+      Expect: exit 5 `SLUG_CONFLICT` whose hint gives `rm -rf $ROOT/junk` and does
+      not recommend a teardown of `junk` (which exits 3 for it); after the
       removal, create succeeds.
 - [ ] **R39 cold dry-run (#39)** - `--dry-run --json` with and without `--cold`,
       host and docker
