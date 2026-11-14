@@ -415,7 +415,10 @@ def b7(ctx: Ctx) -> None:
     run = ctx.tb("create", "fix-auth", *ctx.wt_args(), "--json")
     ctx.exit_is(run, 5)
     err = ctx.json_err(run, "SLUG_CONFLICT")
-    ctx.check("enter" in err.get("hint", ""), "hint points at enter")
+    exact = shlex.quote(str(wt(ctx, "fix-auth")))
+    hint = err.get("hint", "")
+    ctx.check(f"treebox enter {exact}" in hint, "hint enters by the exact path")
+    ctx.check(f"treebox teardown {exact}" in hint, "hint tears down by the exact path")
 
 
 @scenario("B8", "invalid and reserved names")
@@ -779,6 +782,26 @@ def b29(ctx: Ctx) -> None:
     ctx.check(not wt(ctx, "e2e-root").exists(), "nothing provisioned")
 
 
+@scenario(
+    "B30", "the generic ERROR is the catch-all for an unclassified failure", requires=("non-root",)
+)
+def b30(ctx: Ctx) -> None:
+    created(ctx, "b30-first")  # makes the repo's .git/worktrees directory
+    registrations = ctx.repo / ".git" / "worktrees"
+    registrations.chmod(0o555)
+    try:
+        run = ctx.tb("create", "b30", *ctx.wt_args(), "--json")
+    finally:
+        registrations.chmod(0o755)
+    ctx.exit_is(run, 1)
+    err = ctx.json_err(run, "ERROR")
+    ctx.check("could not create directory" in err.get("message", ""), "the message is git's")
+    ctx.check(not wt(ctx, "b30").exists(), "no worktree")
+    ctx.check(not branch_exists(ctx, "b30"), "the branch is rolled back")
+    ledger = json.loads((ctx.fx.treebox_home / "ports.json").read_text())["blocks"]
+    ctx.eq([Path(b["worktree"]).name for b in ledger], ["b30-first"], "the new block is released")
+
+
 # --- C. enter ----------------------------------------------------------------------------
 
 
@@ -1059,7 +1082,8 @@ def _setup_d(ctx: Ctx) -> None:
 
 @scenario("D1", "human table")
 def d1(ctx: Ctx) -> None:
-    run = ctx.tb("list", *ctx.wt_args())
+    # Not a terminal: no width, so nothing wraps, also with a narrow COLUMNS.
+    run = ctx.tb("list", *ctx.wt_args(), env=dict(ctx.env, COLUMNS="30"))
     ctx.exit_is(run, 0)
     rows = {line.split()[0]: line for line in run.stdout.splitlines() if line.strip()}
     for name in ("d-one", "d-two", "d-raw"):
@@ -1067,9 +1091,11 @@ def d1(ctx: Ctx) -> None:
     ctx.check("feature/renamed" in rows.get("d-two", ""), "renamed branch under the stable name")
     ctx.check("unknown" in rows.get("d-raw", ""), "stateless registration shows unknown")
     ctx.check("host" not in rows.get("d-raw", ""), "no config default for unknown isolation")
-    # Piped output wraps at 80 columns, so a long root may span two lines.
-    flat = re.sub(r"\s+", "", run.stdout)
-    ctx.check(f"Root:{ctx.root}" in flat, "worktree-root footer")
+    ctx.check(f"  Root: {ctx.root}" in run.stdout.splitlines(), "worktree-root footer, one line")
+    ctx.check(
+        all("LAST COMMIT" in line for line in run.stdout.splitlines() if "NAME" in line),
+        "no column dropped for width",
+    )
 
 
 @scenario("D2", "json shape")
@@ -1151,7 +1177,10 @@ def e2(ctx: Ctx) -> None:
 
 @scenario("E3", "forced removal keeps the branch")
 def e3(ctx: Ctx) -> None:
-    ctx.exit_is(ctx.tb("teardown", "fix-auth", *ctx.wt_args(), "--force", "--json"), 0)
+    run = ctx.tb("teardown", "fix-auth", *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(run, 0)
+    rec = ((ctx.json_out(run) or {}).get("worktrees") or [{}])[0]
+    ctx.eq(rec.get("container"), "skipped", "host isolation: no container cleanup ran")
     path = wt(ctx, "fix-auth")
     ctx.check(not path.exists(), "directory gone")
     ctx.check(not worktree_registered(ctx, path), "registration gone")
@@ -1612,6 +1641,8 @@ def g13(ctx: Ctx) -> None:
 
 @scenario("G14", "[ports]: blocks never overlap, a full range is PORTS_EXHAUSTED")
 def g14(ctx: Ctx) -> None:
+    # A block reserved under the default range lies outside the next one.
+    ctx.eq(created(ctx, "g14-out").get("port_base"), 20000, "a block of the default range")
     with_config(ctx, "[ports]\nstart = 30000\nend = 30019\nblock_size = 10\n")
     try:
         bases = [created(ctx, name).get("port_base") for name in ("g14-a", "g14-b")]
@@ -1619,7 +1650,15 @@ def g14(ctx: Ctx) -> None:
         full = ctx.tb("create", "g14-c", *ctx.wt_args(), "--json")
         ctx.exit_is(full, 5)
         err = ctx.json_err(full, "PORTS_EXHAUSTED")
-        ctx.eq(err.get("path"), str(ctx.fx.treebox_home / "ports.json"), "error.path is the ledger")
+        ledger = str(ctx.fx.treebox_home / "ports.json")
+        ctx.eq(err.get("path"), ledger, "error.path is the ledger")
+        ctx.eq(
+            err.get("message"),
+            "No free port block of 10 is left in 30000-30019: "
+            "the range holds 2 block(s) and other worktrees reserve all 2.",
+            "the message counts the range's own blocks, not the one outside it",
+        )
+        ctx.check(ledger in err.get("hint", ""), "the hint names the ledger")
         ctx.check(not wt(ctx, "g14-c").exists() and not branch_exists(ctx, "g14-c"), "nothing made")
         ctx.exit_is(ctx.tb("teardown", "g14-a", *ctx.wt_args(), "--force", "--json"), 0)
         ctx.eq(created(ctx, "g14-c").get("port_base"), 30000, "teardown released the block")
@@ -2097,6 +2136,8 @@ def h15(ctx: Ctx) -> None:
     ctx.exit_is(run, 1)
     ctx.check("stopped or restarted" in run.stderr, "says the sandbox stopped or restarted")
     ctx.check("agent exited with status" not in run.stderr, "no agent exit line")
+    exact = shlex.quote(str(wt(ctx, "e2e-rst")))
+    ctx.check(f"treebox enter {exact}" in run.stderr, "the hint enters by the exact path")
 
 
 @scenario("H16", "a harness binary missing from the image is HARNESS_MISSING at launch")
@@ -2169,6 +2210,40 @@ def h18(ctx: Ctx) -> None:
     ctx.check("REJECT" not in rules(), "a restart outside treebox drops the rules")
     ctx.exit_is(ctx.tb("enter", "e2e-bundled", *ctx.wt_args(), "--print", timeout=600), 0)
     ctx.check("REJECT" in rules(), "the next entry re-applies the lockdown")
+
+
+@scenario("H19", "a directory in the staged login copies is CREDENTIAL_STAGE_FAILED")
+def h19(ctx: Ctx) -> None:
+    created(ctx, "e2e-credconf", *docker_args(ctx)[2:])
+    staged = ctx.root / ".containers" / "e2e-credconf" / "credentials" / "claude"
+    (staged / "settings.json").unlink()
+    (staged / "settings.json").mkdir()
+    (staged / "settings.json" / "keep").write_text("preserved\n")
+    run = ctx.tb("enter", "e2e-credconf", *ctx.wt_args(), "--json")
+    ctx.exit_is(run, 1)
+    err = ctx.json_err(run, "CREDENTIAL_STAGE_FAILED")
+    ctx.check("Cannot safely refresh credentials" in err.get("message", ""), "message says why")
+    ctx.check(str(staged) in err.get("hint", ""), "the hint names the staged directory")
+    ctx.eq(run.stdout, "", "no entry command")
+    ctx.eq((staged / "settings.json" / "keep").read_text(), "preserved\n", "nothing overwritten")
+    shutil.rmtree(staged / "settings.json")
+    ctx.exit_is(ctx.tb("enter", "e2e-credconf", *ctx.wt_args(), "--json"), 0)
+
+
+@scenario("H20", "a sandbox the engine cannot create is SANDBOX_FAILED")
+def h20(ctx: Ctx) -> None:
+    root = ctx.sbx / "wts,comma"
+    args = [*ctx.wt_args(root), "--isolation", "docker", "--template", OFFLINE_TEMPLATE]
+    run = ctx.tb("create", "e2e-comma", *args, "--json")
+    ctx.exit_is(run, 1)
+    err = ctx.json_err(run, "SANDBOX_FAILED")
+    ctx.check("Cannot mount a path containing ','" in err.get("message", ""), "message says why")
+    ctx.check("," in err.get("hint", "") and "create" in err.get("hint", ""), "hint says how")
+    label = f"label=treebox.workspace={root / 'e2e-comma'}"
+    ps = ctx.sh("docker", "ps", "-aq", "--filter", label).stdout
+    ctx.eq(ps.strip(), "", "no container")
+    gone = ctx.tb("teardown", "e2e-comma", *ctx.wt_args(root), "--force", "--json")
+    ctx.exit_is(gone, 0)
 
 
 # --- I. interactive routes (pseudo-terminal) -----------------------------------------------------
@@ -2648,6 +2723,8 @@ def u4(ctx: Ctx) -> None:
         ctx.exit_is(run, code)
         ctx.check(f"Cancelled by {signum.name}" in run.stderr, "says it was cancelled")
         ctx.check("agent exited with status" not in run.stderr, "no agent exit line")
+        exact = shlex.quote(str(wt(ctx, "u1")))
+        ctx.check(f"treebox enter {exact}" in run.stderr, "the hint enters by the exact path")
         try:
             os.kill(int(rec["pid"]), 0)
             alive = True

@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from treebox import lifecycle, record
 from treebox.cli import SCHEMA_VERSION, app
-from treebox.models import worktree_path
+from treebox.models import path_ref, worktree_path
 
 runner = CliRunner()
 
@@ -933,7 +933,31 @@ def test_enter_resolves_name_branch_and_substring(repo: Path, root: str, hermeti
     assert res.exit_code == 0  # unique: only fix-authz matches
     res = _run(["enter", "fix-", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 2  # EXIT_USAGE
-    assert json.loads(res.stderr)["error"]["code"] == "AMBIGUOUS_REF"
+    err = json.loads(res.stderr)["error"]
+    assert err["code"] == "AMBIGUOUS_REF"
+    # The hint gives the exact refs (absolute paths), never another name.
+    exact = " or ".join(path_ref(Path(root) / n) for n in ("fix-auth", "fix-authz"))
+    assert err["hint"] == f"Pass the absolute path of one, the exact ref: {exact}."
+
+
+def test_human_output_off_a_terminal_is_never_wrapped_or_cut(
+    repo: Path, tmp_path: Path, hermetic_config, monkeypatch: pytest.MonkeyPatch
+):
+    """A pipe has no width: a line consumer reads whole lines, so neither a
+    long root path nor a long commit subject is wrapped or truncated, also
+    when COLUMNS says 40. (CliRunner output is not a terminal.)"""
+    root = tmp_path / ("a-long-directory-name-for-the-worktree-root-" * 3) / "wts"
+    base = ["--repo", str(repo), "--root", str(root)]
+    assert _run(["create", "wide", *base, "--print"]).exit_code == 0
+    subject = "a commit subject that is longer than the forty columns a terminal shows"
+    assert _git(root / "wide", "commit", "--allow-empty", "-qm", subject).returncode == 0
+    monkeypatch.setenv("COLUMNS", "40")
+    res = _run(["list", *base])
+    assert res.exit_code == 0, res.output
+    lines = res.stdout.splitlines()
+    assert f"  Root: {root}" in lines
+    assert any(subject in line and line.lstrip().startswith("wide") for line in lines)
+    assert "…" not in res.stdout
 
 
 def test_enter_skips_setup_when_unchanged(repo: Path, root: str, hermetic_config):
@@ -1691,7 +1715,7 @@ def test_dry_run_existing_worktree_dir_is_slug_conflict(repo: Path, root: str, h
     assert res.stdout == ""
     err = json.loads(res.stderr)
     assert err["error"]["code"] == "SLUG_CONFLICT"
-    assert "treebox enter taken-dir" in err["error"]["hint"]
+    assert f"treebox enter {path_ref(wt)}" in err["error"]["hint"]
     assert _git(repo, "worktree", "list", "--porcelain").stdout == before
     assert record.record_path(wt).read_bytes() == record_before
     assert (wt / "setup.log").read_bytes() == setup_before
@@ -1889,7 +1913,7 @@ def test_enter_unknown_recorded_runner_is_a_loud_error(repo: Path, root: str, he
     assert res.exit_code == 5, res.output  # EXIT_CONFLICT
     err = json.loads(res.stderr)
     assert err["error"]["code"] == "RECORD_INVALID"
-    assert "treebox teardown feature-auth" in err["error"]["hint"]
+    assert f"treebox teardown {path_ref(wt)}," in err["error"]["hint"]
 
     res = _run(["teardown", "feature-auth", *base, "--force", "--json"])
     assert res.exit_code == 0, res.output
@@ -2272,7 +2296,7 @@ def test_enter_refuses_registered_worktree_missing_git_pointer(
     err = json.loads(res.stderr)
     assert err["error"]["code"] == "INVALID_LINKAGE"
     assert err["error"]["path"] == str(wt)
-    assert "treebox teardown victim" in err["error"]["hint"]
+    assert f"treebox teardown {path_ref(wt)}`" in err["error"]["hint"]
 
     # list says the same thing, and the old `missing` field keeps its value.
     (row,) = json.loads(_run(["list", *base, "--json"]).stdout)["worktrees"]
@@ -2307,7 +2331,7 @@ def test_create_refuse_hint_points_to_teardown_and_prune(repo: Path, root: str, 
     res = _run(["create", "leftover", *base, "--print", "--json"])
     assert res.exit_code == 5, res.output
     hint = json.loads(res.stderr)["error"]["hint"]
-    assert "treebox teardown leftover" in hint
+    assert f"treebox teardown {path_ref(wt)}`" in hint
     assert "worktree prune" in hint
 
     res = _run(["teardown", "leftover", *base, "--force", "--json"])
@@ -3120,7 +3144,8 @@ def test_teardown_json_host_remove_volumes_reports_none_removed(
 
     assert res.exit_code == 0, res.output
     (record,) = json.loads(res.stdout)["worktrees"]
-    assert record["container"] == "cleaned"
+    # Host isolation has no container: no cleanup ran, never "cleaned".
+    assert record["container"] == "skipped"
     assert record["volumes_removed"] is False
     assert record["removed"] is True
 
@@ -3709,7 +3734,7 @@ def test_missing_record_fails_closed_and_teardown_recovers(
     err = json.loads(res.stderr)["error"]
     assert err["code"] == "RECORD_MISSING"
     assert err["hint"] == (
-        "Tear it down and create it again: treebox teardown unrecorded, then treebox create"
+        f"Tear it down and create it again: treebox teardown {path_ref(wt)}, then treebox create"
         " (add --checkout <branch> to keep its branch)."
     )
     assert err["path"] == str(record.record_path(wt))
@@ -3807,7 +3832,7 @@ def test_invalid_record_is_classified_and_teardown_recovers(repo: Path, root: st
     assert res.exit_code == 5
     err = json.loads(res.stderr)["error"]
     assert err["code"] == "RECORD_INVALID"
-    assert "treebox teardown moved" in err["hint"]
+    assert f"treebox teardown {path_ref(wt)}," in err["hint"]
 
     res = _run(["teardown", "moved", *base, "--force", "--delete-branch", "--json"])
     assert res.exit_code == 0, res.output
@@ -3884,7 +3909,7 @@ def test_failed_setup_is_a_failed_create_and_enter_retries_it(
     log = Path(err["path"])
     assert log == lifecycle.setup_log_path(wt) and not log.is_relative_to(wt)
     assert "hook-output" in log.read_text()
-    assert "treebox enter hookfail" in err["hint"]
+    assert f"treebox enter {path_ref(wt)} " in err["hint"]
     assert wt.is_dir()
     assert record.load(wt).setup == lifecycle.SetupResult.failed("setup · hook 1", 7)
     row = _list_row(repo, root, "hookfail")

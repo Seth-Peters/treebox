@@ -138,7 +138,7 @@ container's limits cannot change in place, so:
 
 - `enter --memory 8g` on a sandbox recorded with another value is a conflict
   (exit `5`, `RESOURCE_MISMATCH`) whose hint gives the exact re-create commands
-  (`treebox teardown <name> && treebox create <name> --checkout <branch> ...`).
+  (`treebox teardown <path> && treebox create <name> --checkout <branch> ...`).
   Restating the recorded value is fine.
 - The record also keeps which limits a `create` flag chose. A limit that came
   from `[resources]` or the template, and that they now give differently, is
@@ -189,7 +189,9 @@ Values must satisfy `1024 <= start <= end <= 65535` and
 `1 <= block_size <= end - start + 1`; anything else is `INVALID_CONFIG`
 (exit `2`). A change applies to new reservations only: a worktree keeps the
 block it has, and a new block never overlaps one reserved under an older
-setting. When the range is full, `create` fails with `PORTS_EXHAUSTED` before
+setting. A block outside the new range stays reserved to its worktree, but it
+is not part of the range: `PORTS_EXHAUSTED` counts only the range's own
+blocks. When the range is full, `create` fails with `PORTS_EXHAUSTED` before
 it makes anything.
 
 ## Customizing the sandbox

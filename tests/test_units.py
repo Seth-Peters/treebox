@@ -12,7 +12,8 @@ import pytest
 
 from treebox import ecosystems
 from treebox.config import Config, load_config
-from treebox.models import Worktree, derive_name, worktree_path
+from treebox.models import Worktree, derive_name, path_ref, worktree_path
+from treebox.runners import FirewallError, SandboxError
 from treebox.runners.docker import DockerRunner
 
 
@@ -1424,8 +1425,11 @@ def test_docker_prepare_entry_without_container_points_at_enter(tmp_path: Path, 
     fake = _FakeDocker(ids="")
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
 
-    with pytest.raises(RuntimeError, match="run `treebox enter` again"):
-        runner.prepare_entry(_boxed_worktree(tmp_path))
+    wt = _boxed_worktree(tmp_path)
+    with pytest.raises(SandboxError, match="No container exists") as caught:
+        runner.prepare_entry(wt)
+    assert caught.value.hint is not None
+    assert f"treebox enter {path_ref(wt.path)} again" in caught.value.hint
 
 
 def test_docker_setup_reason_is_a_removed_container(tmp_path: Path):
@@ -1457,8 +1461,10 @@ def test_docker_setup_refuses_foreign_container(tmp_path: Path, fake_common_dir)
     runner = DockerRunner(Config(isolation="docker"), docker=fake)
     rep = _RecordingReporter()
 
-    with pytest.raises(RuntimeError, match="treebox teardown"):
-        runner.setup(_boxed_worktree(tmp_path), cold=True, reporter=rep)
+    wt = _boxed_worktree(tmp_path)
+    with pytest.raises(SandboxError, match="not created by the docker runner") as caught:
+        runner.setup(wt, cold=True, reporter=rep)
+    assert caught.value.hint == f"Remove it and re-create: treebox teardown {path_ref(wt.path)}"
 
 
 def test_docker_setup_refuses_firewall_on_unfirewalled_container(tmp_path: Path, fake_common_dir):
@@ -1471,8 +1477,11 @@ def test_docker_setup_refuses_firewall_on_unfirewalled_container(tmp_path: Path,
     fake = _FakeDocker(ids="abc123\n", name=slug, running=True, env="PATH=/bin\n")
     runner = DockerRunner(cfg, docker=fake)
 
-    with pytest.raises(RuntimeError, match="created without it"):
+    with pytest.raises(FirewallError, match="created without it") as caught:
         runner.setup(wt, cold=True, reporter=_RecordingReporter())
+    assert caught.value.hint is not None
+    recreate = f"Re-create the sandbox: treebox teardown {path_ref(wt.path)} && "
+    assert caught.value.hint.startswith(recreate)
 
 
 def _reconcile(cfg, rec, **kw):
@@ -1581,7 +1590,9 @@ def test_docker_rejects_unknown_template_keys(
     monkeypatch.setenv("TREEBOX_TEMPLATE_DIR", str(tpl))
     runner = DockerRunner(Config(isolation="docker"))
 
-    with pytest.raises(RuntimeError, match="Unsupported key"):
+    from treebox.assets import TemplateInvalidError
+
+    with pytest.raises(TemplateInvalidError, match="Unsupported key"):
         runner._merged_config(_boxed_worktree(tmp_path), cold=True)
 
 
@@ -1643,7 +1654,7 @@ def test_docker_mount_paths_with_commas_are_a_loud_error(tmp_path: Path, fake_co
     wt_path.mkdir(parents=True)
     wt = Worktree("/repo", "feat,fast", "feat,fast", "main", wt_path)
 
-    with pytest.raises(RuntimeError, match="containing ','"):
+    with pytest.raises(SandboxError, match="containing ','"):
         runner._merged_config(wt, cold=True)
 
 
@@ -2871,7 +2882,7 @@ def test_teardown_json_reports_what_was_removed(repo: Path, hermetic_config):
     assert record["branch"] == "tx"
     assert record["removed"] is True
     assert record["branch_deleted"] is False
-    assert record["container"] == "cleaned"
+    assert record["container"] == "skipped"  # host isolation: no container cleanup ran
     assert record["volumes_removed"] is False
     assert not (Path(root) / "tx").exists()
 
@@ -2899,10 +2910,10 @@ def test_teardown_json_already_gone_and_delete_branch(repo: Path, hermetic_confi
     (record,) = json.loads(res.stdout)["worktrees"]
     assert record["removed"] is False  # already gone, still exit 0
     assert record["branch_deleted"] is True
-    # The dir is gone but the state recorded at create time survives in the
-    # repo's own registration, so the recorded isolation mode still drives
-    # container teardown instead of being skipped.
-    assert record["container"] == "cleaned"
+    # The dir is gone but the record made at create time survives beside it,
+    # so the recorded (host) runner still tears down: it has no container, so
+    # it reports "skipped", never "cleaned".
+    assert record["container"] == "skipped"
 
 
 def test_teardown_pruned_worktree_by_exact_branch(repo: Path, hermetic_config):

@@ -112,10 +112,11 @@ is not a flag, an error code, a config key or an environment variable.
 | `error BRANCH_IN_USE` | create | `provision.py::BranchInUseError` | B17, B10b |
 | `error CANCELLED` | unattended, remote-workers | `cli.py::_run_session`, `system.py::run_agent` | U4, H17 |
 | `error COPY_FAILED` | template | `cli.py::template_init` | F9 |
+| `error CREDENTIAL_STAGE_FAILED` | docker-sandbox | `harnesses.py::CredentialStageError`, `harnesses.py::Harness.stage_credentials` | H19 |
 | `error DESTINATION_CONFLICT` | create | `provision.py::DestinationConflictError` | R45 |
 | `error DIRTY_WORKTREE` | teardown | `cli.py::teardown` | E2 |
 | `error DOCKER_UNAVAILABLE` | docker-sandbox | `runners/docker.py::DockerRunner.preflight` | B23 |
-| `error ERROR` | unattended | `cli.py::_classify` | B16 |
+| `error ERROR` | unattended, create | `cli.py::_classify` | B30 |
 | `error FETCH_FAILED` | create | `git.py::FetchError` | B9 |
 | `error FIREWALL_FAILED` | firewall | `runners/base.py::FirewallError`, `runners/docker.py::DockerRunner.prepare_entry` | H14 |
 | `error GIT_MISSING` | doctor, list | `git.py::GitMissingError` | B20 |
@@ -143,6 +144,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `error RESOURCE_MISMATCH` | resource-limits | `cli.py::_check_entry_resources` | H12 |
 | `error RESOURCE_UNSUPPORTED` | resource-limits | `cli.py::_refuse_unsupported_limits` | B26 |
 | `error RUNNING_AS_ROOT` | docker-sandbox | `runners/docker.py::DockerRunner.preflight` | B29 |
+| `error SANDBOX_FAILED` | docker-sandbox, remote-workers | `runners/base.py::SandboxError`, `runners/docker.py::DockerRunner.launch` | H20, H15 |
 | `error SETUP_FAILED` | create, enter | `provision.py::SetupFailedError` | C14, C17 |
 | `error SLUG_CONFLICT` | create | `provision.py::SlugConflictError` | B7, R38 |
 | `error SUBMODULE_COPY_FAILED` | create | `provision.py::SubmoduleCopyFailedError` | R45b |
@@ -203,6 +205,8 @@ is not a flag, an error code, a config key or an environment variable.
 | `behavior branch .gitmodules and dry-run submodule plan` | create | `provision.py::plan_submodules`, `provision.py::copy_submodules` | B28 |
 | `behavior pre-push guard` | create | `provision.py::create` | B13 |
 | `behavior progress and color off a terminal` | create | `output.py::Reporter` | B14 |
+| `behavior no wrapping or truncation off a terminal` | list, doctor | `output.py::new_console`, `output.py::Reporter.render_list` | D1 |
+| `behavior exact path refs in hints` | unattended, remote-workers | `models.py::path_ref` | B7, U4, H15 |
 | `behavior .env refresh on enter` | enter | `provision.py::enter` | C2 |
 | `behavior deps re-sync on manifest change` | enter | `provision.py::enter`, `ecosystems.py::lockfile_hash` | C3 |
 | `behavior ref resolution` | enter, remote-workers | `resolve.py::resolve_ref` | C4, C5 |
@@ -220,7 +224,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `behavior parallel dispatch` | create, remote-workers | `locking.py::repo_lock`, `git.py::worktree_add` | P1, P2 |
 | `behavior worktree lock` | create | `locking.py::worktree_lock` | P3 |
 | `behavior sandbox config outside the mount` | docker-sandbox | `runners/docker.py::DockerRunner._write_config` | H2 |
-| `behavior staged credential copies` | docker-sandbox | `harnesses.py::Harness.stage_credentials` | H2, R44 |
+| `behavior staged credential copies` | docker-sandbox | `harnesses.py::Harness.stage_credentials` | H2, R44, H19 |
 | `behavior stopped container revived` | docker-sandbox | `runners/docker.py::DockerRunner.prepare_entry` | H5 |
 | `behavior removed container re-created on enter` | docker-sandbox | `runners/docker.py::DockerRunner.setup_reason`, `provision.py::enter` | H9 |
 | `behavior firewall on every entry` | firewall | `runners/docker.py::DockerRunner.prepare_entry`, `runners/docker.py::DockerRunner.setup` | H14, H18 |
@@ -228,7 +232,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `behavior bundled sandbox image` | docker-sandbox, template | `assets.py::template_dir` | H18 |
 | `behavior bundled firewall host ports` | firewall | `assets.py::template_dir` | H18 |
 | `behavior in-container git` | docker-sandbox | `runners/docker.py::DockerRunner._inject` | H8 |
-| `behavior cleanup model` | teardown, docker-sandbox | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown` | H6, H9, H10 |
+| `behavior cleanup model` | teardown, docker-sandbox | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown`, `runners/host.py::HostRunner.teardown` | H6, H9, H10, E3 |
 | `behavior .env or .gitmodules directory` | create | `provision.py::copy_env` | R37 |
 | `behavior stray directory hint` | create | `provision.py::SlugConflictError` | R38 |
 | `behavior nested worktree roots` | enter, teardown | `models.py::Worktree.at`, `resolve.py::Candidate.registered` | R43 |

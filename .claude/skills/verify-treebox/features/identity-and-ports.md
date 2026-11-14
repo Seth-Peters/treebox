@@ -27,14 +27,14 @@ Preconditions: the fixture, `e2e_doctor` all `ok`. No engine is needed.
 
 - **Identity.** `treebox create id-a --repo "$REPO" --root "$ROOT" --json` exits 0 with `id` (10 hex), `port_base` 20000, `port_count` 10. A launch, `treebox create id-b --repo "$REPO" --root "$ROOT" </dev/null`, prints the stub's record with `treebox_name=id-b`, `treebox_id=<id>`, `treebox_port_base=20010`, `treebox_port_count=10`. `treebox list --repo "$REPO" --root "$ROOT" --json` shows the same `id` and `port_base` for both, and `"$TREEBOX_HOME/ports.json"` has one block per worktree with its `worktree` and `repo` paths.
 - **Range.** `printf '[ports]\nstart = 30000\nend = 30019\nblock_size = 10\n' > "$TREEBOX_CONFIG"`. `treebox create g14-a …` and `treebox create g14-b …` (each `--repo "$REPO" --root "$ROOT" --json`) get `port_base` 30000 and 30010.
-- **Exhausted.** `treebox create g14-c --repo "$REPO" --root "$ROOT" --json` exits 5 `PORTS_EXHAUSTED`, `error.path` `$TREEBOX_HOME/ports.json`; no `$ROOT/g14-c` and no `g14-c` branch.
+- **Exhausted.** `treebox create g14-c --repo "$REPO" --root "$ROOT" --json` exits 5 `PORTS_EXHAUSTED`, `error.path` `$TREEBOX_HOME/ports.json`, `error.message` `No free port block of 10 is left in 30000-30019: the range holds 2 block(s) and other worktrees reserve all 2.` (the `id-a` and `id-b` blocks from **Identity** lie outside the range and are not counted), and the hint names the ledger; no `$ROOT/g14-c` and no `g14-c` branch.
 - **Release.** `treebox teardown g14-a --repo "$REPO" --root "$ROOT" --force --json` exits 0; then `treebox create g14-c --repo "$REPO" --root "$ROOT" --json` exits 0 with `port_base` 30000. `treebox enter g14-b --repo "$REPO" --root "$ROOT" --json` keeps 30010. Reset with `: > "$TREEBOX_CONFIG"`.
 - **Lost entry.** Remove `g14-b`'s block from the ledger (`jq '.blocks |= map(select(.worktree | endswith("/g14-b") | not))' "$TREEBOX_HOME/ports.json"` into a temp file and `mv`), then `treebox enter g14-b --repo "$REPO" --root "$ROOT" --json`: exit 0, `port_base` 30010 again, and the ledger has its block back.
 - **Invalid ledger.** `echo 'not json' > "$TREEBOX_HOME/ports.json"`, note its `shasum`, then `treebox create g15 --repo "$REPO" --root "$ROOT" --json`. Exit 1 `PORT_LEDGER_INVALID`, `error.path` the ledger, the `shasum` unchanged, no `$ROOT/g15`.
 
 ## Gotchas
 
-- The ledger is machine-wide per `TREEBOX_HOME`: blocks of every repo and root count. The `PORTS_EXHAUSTED` message counts blocks outside the configured range too (after **Identity** and **Range** in one fixture it says `4 block(s)` for a range of two blocks).
+- The ledger is machine-wide per `TREEBOX_HOME`: blocks of every repo and root count. A block reserved under an earlier, wider range stays reserved to its worktree (it is never handed out again, and a block that straddles the range edge takes the range block it overlaps), but `PORTS_EXHAUSTED` counts only the configured range's own blocks.
 - `--dry-run` reserves nothing, so it can show the block the next real create gets.
 - A teardown that is not complete (`TEARDOWN_INCOMPLETE`) keeps the block until a retry finishes.
 - `TREEBOX_ID` is derived from the path: a worktree created again at the same path gets the same `id`.

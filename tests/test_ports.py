@@ -293,6 +293,41 @@ def test_range_exhaustion_is_classified_before_anything_is_provisioned(
     assert len(_ledger(isolated_treebox_home)) == 1
 
 
+def test_exhaustion_counts_only_the_blocks_of_the_configured_range(
+    repo: Path, tmp_path: Path, isolated_treebox_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocks reserved under an earlier, wider range stay taken, but they are
+    not part of the new range: the message counts the range's own blocks,
+    and a block that straddles the range edge takes the range block it
+    overlaps (it is never handed out a second time)."""
+    root = str(tmp_path / "wts")
+    cfg = tmp_path / "config.toml"
+    monkeypatch.setenv("TREEBOX_CONFIG", str(cfg))
+    # Earlier config: blocks of 10 from 30000; "edge" takes 30010-30019.
+    hook = 'setup_hook = ["true"]\n'
+    cfg.write_text(hook + "[ports]\nstart = 30000\nend = 30039\n")
+    for name in ("low", "edge", "high"):
+        assert _create(repo, root, name).exit_code == 0
+    assert _run(["teardown", "low", "--repo", str(repo), "--root", root, "--force"]).exit_code == 0
+    # New config: blocks of 5 from 30005 to 30014. 30005-30009 is free, and
+    # 30010-30014 overlaps "edge"; "high" (30020-30029) is outside the range.
+    cfg.write_text(hook + "[ports]\nstart = 30005\nend = 30014\nblock_size = 5\n")
+    first = _create(repo, root, "first")
+    assert json.loads(first.stdout)["port_base"] == 30005
+
+    full = _create(repo, root, "second")
+    assert full.exit_code == EXIT_CONFLICT
+    err = json.loads(full.stderr)["error"]
+    assert err["code"] == "PORTS_EXHAUSTED"
+    assert err["message"] == (
+        "No free port block of 5 is left in 30005-30014: "
+        "the range holds 2 block(s) and other worktrees reserve all 2."
+    )
+    assert str(isolated_treebox_home / "ports.json") in err["hint"]
+    assert "treebox teardown <worktree path>" in err["hint"]
+    assert sorted(e["base"] for e in _ledger(isolated_treebox_home)) == [30005, 30010, 30020]
+
+
 @pytest.mark.parametrize(
     ("damage", "code"),
     [

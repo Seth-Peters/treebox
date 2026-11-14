@@ -2,13 +2,13 @@
 # exit: 0
 # --- stdout ---
 
-  NAME                BRANCH              ISOLATION  AGE  DEPS     ENV
-  ──────────────────────────────────────────────────────────────────────────
-  golden--slash       golden/slash        host        Xs  ● fresh  ● present
-  golden-docker       golden-docker       docker      Xs  ● fresh  ● present
-  golden-docker-json  golden-docker-json  docker      Xs  ● fresh  ● present
-  golden-host         golden-host         host        Xs  ● fresh  ● present
-  golden-host-json    golden-host-json    host        Xs  ● fresh  ● present
+  NAME                BRANCH              ISOLATION  LAST COMMIT  AGE  DEPS     ENV
+  ───────────────────────────────────────────────────────────────────────────────────────
+  golden--slash       golden/slash        host       init          Xs  ● fresh  ● present
+  golden-docker       golden-docker       docker     init          Xs  ● fresh  ● present
+  golden-docker-json  golden-docker-json  docker     init          Xs  ● fresh  ● present
+  golden-host         golden-host         host       init          Xs  ● fresh  ● present
+  golden-host-json    golden-host-json    host       init          Xs  ● fresh  ● present
 
   Summary: 5 worktrees
   Root: __ROOT__/wts

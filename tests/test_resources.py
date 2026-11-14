@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from treebox import lifecycle, record, resources
 from treebox.cli import EXIT_CONFLICT, EXIT_ERROR, EXIT_USAGE, app
 from treebox.config import Config, load_config
-from treebox.models import Worktree
+from treebox.models import Worktree, path_ref
 from treebox.resources import ResourceLimitError, ResourceLimits
 from treebox.runners import docker as dr
 from treebox.runners.docker import DockerRunner, _split_limit_args
@@ -504,7 +504,7 @@ def test_enter_refuses_a_record_without_resources_and_teardown_removes_it(
     error = json.loads(res.stderr)["error"]
     assert error["code"] == "RECORD_INVALID"
     assert "missing key(s) resources" in error["message"]
-    assert "treebox teardown lim" in error["hint"]
+    assert f"treebox teardown {path_ref(wt)}," in error["hint"]
     res = _run(["teardown", "lim", "--repo", str(repo), "--root", root, "--force", "--json"])
     assert res.exit_code == 0, res.output
     assert not wt.exists() and not path.exists()
@@ -595,7 +595,8 @@ def test_enter_with_a_different_limit_is_a_conflict_with_recreate_commands(
     error = json.loads(res.stderr)["error"]
     assert error["code"] == "RESOURCE_MISMATCH"
     assert error["hint"].endswith(
-        "treebox teardown lim && treebox create lim --checkout lim --isolation docker "
+        f"treebox teardown {path_ref(Path(root) / 'lim')} && treebox create lim --checkout lim "
+        "--isolation docker "
         "--template default -H claude --cpus 1.5 --memory 8g --pids-limit 512"
     )
     # The record is unchanged: it is what the sandbox has.

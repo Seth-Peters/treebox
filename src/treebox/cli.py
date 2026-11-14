@@ -44,7 +44,7 @@ from . import (
     system,
 )
 from .config import Config, load_config, validate_config
-from .harnesses import HARNESSES, VALID_HARNESSES, Harness, get_harness
+from .harnesses import HARNESSES, VALID_HARNESSES, CredentialStageError, Harness, get_harness
 from .models import (
     PLACEHOLDER_PREFIX,
     DepsFreshness,
@@ -57,6 +57,7 @@ from .models import (
     is_valid_name,
     is_valid_template_name,
     path_is_under,
+    path_ref,
     placeholder_branch,
     same_path,
     worktree_id,
@@ -72,6 +73,7 @@ from .runners import (
     HostRunner,
     PreflightError,
     Runner,
+    SandboxError,
     get_runner,
 )
 from .runners.docker import has_resource_manifest
@@ -256,7 +258,7 @@ def _record_hint(exc: record.RecordError) -> str:
     worktree down and create it again. Never a fallback to config defaults or
     to the worktree's sandbox-writable state."""
     return (
-        f"Tear it down and create it again: treebox teardown {exc.worktree.name}, "
+        f"Tear it down and create it again: treebox teardown {path_ref(exc.worktree)}, "
         "then treebox create (add --checkout <branch> to keep its branch)."
     )
 
@@ -384,7 +386,7 @@ def _recreate_command(rec: record.WorktreeRecord, branch: str | None, flags: Res
     if rec.firewall:
         create.append("--firewall")
     create += ["--template", rec.template, "-H", rec.harness, *flags.cli_flags()]
-    return f"treebox teardown {name} && {shlex.join(create)}"
+    return f"treebox teardown {path_ref(rec.worktree)} && {shlex.join(create)}"
 
 
 def _check_entry_resources(
@@ -648,6 +650,13 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
     if isinstance(exc, FirewallError):
         return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
+    if isinstance(exc, SandboxError):
+        return _ErrorInfo(EXIT_ERROR, "SANDBOX_FAILED", exc.hint)
+    if isinstance(exc, CredentialStageError):
+        return _ErrorInfo(EXIT_ERROR, "CREDENTIAL_STAGE_FAILED", exc.hint)
+    # The one catch-all: a failure no classified cause covers, for example a
+    # git command that failed in a way treebox does not anticipate. The
+    # message is the cause (git's own words).
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -1287,7 +1296,7 @@ def _run_session(
             code=128 + exc.signum,
             error_code="CANCELLED",
             hint=f"The worktree is kept. Start the agent again: treebox enter "
-            f"{outcome.worktree.name}",
+            f"{path_ref(outcome.worktree.path)}",
         ) from exc
     except RuntimeError as exc:
         raise _handle(reporter, exc, json_out=False) from exc
@@ -1874,7 +1883,7 @@ def teardown(
                 code=EXIT_CONFLICT,
                 error_code="WORKTREE_LOCKED",
                 hint=f"treebox never removes a locked worktree. Unlock it first: "
-                f"git -C {repo_path} worktree unlock {cand.path}",
+                f"git -C {path_ref(repo_path)} worktree unlock {path_ref(cand.path)}",
                 path=cand.path,
                 json_out=json_out,
             )
