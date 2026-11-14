@@ -557,8 +557,9 @@ Setup: install the offline template (`tests/e2e/offline-template`) as
 pass `--isolation docker --template e2e-offline` (`…` below). The template
 builds with no network once its pinned base image is present, and its agent is
 the stub, so no scenario here needs the bundled 5.6 GB image or launches a real
-agent. Without a reachable engine or the base image, every H scenario is a
-SKIP, never a pass.
+agent. Its base image declares no `VOLUME`, so its containers get no
+anonymous volume (X5 fails if one appears). Without a reachable engine or the
+base image, every H scenario is a SKIP, never a pass.
 
 **Name every worktree here with the `e2e-` prefix** (see the docker naming marker
 in the preamble): the container/image become `treebox-e2e-*`, so `e2e_cleanup` /
@@ -837,7 +838,17 @@ Setup: `treebox create u1 … --json`.
       `~/.treebox`, no stray `treebox-e2e.*` dirs left in `$TMPDIR`,
       `git -C <treebox repo> status` unchanged by the run, and - if group H ran -
       **no leftover docker artifacts**: `docker ps -a --filter name=treebox-e2e-`
-      and `docker images 'treebox-e2e-*'` both empty. `e2e_cleanup` reaps these via
-      `e2e_reap_docker`; if a run crashed before cleanup, call `e2e_reap_docker`
-      directly (it only removes `treebox-e2e-*`, never real worktrees). This check
-      only works because every group-H worktree carries the `e2e-` name prefix.
+      and `docker images 'treebox-e2e-*'` both empty, and no volume the run
+      created remains, named or anonymous. **No docker scenario leaves a volume
+      without the `treebox-e2e-` prefix**: an anonymous volume (a base image
+      `VOLUME`) or a mount with another name fails X5 even when the run's own
+      reaper removed it. The run follows `docker events` from its start and
+      claims a volume only when the engine reported it created during the run
+      and mounted into a `treebox-e2e-*` container, so it never touches a
+      volume that existed before or that other work on the same engine made.
+      By hand, compare `docker volume ls` before and after. `e2e_cleanup` reaps
+      via `e2e_reap_docker`; if a run crashed before cleanup, call
+      `e2e_reap_docker` directly (it only removes `treebox-e2e-*`, and the
+      anonymous volumes of `treebox-e2e-*` containers with `docker rm -v`,
+      never real worktrees). This check only works because every group-H
+      worktree carries the `e2e-` name prefix.

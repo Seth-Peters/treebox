@@ -3,9 +3,12 @@
 # controlled stub (tests/e2e/stub-agent), shipped as post-create.sh and linked
 # as claude and codex, so a launch in this sandbox never starts a real agent.
 #
-# The base image is pinned by digest (alpine/git 2.54.0, multi-arch index) so
-# a run is reproducible and the local copy satisfies the build offline.
-FROM alpine/git:2.54.0@sha256:6a1fdb962814ca11508ca8d1bab94375b5b7ac4e4a9a40981c29fc32c02f095d
+# The base image is pinned by digest (buildpack-deps trixie-scm, the official
+# Debian image with git, multi-arch index) so a run is reproducible and the
+# local copy satisfies the build offline. It declares no VOLUME: a base image
+# VOLUME gives every container an anonymous volume, and `docker rm -f` (how
+# treebox removes a container) leaves that volume behind on the engine.
+FROM buildpack-deps:trixie-scm@sha256:4f34e1d673fdb65371de9f88bdd32c4e30152fe692b35604aef5c0b3c0e6da10
 
 ARG TZ=UTC
 ARG USER_UID=1000
@@ -28,6 +31,4 @@ RUN chmod 0755 /usr/local/bin/post-create.sh \
   && ln -s post-create.sh /usr/local/bin/claude \
   && ln -s post-create.sh /usr/local/bin/codex
 
-# alpine/git's entrypoint is `git`; treebox runs its own keep-alive command.
-ENTRYPOINT []
 WORKDIR /
