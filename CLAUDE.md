@@ -27,7 +27,7 @@ uv run --extra dev mypy                 # strict type check (config in pyproject
 uv run --extra dev pre-commit install   # install lint/format/strict type-check hooks (see CONTRIBUTING.md)
 scripts/golden-diff.sh                  # diff CLI output against tests/golden snapshots
 ./scripts/validate.sh                   # full gate: lint + typecheck + shell assets + tests + snapshots + smoke
-uv run python tests/e2e/run.py evidence --out DIR   # e2e scenarios -> evidence bundle (treebox-e2e skill)
+uv run python tests/e2e/run.py evidence --out DIR   # e2e scenarios -> evidence bundle (verify-treebox skill)
 uv pip install -e ".[dev]"              # editable dev environment
 uv run --extra docs mkdocs serve        # docs site (docs/ + mkdocs.yml), live-reloading
 uv run --extra docs mkdocs build --strict   # build docs to site/ (gitignored)
@@ -38,6 +38,12 @@ handling, shell assets, or CLI output; it includes the golden CLI-output
 snapshots and shell asset checks. Use `scripts/golden-diff.sh --update` only
 after an intentional output change has been agreed. `pytest` is enough for
 smaller changes.
+
+To verify a change end to end, drive one feature by hand, or produce
+verification evidence, use the `verify-treebox` skill
+(`.claude/skills/verify-treebox/`: a throwaway fixture where `treebox` is this
+checkout's build, and a per-feature map in `features/`). The
+`maintain-verify-treebox` skill keeps that map in step with the CLI.
 
 ## Architecture
 

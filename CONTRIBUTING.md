@@ -59,7 +59,8 @@ Docker is reachable, the real engine, with an offline template and a stub
 agent: no real agent ever launches) and writes an evidence bundle outside the
 repository. The `E2E evidence` workflow runs the same command on such pull
 requests and uploads the bundle; link that run in your PR. See the
-`treebox-e2e` skill (`.claude/skills/treebox-e2e/SKILL.md`).
+`verify-treebox` skill (`.claude/skills/verify-treebox/SKILL.md`), whose
+feature map (`features/`) also shows how to drive each feature by hand.
 
 ```bash
 uv run python tests/e2e/run.py evidence --out "$TMPDIR/treebox-evidence"
@@ -82,6 +83,31 @@ For docs-only changes, this is enough:
 ```bash
 uv run --extra docs mkdocs build --strict
 ```
+
+## Verification results in the pull request
+
+Each pull request must contain the results of the `verify-treebox` skill
+(`.claude/skills/verify-treebox/SKILL.md`) in its description, under a
+`## Verification` heading. A pull request without them is not ready for review.
+
+Run the skill on the head of your branch. Its "Evidence" section gives the
+shape of the results:
+
+```markdown
+## Verification
+- `./scripts/validate.sh`: pass (N tests)
+- e2e evidence (`run.py evidence --groups B,E`): N pass / 0 fail / N skip · H skipped (no docker engine)
+- Features driven (verify-treebox): create, teardown
+- Changed behavior, exercised:
+  - `treebox teardown ghost --json` → exit 3, `error.code: NOT_FOUND` (was exit 1)
+```
+
+- Report only checks that you ran and saw pass.
+- A skipped check is not a passed check. Give the reason for each skip.
+- If a check fails and you cannot correct it, put the failure in the
+  description as it is. Do not hide it.
+- A docs-only change needs only the docs build, and its description says so.
+- Pull requests from a bot, such as Dependabot, are exempt. CI covers them.
 
 ## Commit messages
 

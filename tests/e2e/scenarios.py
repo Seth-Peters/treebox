@@ -1,10 +1,10 @@
 """The executable treebox scenarios.
 
 Each function implements the scenario with the same id in
-``.claude/skills/treebox-e2e/references/scenarios.md``; that file holds the
+``.claude/skills/verify-treebox/references/scenarios.md``; that file holds the
 prose (command, intent, pass criterion) and this one the checks, so the two
 never duplicate each other's text. ``tests/test_e2e_map.py`` keeps the ids,
-the feature map and the source in step.
+the route table and the source in step.
 
 Every scenario runs on a fresh fixture with its group setup. Each scenario
 creates the state it needs, so selecting one id never requires an earlier

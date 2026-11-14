@@ -2,7 +2,7 @@ name: E2E evidence
 
 # Runs the treebox end-to-end scenarios against the real CLI and writes an
 # evidence bundle (tests/e2e/run.py; scenarios in
-# .claude/skills/treebox-e2e/references/scenarios.md). On Linux the docker
+# .claude/skills/verify-treebox/references/scenarios.md). On Linux the docker
 # group runs on the runner's real Docker engine with the offline template and
 # the stub agent; GitHub's macOS runners have no Docker, so there the docker
 # group is reported as skipped. The bundle is uploaded as an artifact and the
@@ -14,7 +14,7 @@ on:
       - "src/treebox/runners/**"
       - "src/treebox/assets/**"
       - "tests/e2e/**"
-      - ".claude/skills/treebox-e2e/**"
+      - ".claude/skills/verify-treebox/**"
       - ".github/workflows/e2e.yml"
   schedule:
     - cron: "23 3 * * *"
