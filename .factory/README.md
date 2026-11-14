@@ -1,3 +1,5 @@
+> **Work in progress:** the factory is not yet ready for feature development.
+
 # treebox software factory
 
 A small, code-defined factory: a developer hands over a spec, and the factory
@@ -51,9 +53,9 @@ skills, MIT).
    The worker clones and pushes with it; never commit it.
 3. **Apply the factory** and commit the lockfile:
    ```bash
-   cd factory && ant apply . && cd ..
-   uv run --project factory factory vault set-github-token
-   git add factory/claude-lock.json && git commit -m "chore(factory): apply" && git push
+   cd .factory && ant apply . && cd ..
+   uv run --project .factory factory vault set-github-token
+   git add .factory/claude-lock.json && git commit -m "chore(factory): apply" && git push
    ```
 
 ## Use it
@@ -61,11 +63,11 @@ skills, MIT).
 From Claude Code, say "delegate this" with your spec. The `delegate` skill runs:
 
 ```bash
-uv run --project factory factory delegate --title "<title>" --brief-file spec.md
-uv run --project factory factory delegate --issue 61            # an existing issue
-uv run --project factory factory steer --issue 61 "also cover --json"
-uv run --project factory factory status --issue 61 [--wait]
-uv run --project factory factory transcript --issue 61 --out /tmp/runs
+uv run --project .factory factory delegate --title "<title>" --brief-file spec.md
+uv run --project .factory factory delegate --issue 61            # an existing issue
+uv run --project .factory factory steer --issue 61 "also cover --json"
+uv run --project .factory factory status --issue 61 [--wait]
+uv run --project .factory factory transcript --issue 61 --out /tmp/runs
 ```
 
 The worker runs the factory code on `origin/main`, so `delegate` refuses while
@@ -86,7 +88,7 @@ and commit the lockfile.
 ## Develop the CLI
 
 ```bash
-make factory-test     # ruff, mypy --strict, pytest (in factory/)
+make factory-test     # ruff, mypy --strict, pytest (in .factory/)
 make factory-check    # validate the factory definition
 make factory-plan     # ant apply --dry-run
 ```

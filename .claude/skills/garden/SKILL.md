@@ -29,7 +29,7 @@ Gather candidate mistakes from three places. Record each with its evidence
   `gh pr list --state merged --limit 10 --json number,title,mergedAt`. Look for
   workarounds, copied blocks, and comments that explain a workaround.
 - **Creep in the code.** Count these now and compare with the counts recorded
-  in `factory/garden.md`; a count that grew is a finding:
+  in `.factory/garden.md`; a count that grew is a finding:
 
   ```bash
   grep -rnF --include='*.py' "# type: ignore" src | wc -l
@@ -108,9 +108,9 @@ didn't work.
 Do not force an abstraction. Prefer boring code if the current shape is
 already clear, local, and unlikely to grow.
 
-## 4. Queue it in `factory/garden.md`
+## 4. Queue it in `.factory/garden.md`
 
-Every class goes in the table in `factory/garden.md`: what it is, the
+Every class goes in the table in `.factory/garden.md`: what it is, the
 evidence, how many times, the level picked, and its status (`queued`,
 `issue #N`, or `enforced by <check>`). Update the creep counts there too.
 This file is the gardener's memory between runs: read it first, so a class
