@@ -16,7 +16,7 @@ Read this index first, then use the matching feature file as the recipe; `../ref
 - Start every feature from a fresh fixture with its file's `Preconditions:`. A failed drive leaves state; `e2e_cleanup`, then a new fixture.
 - Every command is literal and is what a user types. Always pass `--repo "$REPO" --root "$ROOT"` to commands that act on worktrees.
 - Use `--json` for assertions and read the field (`jq`, or `python3 -c 'import json,sys; …'`); exact human text belongs to `tests/golden/`.
-- Variables in front of a command (`NO_COLOR=1 treebox …`, `TREEBOX_CONFIG=… treebox …`) pass through to treebox. To change the `PATH` treebox sees, set `E2E_PATH`; a `claude` or `codex` on it that is not the stub is refused.
+- Variables in front of a command (`NO_COLOR=1 treebox …`, `TREEBOX_CONFIG=… treebox …`) pass through to treebox. To change the `PATH` treebox sees, set `E2E_PATH` and start it with `$SBX/safe-bin` (the fake Keychain tool alone); a `claude` or `codex` on it that is not the stub, or the real macOS `security`, is refused (exit 125).
 - Give every launch (a `create` or `enter` without `--json`, `--print` or `--dry-run`) `</dev/null` in scripts, so the agent cannot read the script.
 - Write `$TREEBOX_CONFIG` for one bullet, then reset it with `: > "$TREEBOX_CONFIG"`.
 - Name every docker worktree `e2e-…`.

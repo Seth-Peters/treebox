@@ -31,14 +31,15 @@ Preconditions: the fixture, `e2e_doctor` all `ok`. The fixture installs `e2e-off
 - **Exists and force.** `treebox template init mytpl --json` again exits 5 `TEMPLATE_EXISTS`, the hint names `--force`. Mark it (`echo "# marker" >> "$TREEBOX_HOME/templates/mytpl/Dockerfile"`). `treebox template init copytpl --from mytpl --json` exits 0 and the copy's `Dockerfile` ends with `# marker`. `treebox template init mytpl --force --json` exits 0 and the marker is gone.
 - **Bad source and name.** `treebox template init x --from ghost --json` exits 3 `TEMPLATE_NOT_FOUND`, and no `x` dir exists. `treebox template init ../escape --json` exits 2 `INVALID_NAME`. `treebox template init mytpl --from mytpl --force --json` exits 2 `TEMPLATE_CONFLICT`.
 - **All-or-nothing.** `chmod 555 "$TREEBOX_HOME/templates"`, then `treebox template init denied --json`: exit 1 `COPY_FAILED`. With `copytpl` marked and the dir still `555`, `treebox template init copytpl --force --json`: exit 1 `OVERWRITE_FAILED`, and `shasum` of its `Dockerfile` is the same before and after. `chmod 755 "$TREEBOX_HOME/templates"` after.
-- **Override.** `mkdir "$SBX/tdir"`, then `TREEBOX_TEMPLATE_DIR="$SBX/tdir" treebox template list --json` exits 0 with `templateDirOverride` `$SBX/tdir`, and `TREEBOX_TEMPLATE_DIR="$SBX/tdir" treebox template path any-name` prints `$SBX/tdir`.
+- **Override.** `mkdir "$SBX/tdir"`, then `TREEBOX_TEMPLATE_DIR="$SBX/tdir" treebox template list --json` exits 0 with `templateDirOverride` `$SBX/tdir` and every row's `source` `env` (the human list warns that the variable overrides every template), and `TREEBOX_TEMPLATE_DIR="$SBX/tdir" treebox template path any-name` prints `$SBX/tdir`.
 - **Resolve before provisioning.** Copy `mytpl` to `broken` and write `{bad` into its `container.json`. `treebox create e2e-broken --repo "$REPO" --root "$ROOT" --isolation docker --template broken --json` exits 1 `TEMPLATE_INVALID` (the hint names `treebox template path broken`) and `$ROOT` was never made. `treebox create e2e-ghost … --isolation docker --template ghost --json` exits 3 `TEMPLATE_NOT_FOUND`, the hint names `treebox template init ghost`. Neither needs an engine.
 
 ## Gotchas
 
 - `template path` has no `--json`; `treebox template path ghost --json` is a usage error (exit 2), not the not-found exit 3.
 - Under host isolation an unknown `--template` is accepted (`treebox create h-ghost --template ghost --json` exits 0): templates are docker-only.
-- `--force` and `--from` act on `$TREEBOX_HOME/templates` only. Never let a drive run with the real `~/.treebox`; `e2e_doctor` checks the scratch home.
+- `init` writes only to `$TREEBOX_HOME/templates`. Its source, though, follows the resolver: with `TREEBOX_TEMPLATE_DIR` set, `treebox template init t2` copies the override dir, not the bundled default.
+- `.treebox-tmp` is the reserved staging dir: `treebox template init .treebox-tmp` exits 2 `INVALID_NAME`. Never let a drive run with the real `~/.treebox`; `e2e_doctor` checks the scratch home.
 - The permission checks need a non-root user: root ignores file modes.
 - Building the bundled `default` needs the network and about 5.6 GB. Drive docker features with `--template e2e-offline`.
 - Scenarios: F1, F2, F3, F4, F5, F6, F7, F8, F9, B21, H3, G11, G13, H11, H18.

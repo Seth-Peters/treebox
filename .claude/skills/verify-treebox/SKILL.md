@@ -33,7 +33,7 @@ source .claude/skills/verify-treebox/fixture.sh
 It builds the fixture with the same code as the evidence run (`tests/e2e/run.py fixture`) and prints `fixture ready: SBX=… REPO=… ROOT=… TREEBOX_HOME=…` on stderr. Ready means that line was printed and `e2e_doctor` is all `ok`. After it:
 
 - `treebox` is `$SBX/bin/treebox`, first on `PATH`: this checkout's console script with the fixture's environment. It adds no output of its own, so stream checks see only treebox.
-- `$SBX`, `$REPO`, `$ROOT`: sandbox root, fixture clone, worktree root. `$TREEBOX_HOME`, `$TREEBOX_CONFIG`, `$E2E_HOME`: the scratch treebox home, config and `HOME`. `$E2E_TEMPLATE` is `e2e-offline`.
+- `$SBX`, `$REPO`, `$ROOT`: sandbox root, fixture clone, worktree root. `$SBX/stub-bin` holds the stub agent and the fake `security`; `$SBX/safe-bin` holds the fake `security` alone. `$TREEBOX_HOME`, `$TREEBOX_CONFIG`, `$E2E_HOME`: the scratch treebox home, config and `HOME`. `$E2E_TEMPLATE` is `e2e-offline`.
 - Every drive is one command, for example `treebox create fix-auth --repo "$REPO" --root "$ROOT" --json`.
 
 Shell state does not survive between separate tool calls. In a new shell, attach to the same fixture instead of building another: `source .claude/skills/verify-treebox/fixture.sh --attach "$SBX"` (the path is in the ready line). Sourcing without `--attach` gives a fresh fixture.
@@ -52,7 +52,7 @@ Each line is `ok`, `FAIL` or `note`; it returns 1 on any `FAIL`. It proves:
 - `TREEBOX_CONFIG`, `HOME` and `TREEBOX_HOME` are scratch paths under `$SBX`.
 - `treebox doctor` passes, its `agent: claude` row is `$SBX/stub-bin/claude` (the stub is first on treebox's `PATH`) and its `login: claude` row is the fake login under `$SBX/home`.
 - `engine: reachable`, or a `note` that the engine is not reachable and docker work is SKIP.
-- A `note` for each pass-through variable set in your shell (`NO_COLOR`, `TZ`, `TREEBOX_NON_INTERACTIVE`, `TREEBOX_TEMPLATE_DIR`, `XDG_CACHE_HOME`, `DOCKER_HOST`).
+- A `note` for each pass-through variable set in your shell (`NO_COLOR`, `TZ`, `TREEBOX_NON_INTERACTIVE`, `TREEBOX_TEMPLATE_DIR`, `XDG_CACHE_HOME`, `UV_CACHE_DIR`, `DOCKER_HOST`).
 
 ## Drive
 
@@ -144,7 +144,7 @@ e2e_cleanup
 | `e2e_doctor` | `e2e_doctor` | The read-only health check (see Doctor). |
 | `e2e_reap_docker` | `e2e_reap_docker` | Remove `treebox-e2e-*` containers, images and volumes; safe anytime, also after a crash. |
 | `e2e_cleanup` | `e2e_cleanup` | Reap, remove `$SBX`, restore `PATH`. |
-| `$SBX/bin/treebox` | `treebox …`; `E2E_PATH=… treebox …` | This checkout's CLI with the hermetic environment. Passes through `NO_COLOR`, `TERM`, `COLUMNS`, `TZ`, `TREEBOX_NON_INTERACTIVE`, `TREEBOX_TEMPLATE_DIR`, `TREEBOX_CONFIG`, `XDG_CACHE_HOME`, `DOCKER_HOST` and the completion variables; `E2E_PATH` replaces its `PATH` (exit 125 when a real agent is on it). |
+| `$SBX/bin/treebox` | `treebox …`; `E2E_PATH=… treebox …` | This checkout's CLI with the hermetic environment. Passes through `NO_COLOR`, `TERM`, `COLUMNS`, `TZ`, `TREEBOX_NON_INTERACTIVE`, `TREEBOX_TEMPLATE_DIR`, `TREEBOX_CONFIG`, `XDG_CACHE_HOME`, `UV_CACHE_DIR`, `DOCKER_HOST` and the completion variables; `E2E_PATH` replaces its `PATH` (exit 125 when a real agent, or on macOS the real `security`, is on it: start it with `$SBX/safe-bin`). |
 | `run.py evidence` | `uv run python tests/e2e/run.py evidence --out DIR [--groups …] [--only …] [--require docker] [--inject-failure]` | The full scenario sweep and its bundle. |
 | `run.py fixture` | `uv run python tests/e2e/run.py fixture` | What `fixture.sh` calls: builds a fixture, writes `$SBX/fixture.env`, prints the exports. |
 | `run.py reap` | `uv run python tests/e2e/run.py reap` | What `e2e_reap_docker` calls. |

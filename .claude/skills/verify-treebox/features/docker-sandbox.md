@@ -16,6 +16,7 @@ Used with: [Create](./create.md) and [Enter](./enter.md) drive it, [Template](./
 - `docker-harness`: an agent missing in the image is a classified failure.
 - `docker-cancel`: a cancel signal stops the agent in the container; the container keeps running.
 - `docker-teardown`: teardown removes container and image, volumes with `--remove-volumes`, nothing with `--skip-container`.
+- `docker-cold`: `--cold` drops the shared cache mounts of a new sandbox.
 - `docker-preflight`: no docker CLI, no engine, or uid 0 fails before anything is made.
 
 ## How to get to it (user POV)
@@ -39,6 +40,7 @@ Preconditions: the fixture, `e2e_doctor` with `engine: reachable`, and the offli
 - **Restarted under the agent.** Start `treebox enter e2e-launch --repo "$REPO" --root "$ROOT" -- --stub-sleep=60 </dev/null &`, wait until the stub runs (about 4 s), then `docker restart -t 1 <ctr>`. The enter exits 1 with `The sandbox of 'e2e-launch' stopped or restarted while the agent ran (docker exec exited 137): the agent's result is unknown.` and no agent exit line.
 - **Cancel.** The same background enter, then `kill -TERM <treebox pid>`. Exit 143, stderr `Cancelled by SIGTERM` and the hint `The worktree is kept.`; `docker top <ctr>` has no `sleep 60` and the container is still running.
 - **Teardown.** `treebox teardown e2e-dockered --repo "$REPO" --root "$ROOT" --force --json` exits 0 with `container` `cleaned`, `volumes_removed` false, `complete` true; no `treebox-e2e-dockered-*` container or image is left and `$ROOT/.containers/e2e-dockered` is gone. On a fresh `e2e-dockered2`, `--force --remove-volumes --json` reports `volumes_removed` true and `treebox-e2e-vol-e2e-dockered2` is gone. On a fresh `e2e-dockered3`, `--force --skip-container --json` reports `container` `skipped`, `removed` true, and the container is still running (remove it with the cleanup).
+- **Cold.** `treebox create e2e-cold --repo "$REPO" --root "$ROOT" --isolation docker --template e2e-offline --cold --dry-run --json` exits 0 and its `docker run` has no `/caches/` mount; without `--cold` it mounts the shared caches at `/caches/…`.
 - **TZ.** `TZ=Europe/Helsinki treebox create e2e-tz --repo "$REPO" --root "$ROOT" --isolation docker --template e2e-offline --dry-run --json` exits 0 and a command in `commands` carries `--build-arg TZ=Europe/Helsinki`.
 - **Preflight.** No engine needed. `E2E_PATH="$SBX/stub-bin:/usr/bin:/bin" treebox create e2e-nodocker --repo "$REPO" --root "$ROOT" --isolation docker --template e2e-offline --json` (no `docker` on `PATH`) exits 1 `MISSING_DEPENDENCY` and `$ROOT/e2e-nodocker` is not made. `DOCKER_HOST="unix://$SBX/no-daemon.sock" treebox create e2e-nodaemon --repo "$REPO" --root "$ROOT" --isolation docker --template e2e-offline --json` exits 1 `DOCKER_UNAVAILABLE`, and `DOCKER_HOST="unix://$SBX/no-daemon.sock" treebox doctor --repo "$REPO" --isolation docker --json` exits 1 with `isolation: docker` failed.
 - **Root user.** Prerequisite: uid 0. `treebox create e2e-root --repo "$REPO" --root "$ROOT" --isolation docker --template e2e-offline --json` as root exits 1 `RUNNING_AS_ROOT` with nothing provisioned. Not driven on a non-root machine (the Mac and the CI runners); B29 is SKIP there.
@@ -49,6 +51,7 @@ Preconditions: the fixture, `e2e_doctor` with `engine: reachable`, and the offli
 - The container and image are `treebox-<name>-<id>`, so only an `e2e-…` name is found by `e2e_reap_docker`. A docker worktree without the prefix leaks into the user's engine.
 - `--skip-container` leaves a running container and its image on purpose; `e2e_cleanup` reaps it.
 - A teardown without `--remove-volumes` keeps the template's volume (`treebox-e2e-vol-<name>`); `e2e_cleanup` reaps it.
+- A container that carries the worktree's label but another name was not made by treebox: enter refuses it and the hint says to tear down and re-create. Any such test container must still be named `treebox-e2e-…` so the reaper finds it.
 - The offline template has no `uv sync`: dependency setup in a docker sandbox is the template's post-create.
 - In the container, the staged credential files show as `root`-owned through Docker Desktop's file sharing; check the mode on the host side.
 - `TEARDOWN_INCOMPLETE` needs a docker step that fails on demand; it is the boundary scenario H10 (a fake `docker` that fails `rm`).

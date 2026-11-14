@@ -22,8 +22,10 @@
 #   $E2E_TREEBOX_BIN     the console script $SBX/bin/treebox runs
 # Pass --repo "$REPO" --root "$ROOT" on every command that acts on worktrees.
 # $SBX/bin/treebox passes through NO_COLOR, TERM, COLUMNS, TZ,
-# TREEBOX_NON_INTERACTIVE, TREEBOX_TEMPLATE_DIR, TREEBOX_CONFIG, XDG_CACHE_HOME
-# and DOCKER_HOST from the caller; E2E_PATH replaces the PATH treebox sees.
+# TREEBOX_NON_INTERACTIVE, TREEBOX_TEMPLATE_DIR, TREEBOX_CONFIG, XDG_CACHE_HOME,
+# UV_CACHE_DIR, DOCKER_HOST and the completion variables from the caller;
+# E2E_PATH replaces the PATH treebox sees (start it with $SBX/safe-bin, the
+# fake Keychain tool alone).
 # Docker names: name every docker worktree `e2e-...`, so its container, image
 # and volume are `treebox-e2e-*` and the reaper finds them.
 # Helpers: e2e_doctor (read-only health check), e2e_reap_docker (remove
@@ -133,7 +135,7 @@ PY
     _e2e_note "engine: not reachable (docker work is SKIP, never PASS):" \
       "$("$py" -c 'import json,sys; d=json.loads(sys.argv[1]); print("; ".join(c["detail"] for c in d.get("checks", []) if not c["ok"]))' "$engine" 2>/dev/null || echo "$engine")"
   fi
-  for name in NO_COLOR TZ TREEBOX_NON_INTERACTIVE TREEBOX_TEMPLATE_DIR XDG_CACHE_HOME DOCKER_HOST; do
+  for name in NO_COLOR TZ TREEBOX_NON_INTERACTIVE TREEBOX_TEMPLATE_DIR XDG_CACHE_HOME UV_CACHE_DIR DOCKER_HOST; do
     if [ -n "${!name+x}" ]; then
       _e2e_note "$name=${!name} is set in this shell and passes through to treebox"
     fi

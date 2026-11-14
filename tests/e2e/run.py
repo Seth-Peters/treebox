@@ -332,6 +332,7 @@ PASSTHROUGH = (
     "TREEBOX_TEMPLATE_DIR",
     "TREEBOX_CONFIG",
     "XDG_CACHE_HOME",
+    "UV_CACHE_DIR",
     "DOCKER_HOST",
     # The shell-completion protocol (what an installed completion script sets).
     "_TREEBOX_COMPLETE",
@@ -345,7 +346,7 @@ def fixture_launcher(fx: Fixture) -> str:
     console script with the hermetic environment, so a command in the
     caller's shell is the command a user types. ``E2E_PATH`` replaces the
     ``PATH`` treebox sees (to hide a tool); an agent on it that is not the
-    stub (by content) is refused."""
+    stub (by content), or the real macOS ``security``, is refused."""
     env = {k: v for k, v in sorted(fx.env.items()) if k != "PATH"}
     env_args = " ".join(shlex.quote(f"{k}={v}") for k, v in env.items())
     passthrough = " ".join(f'${{{name}+"{name}=${name}"}}' for name in PASSTHROUGH)
@@ -369,6 +370,17 @@ def fixture_launcher(fx: Fixture) -> str:
         "  done\n"
         "done\n"
         "unset IFS\n"
+        "set +f\n"
+        "# On macOS treebox reads the Keychain through `security`: only the\n"
+        "# fixture's fake (it finds no item) or a fake you put first may answer.\n"
+        'if [ "$(uname -s)" = Darwin ]; then\n'
+        '  sec="$(PATH="$path" command -v security || true)"\n'
+        '  if [ "$sec" = /usr/bin/security ]; then\n'
+        '    echo "fixture: refusing to run: the real macOS security (Keychain) is first" \\\n'
+        f'      "on E2E_PATH; start E2E_PATH with {fx.sbx / "safe-bin"}" >&2\n'
+        "    exit 125\n"
+        "  fi\n"
+        "fi\n"
         f'exec env -i {env_args} PATH="$path" {passthrough} {shlex.quote(str(fx.tb_bin))} "$@"\n'
     )
 
@@ -380,6 +392,11 @@ def fixture(args: argparse.Namespace) -> int:
     fx.install_offline_template()
     bin_dir = fx.sbx / "bin"
     bin_dir.mkdir()
+    # The fake Keychain tool alone: start an E2E_PATH with it to hide the
+    # agent or a tool and still never reach the real macOS Keychain.
+    safe_bin = fx.sbx / "safe-bin"
+    safe_bin.mkdir()
+    (safe_bin / "security").symlink_to(fx.stub_bin / "security")
     launcher = bin_dir / "treebox"
     launcher.write_text(fixture_launcher(fx))
     launcher.chmod(0o755)

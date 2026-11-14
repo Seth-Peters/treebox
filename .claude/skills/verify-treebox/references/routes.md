@@ -133,7 +133,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `error MISSING_DEPENDENCY` | docker-sandbox | `runners/base.py::PreflightError` | B22, B26 |
 | `error NEEDS_CONFIRMATION` | teardown, unattended | `cli.py::teardown` | E1, E7, U2 |
 | `error NOT_A_REPO` | create | `cli.py::_repo_root` | B19 |
-| `error NOT_FOUND` | enter, remote-workers | `provision.py::NotFoundError` | C5, B10b, C18 |
+| `error NOT_FOUND` | enter, create, remote-workers | `provision.py::NotFoundError` | C5, B10b, C18 |
 | `error OVERWRITE_FAILED` | template | `cli.py::template_init` | F9 |
 | `error PORTS_EXHAUSTED` | identity-and-ports | `ports.py::PortsExhaustedError` | G14 |
 | `error PORT_LEDGER_INVALID` | identity-and-ports | `ports.py::LedgerInvalidError` | G15 |

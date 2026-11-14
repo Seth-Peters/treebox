@@ -12,7 +12,7 @@ Used with: [Create](./create.md) and [Enter](./enter.md) launch under it, [Teard
 - `exit-line`: the agent's status passes through; a non-zero one is named in the last stderr line, a signal death too.
 - `cancel`: SIGTERM, SIGINT or SIGHUP to treebox stops the agent and exits `128 + signal`, `CANCELLED`.
 - `streams`: under `--json`, stdout is one JSON object on success and empty on failure; stderr holds exactly one error object.
-- `exit-codes`: `0` ok, `1` runtime, `2` usage, `3` not found, `4` fetch or auth, `5` conflict.
+- `exit-codes`: `0` ok, `1` runtime, `2` usage, `3` not found, `4` fetch or auth, `5` conflict; a launch also exits with the agent's status, a cancel with `128 + signal`.
 
 ## How to get to it (user POV)
 
@@ -26,15 +26,16 @@ Used with: [Create](./create.md) and [Enter](./enter.md) launch under it, [Teard
 Preconditions: the fixture, `e2e_doctor` all `ok`, and `treebox create u1 --repo "$REPO" --root "$ROOT" --json` (exit 0). No engine is needed; the docker cases are in [Docker sandbox](./docker-sandbox.md).
 
 - **Exit line.** `treebox enter u1 --repo "$REPO" --root "$ROOT" -- --stub-exit=3 </dev/null` exits 3, the last stderr line is `treebox: agent exited with status 3`. `-- --stub-kill=KILL` exits 137 with `treebox: agent exited with status 137 (killed by SIGKILL)`. A plain `treebox enter u1 --repo "$REPO" --root "$ROOT" </dev/null` exits 0 and has no such line.
-- **Cancel.** Start `treebox enter u1 --repo "$REPO" --root "$ROOT" -- --stub-sleep=60 </dev/null >out 2>err &`, wait about 3 s (the stub's `pid=` line is in `out`), then `kill -TERM` the treebox pid. Exit 143, stderr `Cancelled by SIGTERM: the agent was sent SIGTERM and has exited.`, no agent exit line, the stub's pid is gone, and `$ROOT/u1` is kept. With `kill -INT`: exit 130, `Cancelled by SIGINT`.
+- **Cancel.** Start `treebox enter u1 --repo "$REPO" --root "$ROOT" -- --stub-sleep=60 </dev/null >out 2>err &`, wait about 3 s (the stub's `pid=` line is in `out`), then `kill -TERM` the treebox pid. Exit 143, stderr `Cancelled by SIGTERM: the agent was sent SIGTERM and has exited.`, no agent exit line, the stub's pid is gone, and `$ROOT/u1` is kept. With `kill -INT`: exit 130, `Cancelled by SIGINT`. With `kill -HUP`: exit 129, `Cancelled by SIGHUP`.
 - **No prompt with a terminal.** On a pseudo-terminal (macOS: `script -q /dev/null CMD`), with `y` typed after 2 s: `(sleep 2; printf 'y\r') | script -q /dev/null treebox --non-interactive teardown u1 --repo "$REPO" --root "$ROOT"` exits 5 at once with `Refusing to remove non-interactively without confirmation.`, never a prompt. The same with `TREEBOX_NON_INTERACTIVE=1 treebox teardown u1 …`. With no refs, `treebox --non-interactive teardown --repo "$REPO" --root "$ROOT"` exits 5, `Refusing to choose a worktree non-interactively.` `u1` is kept.
 - **No login.** `mv "$E2E_HOME/.claude/.credentials.json" "$SBX/cred.bak"`, then `treebox --non-interactive create b25 --repo "$REPO" --root "$ROOT" </dev/null`. Exit 1, stderr `No claude login for an unattended launch: no login at …`, no stub record, no `$ROOT/b25` and no `b25` branch. `TREEBOX_NON_INTERACTIVE=1 treebox create b25 …` (a launch) is the same. `--print` and `--json` need no login and exit 0. Move the file back.
-- **No agent.** `E2E_PATH="$SBX/toolbox:/usr/bin:/bin" treebox create b16 --repo "$REPO" --root "$ROOT" </dev/null` (no stub on `PATH`). Exit 1, `'claude' not found on PATH.`, no traceback, no `$ROOT/b16`, no `b16` branch: the agent is checked before provisioning.
-- **Streams.** `treebox enter ghost --repo "$REPO" --root "$ROOT" --json` exits 3: stdout is empty and stderr is one object with exactly the keys `schemaVersion` and `error` (`code`, `message`, `hint`). A success, for example `treebox list --repo "$REPO" --root "$ROOT" --json`, has the object on stdout with `schemaVersion` 1 and nothing but progress on stderr. Success payloads of `create`, `enter` and `teardown` carry `warnings` (`[]` when none).
+- **No agent.** `E2E_PATH="$SBX/safe-bin:$SBX/toolbox:/usr/bin:/bin" treebox create b16 --repo "$REPO" --root "$ROOT" </dev/null` (no stub on `PATH`). Exit 1, `'claude' not found on PATH.`, no traceback, no `$ROOT/b16`, no `b16` branch: the agent is checked before provisioning.
+- **Streams.** `treebox enter ghost --repo "$REPO" --root "$ROOT" --json` exits 3: stdout is empty and stderr is one object with exactly the keys `schemaVersion` and `error`; `error` has `code` and `message`, and `hint` and `path` when the error has them. A success, for example `treebox list --repo "$REPO" --root "$ROOT" --json`, has the object on stdout with `schemaVersion` 1 and nothing but progress on stderr. Success payloads of `create`, `enter` and `teardown` carry `warnings` (`[]` when none).
 
 ## Gotchas
 
 - `--json` and `--print` never launch, so they never need a login or the agent binary. To prove `LOGIN_MISSING` or `HARNESS_MISSING`, launch.
+- A pipe closed early (`treebox list --json | head -1`) can end treebox with 141 (SIGPIPE); that is the shell, not an exit-code class.
 - `--non-interactive` is a global flag: it goes before the command (`treebox --non-interactive teardown …`).
 - Cancel the treebox process, not the stub: the point is that treebox passes the signal on.
 - treebox exits 255 only when the agent exited 255, and then with the exit line. An unexpected failure is the generic `ERROR` (exit 1).

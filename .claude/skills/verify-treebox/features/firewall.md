@@ -2,7 +2,7 @@
 
 The firewall is a default-deny egress lockdown for one docker sandbox. It is set when the sandbox is created and recorded, it runs before any workspace code (the template's post-create), and it runs again on every entry, also after a container restart outside treebox. If it fails, nothing is emitted and the agent does not start.
 
-Used with: [Create](./create.md) sets it and [Docker sandbox](./docker-sandbox.md) applies it, [Enter](./enter.md) re-applies it, [Template](./template.md) holds its `firewall.json`, `init-firewall.sh` and `allowed-domains.sh`, [Config](./config.md) gives the default.
+Used with: [Create](./create.md) sets it and [Docker sandbox](./docker-sandbox.md) applies it, [Enter](./enter.md) re-applies it, [Template](./template.md) holds its `firewall.json` (optional) and the `init-firewall.sh` and `allowed-domains.sh` every template must have, [Config](./config.md) gives the default.
 
 ## Sub-features
 
@@ -11,7 +11,7 @@ Used with: [Create](./create.md) sets it and [Docker sandbox](./docker-sandbox.m
 - `firewall-order`: the first run happens before the post-create setup.
 - `firewall-entry`: every enter runs it again, also on a running container and after `docker restart`.
 - `firewall-failed`: a failing script is `FIREWALL_FAILED`; no command is emitted and the agent does not launch.
-- `firewall-recorded`: the recorded firewall wins over flags and config on enter.
+- `firewall-recorded`: on enter the recorded firewall wins over the config (enter has no firewall flag).
 
 ## How to get to it (user POV)
 

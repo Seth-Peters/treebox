@@ -21,7 +21,7 @@ Used with: [Unattended use](./unattended.md) is the contract it uses, [Create](.
 
 ## Driving it with treebox
 
-Preconditions: the fixture, `e2e_doctor` with `engine: reachable`. These bullets drive the worker side locally: the fixture is the worker and your shell is the coordinator. The SSH transport, a remote worker machine and the detached-run helper are not driven here. Make a profile and set unattended mode for every call:
+Preconditions: the fixture, `e2e_doctor` with `engine: reachable`. These bullets drive the worker side locally: the fixture is the worker and your shell is the coordinator. The SSH transport, a remote worker machine, the detached-run helper and the git token are not driven here; nor are the create retries after an interrupted setup (`SETUP_FAILED`, `RECORD_CONFLICT`, `LOCK_HELD`: see [Create](./create.md)) or the `DIRTY_WORKTREE` and `TEARDOWN_INCOMPLETE` teardown rows (see [Teardown](./teardown.md), H10). Make a profile and set unattended mode for every call:
 
 ```bash
 printf 'isolation = "docker"\ntemplate = "e2e-offline"\n[resources]\nmemory = "1g"\npids = 256\n' > "$SBX/profile.toml"
@@ -33,7 +33,7 @@ export TREEBOX_NON_INTERACTIVE=1
 - **Status.** `treebox list --repo "$REPO" --root "$ROOT" --json`, the row whose `path` is the stored path: `health` `healthy`, `setup` `done`, `isolation` `docker`, and the same `id` and `port_base` as the create.
 - **Agent failure.** `TREEBOX_CONFIG="$SBX/profile.toml" treebox enter "$ROOT/e2e-t-1" --repo "$REPO" --root "$ROOT" -- --stub-exit=4 </dev/null` exits 4 and the last stderr line is `treebox: agent exited with status 4`. Without the stub arg it exits 0 and the stub says `in_container=yes`.
 - **Cancelled.** The same enter with `-- --stub-sleep=60` in the background, then `kill -TERM` its pid after about 4 s: exit 143, stderr `Cancelled by SIGTERM`.
-- **treebox failure by path.** `TREEBOX_CONFIG="$SBX/profile.toml" treebox enter "$ROOT/e2e-t-9" --repo "$REPO" --root "$ROOT" --json` exits 3 `NOT_FOUND`: a path never matches `e2e-t-1` by substring.
+- **treebox failure by path.** `TREEBOX_CONFIG="$SBX/profile.toml" treebox enter "$ROOT/e2e-t" --repo "$REPO" --root "$ROOT" --json` exits 3 `NOT_FOUND`: as a name, `e2e-t` would match `e2e-t-1` by substring, as a path it matches nothing.
 - **Teardown and retry.** `TREEBOX_CONFIG="$SBX/profile.toml" treebox teardown "$ROOT/e2e-t-1" --repo "$REPO" --root "$ROOT" --yes --json` exits 0, `complete` true, and `$TREEBOX_HOME/ports.json` has no block left. The same request again exits 3 `NOT_FOUND` and touches nothing.
 - **Repo is a path.** `treebox create t-x --repo https://example.invalid/repo.git --json` exits 2 `NOT_A_REPO`.
 
@@ -41,6 +41,7 @@ export TREEBOX_NON_INTERACTIVE=1
 
 - The SSH worker is not part of the fixture. `ssh` exit 255, a dropped connection and a worker restart (runs lost or `CANCELLED`) are the coordinator's side of the contract; read them in `docs/remote-workers.md`, they are not driven here.
 - `TREEBOX_NON_INTERACTIVE` passes through the fixture's launcher; `unset TREEBOX_NON_INTERACTIVE` when you are done, or later drives in this shell refuse every prompt.
+- The `CANCELLED` and `SLUG_CONFLICT` hints suggest `treebox enter <name>` / `treebox teardown <name>`: a coordinator replaces the name with the stored path.
 - Name ref retries are unsafe: after `t-1` is removed, `teardown t-1` can match `t-12`. Always store and use the path.
 - A sandbox that stopped or restarted under the agent is a treebox failure (exit 1), not an agent status ([Docker sandbox](./docker-sandbox.md), H15).
 - `teardown --yes` keeps the template's per-worktree volume (`treebox-e2e-vol-e2e-t-1` here); add `--remove-volumes` when the task's volume must go too. `e2e_cleanup` reaps it in the fixture.
