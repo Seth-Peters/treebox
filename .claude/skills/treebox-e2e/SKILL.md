@@ -29,18 +29,21 @@ criterion; `tests/e2e/scenarios.py` holds the checks, by the same id.
   host entry command (`sh -c 'cd … && exec claude …'`) is not: never run it in
   your own shell, where `claude` is the real agent. Replay it only with the
   stub first: `PATH="$SBX/stub-bin:$PATH" sh -c '…'`.
-- **Never test against a real repo, the real `~/.treebox`, `~/.claude` or
-  `~/.codex`.** The fixture scopes `HOME`, `TREEBOX_HOME`, `TREEBOX_CONFIG`,
-  the repo and the worktree root under one temp dir. Its `~/.claude` and
-  `~/.codex` hold fake login files.
+- **Never test against a real repo, the real `~/.treebox`, `~/.claude`,
+  `~/.codex` or the macOS Keychain.** The fixture scopes `HOME`,
+  `TREEBOX_HOME`, `TREEBOX_CONFIG`, the repo and the worktree root under one
+  temp dir. Its `~/.claude` and `~/.codex` hold fake login files, and its
+  stub dir holds a fake `security` that finds no Keychain item (treebox reads
+  the Keychain on macOS when the claude login file is absent).
 - **Collect, don't abort.** A failed scenario is a finding to record; keep
   going so one regression doesn't hide the rest.
 - **Judge behavior, not prose.** Exit codes, JSON fields, files on disk,
   stdout/stderr separation, git and container state. Exact human-output text is
   `tests/golden/`'s job.
 - **A skip is never a pass.** A missing prerequisite (no docker engine, no
-  base image, root user, no shell detection) makes the scenario SKIP with the
-  reason, and the report must say what went unexercised.
+  base image, root or non-root user, not macOS, no shell detection, the
+  bundled image not opted in) makes the scenario SKIP with the reason, and
+  the report must say what went unexercised.
 - Each scenario uses a fresh fixture and its group setup. A selected id owns
   its required state. Run manual sweeps from **bash** and start a fresh fixture
   for each scenario (the fixture is bash and is `source`d).
@@ -125,6 +128,13 @@ Prerequisites, probed once per run: `docker` (a reachable engine) and
 `offline-base-image` (the pinned base image is present, or can be pulled).
 Without either, every docker scenario is SKIP with the reason.
 
+The firewall scenario (H14) adds a `firewall.json` and a counting
+`init-firewall.sh` to a copy of the offline template: it proves when treebox
+runs the firewall (before setup, on every entry, fail-closed), not what a real
+firewall blocks. The real egress lockdown, the bundled agents and Chromium
+need the bundled image: H18 builds it only when `TREEBOX_E2E_BUNDLED_IMAGE=1`
+is set (about 5.6 GB, needs the network), and is SKIP otherwise.
+
 ## Live and boundary evidence
 
 Scenarios are **live** by default: real CLI, real git, real filesystem, real
@@ -134,7 +144,9 @@ the real world cannot produce on demand, and is labeled so in the bundle:
 - `tests/e2e/fakes/gh` - a logged-in GitHub CLI with canned pull requests
   (R46: the chooser's merged badge).
 - `tests/e2e/fakes/docker` - passes through to the real docker CLI but fails
-  one subcommand (H10: a failed container removal).
+  one subcommand (H10: a failed container removal, `TEARDOWN_INCOMPLETE`).
+- A fake macOS `security` that prints a login (A10, H13: the Keychain login
+  source). The real Keychain is never read.
 
 The pytest suite's injected engine (`DockerRunner(docker=…)`) and
 `scripts/golden-diff.sh`'s docker shim are boundary evidence too. Keep them

@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 import typer
+from test_contract import _emitted_error_codes
 
 from treebox.cli import app
 from treebox.config import Config
@@ -87,33 +88,29 @@ def _source_trees() -> Iterator[ast.AST]:
 
 
 def error_routes() -> set[str]:
-    """Every stable `error.code` the source can emit."""
-    codes: set[str] = set()
-    for tree in _source_trees():
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                for kw in node.keywords:
-                    if kw.arg == "error_code" and isinstance(kw.value, ast.Constant):
-                        codes.add(str(kw.value.value))
-                func = node.func
-                name = func.id if isinstance(func, ast.Name) else ""
-                if name == "_ErrorInfo" and len(node.args) > 1:
-                    arg = node.args[1]
-                    if isinstance(arg, ast.Constant):
-                        codes.add(str(arg.value))
-            if isinstance(node, ast.FunctionDef):
-                args = node.args.kwonlyargs
-                for arg, default in zip(args, node.args.kw_defaults, strict=True):
-                    if arg.arg == "error_code" and isinstance(default, ast.Constant):
-                        codes.add(str(default.value))
-    return {f"error {c}" for c in codes}
+    """Every stable `error.code` the source can emit: the same syntax-tree
+    collector that keeps the error-code table in docs/usage.md complete
+    (tests/test_contract.py), so the two drift checks cannot disagree."""
+    return {f"error {c}" for c in _emitted_error_codes()}
+
+
+# Config fields that are not settings: never read from TOML (see their
+# comments in config.py), so they are no route.
+INTERNAL_CONFIG_FIELDS = {"explicit_resources"}
 
 
 def config_routes() -> set[str]:
-    return {f"config {f.name}" for f in dataclasses.fields(Config)}
+    return {
+        f"config {f.name}"
+        for f in dataclasses.fields(Config)
+        if f.name not in INTERNAL_CONFIG_FIELDS
+    }
 
 
 def env_routes() -> set[str]:
+    """Variables treebox reads (``os.environ.get("X")``) and every
+    ``TREEBOX_*`` name it reads or exports (a Typer ``envvar``, the worktree
+    identity it gives setup and the agent)."""
     names: set[str] = set()
     for tree in _source_trees():
         for node in ast.walk(tree):
@@ -126,6 +123,12 @@ def env_routes() -> set[str]:
                 and isinstance(node.args[0], ast.Constant)
             ):
                 names.add(str(node.args[0].value))
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and re.fullmatch(r"TREEBOX_[A-Z_]+", node.value)
+            ):
+                names.add(node.value)
     return {f"env {n}" for n in names}
 
 
@@ -220,6 +223,15 @@ def test_docker_scenarios_use_the_e2e_prefix() -> None:
     assert names and all(n.startswith("e2e-") for n in names), names
 
 
-@pytest.mark.parametrize("route", ["create --checkout", "error LOCK_HELD", "config caches"])
+@pytest.mark.parametrize(
+    "route",
+    [
+        "create --checkout",
+        "error LOCK_HELD",
+        "config caches",
+        "env TREEBOX_NON_INTERACTIVE",
+        "env TREEBOX_PORT_BASE",
+    ],
+)
 def test_derivation_sees_known_routes(route: str) -> None:
     assert route in derived_routes()

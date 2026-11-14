@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ from harness import (
     FAKES_DIR,
     OFFLINE_TEMPLATE,
     OFFLINE_TEMPLATE_DIR,
+    Background,
     Ctx,
     RunRecord,
     group,
@@ -181,10 +183,11 @@ def a3(ctx: Ctx) -> None:
     d = ctx.json_out(run) or {}
     for key in ("ok", "isolation", "checks", "advisories"):
         ctx.check(key in d, f"doctor --json has {key}")
-    checks = d.get("checks", [])
-    hard_ok = all(c["ok"] for c in checks if c["name"] in ("git", "repo"))
-    login_ok = any(c["ok"] for c in checks if c["name"].startswith("login:"))
-    ctx.eq(d.get("ok"), hard_ok and login_ok, "ok (hard checks pass and a fake login exists)")
+    checks = {c["name"]: c["ok"] for c in d.get("checks", [])}
+    hard = ("git", "repo", "agent: claude", "login: claude")
+    ctx.eq(sorted(n for n in hard if n not in checks), [], "hard check rows missing")
+    ctx.eq(d.get("ok"), all(checks.get(n) for n in hard), "ok iff every hard check passed")
+    ctx.eq(d.get("ok"), True, "ok (the stub agent and a fake login are present)")
 
 
 @scenario("A4", "doctor --isolation docker agrees with the engine")
@@ -253,6 +256,70 @@ def a8(ctx: Ctx) -> None:
     ctx.exit_is(ctx.tb("template", "init", "-h"), 0)
 
 
+def doctor_rows(
+    ctx: Ctx, *args: str, env: dict[str, str] | None = None
+) -> tuple[int, dict[str, Any]]:
+    """(exit, {row name: check}) of `doctor --json`."""
+    run = ctx.tb("doctor", "--repo", str(ctx.repo), *args, "--json", env=env)
+    d = ctx.json_out(run) or {}
+    return run.exit, {c["name"]: c for c in d.get("checks", [])}
+
+
+@scenario("A9", "doctor --harness checks that agent's binary and login")
+def a9(ctx: Ctx) -> None:
+    code, rows = doctor_rows(ctx, "-H", "codex")
+    ctx.eq(code, 0, "doctor -H codex exit")
+    ctx.eq(rows.get("agent: codex", {}).get("ok"), True, "agent: codex row")
+    ctx.eq(rows.get("login: codex", {}).get("ok"), True, "login: codex row")
+    no_bin = ctx.sbx / "stub-claude-only"
+    no_bin.mkdir()
+    (no_bin / "claude").symlink_to(ctx.fx.stub_bin / "claude")
+    (no_bin / "security").symlink_to(ctx.fx.stub_bin / "security")
+    path = ctx.env["PATH"].replace(str(ctx.fx.stub_bin), str(no_bin))
+    code, rows = doctor_rows(ctx, "-H", "codex", env=dict(ctx.env, PATH=path))
+    ctx.eq(code, 1, "doctor -H codex exit without a codex binary")
+    ctx.eq(rows.get("agent: codex", {}).get("ok"), False, "agent: codex row fails")
+    (ctx.fx.home / ".codex" / "auth.json").unlink()
+    code, rows = doctor_rows(ctx, "-H", "codex")
+    ctx.eq(code, 1, "doctor -H codex exit without a codex login")
+    ctx.eq(rows.get("login: codex", {}).get("ok"), False, "login: codex row fails")
+    code, rows = doctor_rows(ctx)
+    ctx.eq(code, 0, "doctor (claude) exit: the other harness's login is optional")
+
+
+def fake_keychain(ctx: Ctx, login: str | None) -> dict[str, str]:
+    """An env whose `security` finds ``login`` (None: no item) and logs its
+    argv. Boundary: it stands in for the macOS Keychain, never the real one."""
+    bin_dir = ctx.sbx / "keychain-bin"
+    bin_dir.mkdir(exist_ok=True)
+    tool = bin_dir / "security"
+    log = ctx.sbx / "security.log"
+    found = f"printf '%s\\n' {shlex.quote(login)}\nexit 0" if login is not None else "exit 44"
+    tool.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(log))}\n{found}\n')
+    tool.chmod(0o755)
+    return dict(ctx.env, PATH=os.pathsep.join([str(bin_dir), ctx.env["PATH"]]))
+
+
+@scenario(
+    "A10",
+    "the macOS Keychain is the claude login when the file is absent",
+    requires=("macos",),
+    evidence="boundary",
+)
+def a10(ctx: Ctx) -> None:
+    (ctx.fx.home / ".claude" / ".credentials.json").unlink()
+    code, rows = doctor_rows(ctx, env=fake_keychain(ctx, '{"keychain": "treebox-e2e"}'))
+    ctx.eq(code, 0, "doctor exit with a Keychain login")
+    row = rows.get("login: claude", {})
+    ctx.eq(row.get("ok"), True, "login: claude row")
+    ctx.check("Keychain" in row.get("detail", ""), f"row names the Keychain ({row.get('detail')})")
+    log = (ctx.sbx / "security.log").read_text()
+    ctx.check("Claude Code-credentials" in log, "treebox asked for the Claude Code item")
+    code, rows = doctor_rows(ctx, env=fake_keychain(ctx, None))
+    ctx.eq(code, 1, "doctor exit with no file and no Keychain item")
+    ctx.eq(rows.get("login: claude", {}).get("ok"), False, "login: claude row fails")
+
+
 # --- B. create -------------------------------------------------------------------------
 
 
@@ -276,6 +343,13 @@ def b1(ctx: Ctx) -> None:
     env_file = path / ".env"
     ctx.check(env_file.is_file() and env_file.read_text() == "SECRET=canonical\n", ".env copied")
     ctx.eq(ctx.git("branch", "--show-current", cwd=path), "fix-auth", "checked-out branch")
+    ctx.check(bool(re.fullmatch(r"[0-9a-f]{10}", str(d.get("id")))), f"id {d.get('id')!r}")
+    ctx.eq(
+        (d.get("port_base"), d.get("port_count")), (20000, 10), "first block of the default range"
+    )
+    ctx.eq(d.get("warnings"), [], "warnings")
+    row = listed(ctx).get("fix-auth", {})
+    ctx.eq((row.get("id"), row.get("port_base")), (d.get("id"), 20000), "list --json identity")
 
 
 @scenario("B2", "nameless create gets a petname placeholder")
@@ -294,6 +368,10 @@ def b3(ctx: Ctx) -> None:
     ctx.eq(d.get("branch"), "feature/auth", "branch")
     ctx.eq(d.get("name"), "feature--auth", "name")
     ctx.check(wt(ctx, "feature--auth").is_dir(), "directory feature--auth")
+    ctx.git("branch", "treebox/a/b", "origin/main")
+    flat = created(ctx, None, "--checkout", "treebox/a/b")
+    ctx.eq(flat.get("name"), "a--b", "a placeholder branch drops treebox/, then flattens")
+    ctx.check(wt(ctx, "a--b").is_dir() and not wt(ctx, "treebox").exists(), "no nested worktree")
 
 
 @scenario("B4", "--base cuts from origin/<base>")
@@ -462,9 +540,16 @@ def b15(ctx: Ctx) -> None:
     ctx.eq(rec.get("args"), ["--dangerously-skip-permissions"], "agent argv")
     ctx.eq(rec.get("in_container"), "no", "runs on the host")
     ctx.eq(rec.get("api_key"), "unset", "ANTHROPIC_API_KEY")
+    row = listed(ctx).get("launch-host", {})
+    ctx.eq(
+        (rec.get("treebox_name"), rec.get("treebox_id"), rec.get("treebox_port_base")),
+        ("launch-host", row.get("id"), str(row.get("port_base"))),
+        "TREEBOX_NAME, TREEBOX_ID, TREEBOX_PORT_BASE in the agent's environment",
+    )
+    ctx.eq(rec.get("treebox_port_count"), "10", "TREEBOX_PORT_COUNT")
 
 
-@scenario("B16", "launch without the agent binary is a clean error")
+@scenario("B16", "launch without the agent binary fails before provisioning")
 def b16(ctx: Ctx) -> None:
     env = without_path_entry(ctx.env, ctx.fx.stub_bin)
     if shutil.which("claude", path=env["PATH"]):
@@ -473,7 +558,8 @@ def b16(ctx: Ctx) -> None:
     ctx.exit_is(run, 1)
     ctx.check("'claude' not found on PATH" in run.stderr, "message names the missing binary")
     ctx.check("Traceback" not in run.stderr, "no traceback")
-    ctx.check(wt(ctx, "no-agent").is_dir(), "the worktree stays provisioned for a later enter")
+    ctx.check(not wt(ctx, "no-agent").exists(), "nothing provisioned (HARNESS_MISSING first)")
+    ctx.check(not branch_exists(ctx, "no-agent"), "no branch")
 
 
 @scenario("B17", "BRANCH_IN_USE for a checked-out branch")
@@ -566,6 +652,104 @@ def b24(ctx: Ctx) -> None:
     ctx.eq(set(tmp.glob("treebox-cold-*")) - before, set(), "leftover treebox-cold-* dirs")
 
 
+@scenario("B25", "an unattended launch without a login is LOGIN_MISSING")
+def b25(ctx: Ctx) -> None:
+    (ctx.fx.home / ".claude" / ".credentials.json").unlink()
+    for args, env in (
+        (["--non-interactive", "create", "b25"], ctx.env),
+        (["create", "b25"], dict(ctx.env, TREEBOX_NON_INTERACTIVE="1")),
+    ):
+        run = ctx.tb(*args, *ctx.wt_args(), env=env)
+        ctx.exit_is(run, 1)
+        ctx.check("No claude login for an unattended launch" in run.stderr, "says why")
+        ctx.check(stub_record(run.stdout) is None, "the agent did not start")
+    ctx.check(not wt(ctx, "b25").exists(), "nothing provisioned")
+    ctx.check(not branch_exists(ctx, "b25"), "no branch")
+
+
+@scenario("B26", "resource limit flags: unsupported on host, invalid values refused")
+def b26(ctx: Ctx) -> None:
+    host = ctx.tb("create", "b26", *ctx.wt_args(), "--memory", "4g", "--json")
+    ctx.exit_is(host, 2)
+    ctx.json_err(host, "RESOURCE_UNSUPPORTED")
+    bad = ctx.tb(
+        "create", "e2e-b26", *ctx.wt_args(), "--isolation", "docker", "--memory", "lots", "--json"
+    )
+    ctx.exit_is(bad, 2)
+    ctx.json_err(bad, "INVALID_RESOURCE")
+    for name in ("b26", "e2e-b26"):
+        ctx.check(not wt(ctx, name).exists() and not branch_exists(ctx, name), f"no {name}")
+    plan = ctx.tb(
+        "create",
+        "e2e-b26",
+        *ctx.wt_args(),
+        "--isolation",
+        "docker",
+        "--cpus",
+        "1.5",
+        "--memory",
+        "512m",
+        "--pids-limit",
+        "64",
+        "--dry-run",
+        "--json",
+    )
+    ctx.exit_is(plan, 0)
+    d = ctx.json_out(plan) or {}
+    ctx.eq(d.get("resources"), {"cpus": 1.5, "memory": "512m", "pids": 64}, "planned resources")
+    run_cmd = next((c for c in d.get("commands", []) if c.startswith("docker run ")), "")
+    ctx.check(
+        "--cpus 1.5 --memory 512m --pids-limit 64" in run_cmd, "docker run carries the limits"
+    )
+
+
+@scenario("B27", "INVALID_ROOT for a root that is not a directory")
+def b27(ctx: Ctx) -> None:
+    created(ctx, "b27")
+    afile = ctx.sbx / "afile"
+    afile.write_text("not a directory\n")
+    for root in (afile, afile / "below"):
+        for args in (("create", "b27x"), ("enter", "b27"), ("list",), ("teardown", "b27")):
+            run = ctx.tb(*args, *ctx.wt_args(root), "--json")
+            ctx.exit_is(run, 2)
+            ctx.json_err(run, "INVALID_ROOT")
+    ctx.check(wt(ctx, "b27").is_dir(), "the real worktree untouched")
+
+
+@scenario("B28", "the branch's own .gitmodules decides the submodule copy and the plan")
+def b28(ctx: Ctx) -> None:
+    add_submodule(ctx)
+    plan = ctx.tb("create", "b28", *ctx.wt_args(), "--dry-run", "--json")
+    commands = (ctx.json_out(plan) or {}).get("commands", [])
+    ctx.check(any(c.startswith("# copy submodule sub ") for c in commands), "plan copies sub")
+    gitmodules = ctx.git("show", "main:.gitmodules")
+    ghost = '[submodule "ghost"]\n\tpath = ghost\n\turl = ../ghost.git\n'
+    commit_with_index(ctx, "b28-extra", [("100644", ".gitmodules", gitmodules + ghost)])
+    commit_with_index(ctx, "b28-nosub", [("remove", ".gitmodules", ""), ("remove", "sub", "")])
+    extra = ctx.tb("create", "--checkout", "b28-extra", *ctx.wt_args(), "--dry-run", "--json")
+    lines = (ctx.json_out(extra) or {}).get("commands", [])
+    ctx.check(any("submodules: skipped ghost" in c for c in lines), "plan names the skipped path")
+    run = ctx.tb("create", "--checkout", "b28-extra", *ctx.wt_args(), "--print")
+    ctx.exit_is(run, 0)
+    ctx.check("skipped ghost" in run.stderr, "the run notes the skipped path")
+    path = wt(ctx, "b28-extra")
+    ctx.eq((path / "sub" / "lib.txt").read_text(), "hello from submodule\n", "sub copied")
+    ctx.eq(ctx.git("status", "--porcelain", cwd=path), "", "fresh worktree is clean")
+    nosub = ctx.tb("create", "--checkout", "b28-nosub", *ctx.wt_args(), "--json")
+    ctx.exit_is(nosub, 0)
+    path = wt(ctx, "b28-nosub")
+    ctx.check(not (path / "sub").exists(), "a branch without the submodule gets no copy")
+    ctx.eq(ctx.git("status", "--porcelain", cwd=path), "", "and stays clean")
+
+
+@scenario("B29", "docker isolation as root is RUNNING_AS_ROOT", requires=("root", "docker-cli"))
+def b29(ctx: Ctx) -> None:
+    run = ctx.tb("create", "e2e-root", *ctx.wt_args(), "--isolation", "docker", "--json")
+    ctx.exit_is(run, 1)
+    ctx.json_err(run, "RUNNING_AS_ROOT")
+    ctx.check(not wt(ctx, "e2e-root").exists(), "nothing provisioned")
+
+
 # --- C. enter ----------------------------------------------------------------------------
 
 
@@ -655,6 +839,9 @@ def c8(ctx: Ctx) -> None:
         tags=("agent-exit",),
     )
     ctx.exit_is(run, 7)
+    ctx.eq(
+        run.stderr.splitlines()[-1:], ["treebox: agent exited with status 7"], "last stderr line"
+    )
     rec = stub_record(run.stdout) or {}
     ctx.eq(
         rec.get("args"),
@@ -664,18 +851,27 @@ def c8(ctx: Ctx) -> None:
     ctx.eq(rec.get("cwd"), str(wt(ctx, "fix-auth")), "agent cwd")
 
 
-@scenario("C9", "UNKNOWN_ISOLATION for corrupt recorded state")
+def record_file(ctx: Ctx, name: str, root: Path | None = None) -> Path:
+    """The host-owned record of a worktree, beside the worktree root."""
+    return (root or ctx.root) / ".records" / f"{name}.json"
+
+
+@scenario("C9", "RECORD_INVALID: an unknown recorded isolation is refused, teardown recovers")
 def c9(ctx: Ctx) -> None:
     created(ctx, "c9-corrupt")
-    path = wt(ctx, "c9-corrupt")
-    gitdir = Path(ctx.git("rev-parse", "--absolute-git-dir", cwd=path))
-    state_file = gitdir / "treebox-state.json"
-    data = json.loads(state_file.read_text())
+    rec = record_file(ctx, "c9-corrupt")
+    data = json.loads(rec.read_text())
     data["isolation"] = "qemu"
-    state_file.write_text(json.dumps(data))
+    rec.write_text(json.dumps(data))
     run = ctx.tb("enter", "c9-corrupt", *ctx.wt_args(), "--json")
     ctx.exit_is(run, 5)
-    ctx.json_err(run, "UNKNOWN_ISOLATION")
+    err = ctx.json_err(run, "RECORD_INVALID")
+    ctx.eq(err.get("path"), str(rec), "error.path is the record")
+    row = listed(ctx).get("c9-corrupt", {})
+    ctx.eq((row.get("health"), row.get("isolation")), ("unreadable_state", ""), "list row")
+    td = ctx.tb("teardown", "c9-corrupt", *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(td, 0)
+    ctx.check(not wt(ctx, "c9-corrupt").exists() and not rec.exists(), "worktree and record gone")
 
 
 @scenario("C10", "recorded harness wins; --harness overrides one session")
@@ -716,6 +912,110 @@ def c12(ctx: Ctx) -> None:
     ctx.check("Resolved" in verbose.stderr, "--verbose streams uv's output on re-sync")
 
 
+@scenario("C13", "policy comes from the host-owned record, never the sandbox-writable git dir")
+def c13(ctx: Ctx) -> None:
+    path = wt(ctx, "fix-auth")
+    gitdir = Path(ctx.git("rev-parse", "--absolute-git-dir", cwd=path))
+    planted = {"isolation": "docker", "template": "/etc", "provisioned": True}
+    (gitdir / "treebox-state.json").write_text(json.dumps(planted))
+    run = ctx.tb("enter", "fix-auth", *ctx.wt_args(), "--print")
+    ctx.exit_is(run, 0)
+    ctx.eq(host_launch_argv(run)[:1], ["claude"], "still the host launch command")
+    ctx.eq(listed(ctx).get("fix-auth", {}).get("isolation"), "host", "list isolation")
+    ctx.eq(json.loads(record_file(ctx, "fix-auth").read_text()).get("isolation"), "host", "record")
+
+
+@scenario("C14", "a failed setup is a failed create; enter retries it")
+def c14(ctx: Ctx) -> None:
+    ctx.write_config('setup_hook = ["exit 7"]\n')
+    run = ctx.tb("create", "c14", *ctx.wt_args(), "--json")
+    ctx.exit_is(run, 1)
+    err = ctx.json_err(run, "SETUP_FAILED")
+    message = err.get("message", "")
+    ctx.check("setup · hook 1" in message and "status 7" in message, f"names the step: {message}")
+    log = ctx.root / ".logs" / "c14.setup.log"
+    ctx.eq(err.get("path"), str(log), "error.path")
+    ctx.check(log.is_file(), "the step's output is kept outside the worktree")
+    ctx.check(wt(ctx, "c14").is_dir(), "the worktree is kept")
+    row = listed(ctx).get("c14", {})
+    ctx.eq((row.get("setup"), row.get("deps")), ("failed", "unknown"), "list setup, deps")
+    again = ctx.tb("enter", "c14", *ctx.wt_args(), "--json")
+    ctx.exit_is(again, 1)
+    ctx.json_err(again, "SETUP_FAILED")
+    ctx.write_config('setup_hook = ["true"]\n')
+    fixed = ctx.tb("enter", "c14", *ctx.wt_args(), "--json")
+    ctx.exit_is(fixed, 0)
+    row = listed(ctx).get("c14", {})
+    ctx.eq((row.get("setup"), row.get("deps")), ("done", "fresh"), "after the retry")
+    ctx.write_config("")
+
+
+@scenario("C15", "INVALID_LINKAGE: a missing .git pointer is refused; teardown recovers")
+def c15(ctx: Ctx) -> None:
+    created(ctx, "c15")
+    path = wt(ctx, "c15")
+    (path / ".git").unlink()
+    run = ctx.tb("enter", "c15", *ctx.wt_args(), "--json")
+    ctx.exit_is(run, 5)
+    ctx.json_err(run, "INVALID_LINKAGE")
+    row = listed(ctx).get("c15", {})
+    ctx.eq((row.get("health"), row.get("missing")), ("invalid_linkage", True), "list row")
+    ctx.exit_is(ctx.tb("teardown", "c15", *ctx.wt_args(), "--force", "--json"), 0)
+    ctx.check(
+        not path.exists() and not worktree_registered(ctx, path), "directory and registration"
+    )
+
+
+@scenario("C16", "RECORD_MISSING: no record means recreate; teardown needs no extra flag")
+def c16(ctx: Ctx) -> None:
+    run = ctx.tb("create", "e2e-norec", *ctx.wt_args(), "--print")
+    ctx.exit_is(run, 0)
+    record_file(ctx, "e2e-norec").unlink()
+    enter = ctx.tb("enter", "e2e-norec", *ctx.wt_args(), "--json")
+    ctx.exit_is(enter, 5)
+    hint = ctx.json_err(enter, "RECORD_MISSING").get("hint", "")
+    ctx.check("treebox teardown e2e-norec" in hint and "treebox create" in hint, f"hint: {hint}")
+    ctx.eq(enter.stdout, "", "nothing emitted")
+    row = listed(ctx).get("e2e-norec", {})
+    ctx.eq((row.get("isolation"), row.get("health")), ("", "unreadable_state"), "list row")
+    td = ctx.tb("teardown", "e2e-norec", *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(td, 0)
+    ctx.check(not wt(ctx, "e2e-norec").exists(), "worktree gone")
+
+
+@scenario("C17", "RECORD_CONFLICT: a resumed create must ask for the recorded settings")
+def c17(ctx: Ctx) -> None:
+    ctx.write_config('setup_hook = ["exit 7"]\n')
+    first = ctx.tb("create", "c17", *ctx.wt_args(), "--harness", "codex", "--json")
+    ctx.exit_is(first, 1)
+    ctx.json_err(first, "SETUP_FAILED")
+    ctx.write_config("")
+    other = ctx.tb("create", "c17", *ctx.wt_args(), "--harness", "claude", "--json")
+    ctx.exit_is(other, 5)
+    hint = ctx.json_err(other, "RECORD_CONFLICT").get("hint", "")
+    ctx.check("-H codex" in hint, f"hint gives the recorded settings: {hint}")
+    same = ctx.tb("create", "c17", *ctx.wt_args(), "--harness", "codex", "--json")
+    ctx.exit_is(same, 0)
+    ctx.eq(listed(ctx).get("c17", {}).get("setup"), "done", "the resumed create finished setup")
+
+
+@scenario("C18", "an absolute path is an exact ref for enter and teardown")
+def c18(ctx: Ctx) -> None:
+    path = wt(ctx, "fix-auth")
+    run = ctx.tb("enter", str(path), *ctx.wt_args(), "--json")
+    ctx.exit_is(run, 0)
+    ctx.eq((ctx.json_out(run) or {}).get("worktree_path"), str(path), "worktree_path")
+    near = ctx.tb("enter", str(ctx.root / "fix"), *ctx.wt_args(), "--json")
+    ctx.exit_is(near, 3)
+    ctx.json_err(near, "NOT_FOUND")
+    near_td = ctx.tb("teardown", str(ctx.root / "fix"), *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(near_td, 3)
+    ctx.check(path.is_dir(), "a path never falls back to a substring match")
+    td = ctx.tb("teardown", str(path), *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(td, 0)
+    ctx.check(not path.exists(), "removed by its path")
+
+
 # --- D. list -------------------------------------------------------------------------------
 
 
@@ -747,13 +1047,17 @@ def d1(ctx: Ctx) -> None:
 def d2(ctx: Ctx) -> None:
     rows = listed(ctx)
     keys = {"name", "branch", "unnamed", "missing", "path", "base", "isolation", "harness"}
-    keys |= {"deps", "env"}
+    keys |= {"deps", "env", "health", "setup", "id", "port_base", "port_count", "resources"}
     for name in ("d-one", "d-two", "d-raw"):
         row = rows.get(name, {})
         ctx.eq(sorted(keys - set(row)), [], f"missing keys in {name}")
-    ctx.eq(rows.get("d-one", {}).get("deps"), "fresh", "d-one deps")
-    ctx.eq(rows.get("d-one", {}).get("env"), "present", "d-one env")
-    ctx.eq(rows.get("d-raw", {}).get("isolation"), "", "d-raw isolation (unrecorded)")
+    one = rows.get("d-one", {})
+    ctx.eq((one.get("deps"), one.get("env")), ("fresh", "present"), "d-one deps, env")
+    ctx.eq((one.get("health"), one.get("setup")), ("healthy", "done"), "d-one health, setup")
+    raw = rows.get("d-raw", {})
+    ctx.eq(raw.get("isolation"), "", "d-raw isolation (no record)")
+    ctx.eq((raw.get("health"), raw.get("setup")), ("unreadable_state", ""), "d-raw health, setup")
+    ctx.eq((raw.get("port_base"), raw.get("resources")), (None, None), "d-raw block, limits")
 
 
 @scenario("D3", "empty root lists nothing")
@@ -782,17 +1086,25 @@ def _setup_e(ctx: Ctx) -> None:
     ctx.git("branch", "-m", "fix/auth-renamed", cwd=wt(ctx, "fix-auth"))
 
 
-@scenario("E1", "non-TTY teardown needs --force")
+@scenario("E1", "non-TTY teardown needs --yes; --yes confirms only")
 def e1(ctx: Ctx) -> None:
     path = wt(ctx, "e2e-clean-td")
     ctx.eq(ctx.git("status", "--porcelain", cwd=path), "", "precondition: clean worktree")
     run = ctx.tb("teardown", "e2e-clean-td", *ctx.wt_args())
     ctx.exit_is(run, 5)
-    ctx.check("--force" in run.stderr, "message names --force")
+    ctx.check("--yes" in run.stderr, "message names --yes")
     machine = ctx.tb("teardown", "e2e-clean-td", *ctx.wt_args(), "--json")
     ctx.exit_is(machine, 5)
     ctx.json_err(machine, "NEEDS_CONFIRMATION")
     ctx.check(path.is_dir(), "worktree untouched")
+    (wt(ctx, "fix-auth") / "junk.txt").write_text("junk\n")
+    dirty = ctx.tb("teardown", "fix-auth", *ctx.wt_args(), "--yes", "--json")
+    ctx.exit_is(dirty, 5)
+    ctx.json_err(dirty, "DIRTY_WORKTREE")
+    ctx.check(wt(ctx, "fix-auth").is_dir(), "--yes keeps the uncommitted-changes check")
+    yes = ctx.tb("teardown", "e2e-clean-td", *ctx.wt_args(), "-y", "--json")
+    ctx.exit_is(yes, 0)
+    ctx.check(not path.exists(), "removed with --yes")
 
 
 @scenario("E2", "dirty worktree needs --force")
@@ -895,16 +1207,17 @@ def e9(ctx: Ctx) -> None:
     ctx.check((ctx.repo / "pyproject.toml").is_file(), "main checkout intact")
 
 
-@scenario("E10", "teardown --isolation must match the record")
+@scenario("E10", "a git-locked worktree is never removed, also with --force")
 def e10(ctx: Ctx) -> None:
-    run = ctx.tb("teardown", "e2e-clean-td", *ctx.wt_args(), "--isolation", "docker")
+    path = wt(ctx, "e2e-clean-td")
+    ctx.git("worktree", "lock", str(path))
+    run = ctx.tb("teardown", "e2e-clean-td", *ctx.wt_args(), "--force", "--json")
     ctx.exit_is(run, 5)
-    machine = ctx.tb(
-        "teardown", "e2e-clean-td", *ctx.wt_args(), "--isolation", "docker", "--force", "--json"
-    )
-    ctx.exit_is(machine, 5)
-    ctx.json_err(machine, "ISOLATION_MISMATCH")
-    ctx.check(wt(ctx, "e2e-clean-td").is_dir(), "nothing removed")
+    hint = ctx.json_err(run, "WORKTREE_LOCKED").get("hint", "")
+    ctx.check("worktree unlock" in hint, "hint says how to unlock")
+    ctx.check(path.is_dir() and worktree_registered(ctx, path), "nothing removed")
+    ctx.git("worktree", "unlock", str(path))
+    ctx.exit_is(ctx.tb("teardown", "e2e-clean-td", *ctx.wt_args(), "--force", "--json"), 0)
 
 
 @scenario("E11", "teardown --quiet and --verbose")
@@ -951,6 +1264,8 @@ def f2(ctx: Ctx) -> None:
         ctx.check(Path(run.stdout.strip()).is_dir(), f"{' '.join(args)} prints a directory")
     ghost = ctx.tb("template", "path", "ghost")
     ctx.exit_is(ghost, 3)
+    for name in ("/etc", "../x"):
+        ctx.exit_is(ctx.tb("template", "path", name), 2)
 
 
 @scenario("F3", "init scaffolds the full file set under TREEBOX_HOME")
@@ -1021,10 +1336,14 @@ def f8(ctx: Ctx) -> None:
     ctx.check((ctx.fx.treebox_home / "templates" / "mytpl" / "Dockerfile").is_file(), "intact")
 
 
-@scenario("F9", "init reports copy and overwrite failures", requires=("non-root",))
+def tree_bytes(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@scenario("F9", "init --force is all-or-nothing", requires=("non-root",))
 def f9(ctx: Ctx) -> None:
-    ctx.exit_is(ctx.tb("template", "init", "copytpl", "--json"), 0)
     tpl_root = ctx.fx.treebox_home / "templates"
+    tpl_root.mkdir(parents=True)
     tpl_root.chmod(0o555)
     try:
         run = ctx.tb("template", "init", "denied", "--json")
@@ -1032,19 +1351,35 @@ def f9(ctx: Ctx) -> None:
         ctx.json_err(run, "COPY_FAILED")
     finally:
         tpl_root.chmod(0o755)
-    locked = tpl_root / "copytpl" / "locked"
-    locked.mkdir()
-    (locked / "file").write_text("x\n")
-    locked.chmod(0o555)
+    ctx.exit_is(ctx.tb("template", "init", "copytpl", "--json"), 0)
+    old = tpl_root / "copytpl"
+    (old / "MARKER").write_text("old template\n")
+    before = tree_bytes(old)
+    # The staging dir exists (the init above made it), but the old template
+    # cannot be moved aside: the overwrite must leave it byte-for-byte.
+    tpl_root.chmod(0o555)
     try:
         over = ctx.tb("template", "init", "copytpl", "--force", "--json")
         ctx.exit_is(over, 1)
         ctx.json_err(over, "OVERWRITE_FAILED")
-        ctx.check(not (tpl_root / ".copytpl.treebox-tmp").exists(), "staging dir cleaned up")
-        if not (tpl_root / "copytpl" / "Dockerfile").exists():
-            ctx.note("observed: a failed overwrite leaves the old template partly removed")
     finally:
-        locked.chmod(0o755)
+        tpl_root.chmod(0o755)
+    ctx.eq(tree_bytes(old) == before, True, "old template unchanged after OVERWRITE_FAILED")
+    # A read-only dir in the old template: the overwrite succeeds with the
+    # complete new template, and the leftover old copy is a warning.
+    locked = old / "locked"
+    locked.mkdir()
+    (locked / "file").write_text("x\n")
+    locked.chmod(0o555)
+    try:
+        forced = ctx.tb("template", "init", "copytpl", "--force")
+        ctx.exit_is(forced, 0)
+        ctx.check("could not remove the previous template copy" in forced.stderr, "warns")
+    finally:
+        for p in (tpl_root / ".treebox-tmp").rglob("locked"):
+            p.chmod(0o755)
+    ctx.check(not (old / "MARKER").exists(), "the new template replaced the old one")
+    ctx.eq(templates(ctx).get("copytpl", {}).get("valid"), True, "the new template is complete")
 
 
 # --- G. config ------------------------------------------------------------------------------------
@@ -1246,6 +1581,77 @@ def g13(ctx: Ctx) -> None:
     ctx.check("TZ=Europe/Helsinki" in commands, "host TZ reaches the image build")
 
 
+@scenario("G14", "[ports]: blocks never overlap, a full range is PORTS_EXHAUSTED")
+def g14(ctx: Ctx) -> None:
+    with_config(ctx, "[ports]\nstart = 30000\nend = 30019\nblock_size = 10\n")
+    try:
+        bases = [created(ctx, name).get("port_base") for name in ("g14-a", "g14-b")]
+        ctx.eq(bases, [30000, 30010], "one block each, lowest free first")
+        full = ctx.tb("create", "g14-c", *ctx.wt_args(), "--json")
+        ctx.exit_is(full, 5)
+        err = ctx.json_err(full, "PORTS_EXHAUSTED")
+        ctx.eq(err.get("path"), str(ctx.fx.treebox_home / "ports.json"), "error.path is the ledger")
+        ctx.check(not wt(ctx, "g14-c").exists() and not branch_exists(ctx, "g14-c"), "nothing made")
+        ctx.exit_is(ctx.tb("teardown", "g14-a", *ctx.wt_args(), "--force", "--json"), 0)
+        ctx.eq(created(ctx, "g14-c").get("port_base"), 30000, "teardown released the block")
+        enter = ctx.tb("enter", "g14-b", *ctx.wt_args(), "--json")
+        ctx.eq((ctx.json_out(enter) or {}).get("port_base"), 30010, "the block is stable on enter")
+    finally:
+        with_config(ctx, "")
+
+
+@scenario("G15", "PORT_LEDGER_INVALID: treebox never rewrites a broken ledger")
+def g15(ctx: Ctx) -> None:
+    ledger = ctx.fx.treebox_home / "ports.json"
+    ledger.write_text("not json\n")
+    run = ctx.tb("create", "g15", *ctx.wt_args(), "--json")
+    ctx.exit_is(run, 1)
+    err = ctx.json_err(run, "PORT_LEDGER_INVALID")
+    ctx.eq(err.get("path"), str(ledger), "error.path")
+    ctx.eq(ledger.read_text(), "not json\n", "the ledger is untouched")
+    ctx.check(not wt(ctx, "g15").exists(), "nothing made")
+
+
+@scenario("G16", "[resources] config: the default limits of a new sandbox")
+def g16(ctx: Ctx) -> None:
+    with_config(ctx, '[resources]\nmemory = "2g"\npids = 128\n')
+    try:
+        plan = ctx.tb(
+            "create", "e2e-g16", *ctx.wt_args(), "--isolation", "docker", "--dry-run", "--json"
+        )
+        ctx.exit_is(plan, 0)
+        d = ctx.json_out(plan) or {}
+        ctx.eq(d.get("resources"), {"cpus": None, "memory": "2g", "pids": 128}, "resources")
+        run_cmd = next((c for c in d.get("commands", []) if c.startswith("docker run ")), "")
+        ctx.check("--memory 2g --pids-limit 128" in run_cmd, "docker run carries the config limits")
+        over = ctx.tb(
+            "create",
+            "e2e-g16",
+            *ctx.wt_args(),
+            "--isolation",
+            "docker",
+            "--memory",
+            "1g",
+            "--dry-run",
+            "--json",
+        )
+        ctx.eq((ctx.json_out(over) or {}).get("resources", {}).get("memory"), "1g", "flag wins")
+        host = ctx.tb("create", "g16-host", *ctx.wt_args(), "--json")
+        ctx.exit_is(host, 0)
+        ctx.eq(
+            (ctx.json_out(host) or {}).get("resources"),
+            {"cpus": None, "memory": None, "pids": None},
+            "config limits never refuse a host worktree; it records none",
+        )
+        bad = '[resources]\nmemory = "lots"\n'
+        with_config(ctx, bad)
+        invalid = ctx.tb("list", *ctx.wt_args(), "--json")
+        ctx.exit_is(invalid, 2)
+        ctx.json_err(invalid, "INVALID_CONFIG")
+    finally:
+        with_config(ctx, "")
+
+
 # --- H. docker isolation (real engine, offline template) ----------------------------------------
 
 
@@ -1387,6 +1793,12 @@ def h7(ctx: Ctx) -> None:
     ctx.eq(rec.get("cwd"), str(wt(ctx, "e2e-launch")), "agent cwd is the mounted worktree")
     ctx.eq(rec.get("uid"), str(os.getuid()), "agent uid is the host uid")
     ctx.eq(rec.get("api_key"), "unset", "ANTHROPIC_API_KEY")
+    row = listed(ctx).get("e2e-launch", {})
+    ctx.eq(
+        (rec.get("treebox_name"), rec.get("treebox_id"), rec.get("treebox_port_base")),
+        ("e2e-launch", row.get("id"), str(row.get("port_base"))),
+        "worktree identity in the container's agent environment",
+    )
     again = ctx.tb(
         "enter", "e2e-launch", *ctx.wt_args(), "--", "--stub-exit=3", tags=("agent-exit",)
     )
@@ -1449,7 +1861,9 @@ def h9(ctx: Ctx) -> None:
     ctx.check("No container exists" in err.get("message", ""), "message says why")
 
 
-@scenario("H10", "injected engine failure: teardown is best-effort", evidence="boundary")
+@scenario(
+    "H10", "injected engine failure: an incomplete teardown fails and retries", evidence="boundary"
+)
 def h10(ctx: Ctx) -> None:
     created(ctx, "e2e-gone", *docker_args(ctx)[2:])
     ctx.sh("docker", "rm", "-f", container(ctx, "e2e-gone")[0])
@@ -1459,11 +1873,23 @@ def h10(ctx: Ctx) -> None:
     run = ctx.tb("teardown", "e2e-gone", *ctx.wt_args(), "--force", "--json", env=env)
     ctx.exit_is(run, 0)
     created(ctx, "e2e-fail-rm", *docker_args(ctx)[2:])
+    name = container(ctx, "e2e-fail-rm")[0]
     failed = ctx.tb("teardown", "e2e-fail-rm", *ctx.wt_args(), "--force", "--json", env=env)
-    ctx.exit_is(failed, 0)
-    records = (ctx.json_out(failed) or {}).get("worktrees", [])
-    ctx.eq([r.get("container") for r in records], ["failed"], "container outcome")
-    ctx.check(not wt(ctx, "e2e-fail-rm").exists(), "worktree removed anyway")
+    ctx.exit_is(failed, 1)
+    payload = ctx.json_out(failed) if failed.stdout.strip() else None
+    records = (payload or {}).get("worktrees", [])
+    rec = records[0] if records else {}
+    ctx.eq((rec.get("container"), rec.get("complete")), ("failed", False), "record")
+    ctx.check(any(name in r for r in rec.get("remaining", [])), f"remaining names {name}")
+    ctx.check("TEARDOWN_INCOMPLETE" in failed.stderr, "stderr carries TEARDOWN_INCOMPLETE")
+    manifest = ctx.root / ".containers" / "e2e-fail-rm" / "treebox-resources.json"
+    kept = wt(ctx, "e2e-fail-rm").is_dir() and record_file(ctx, "e2e-fail-rm").is_file()
+    ctx.check(kept and manifest.is_file(), "worktree, record and resource manifest kept")
+    retry = ctx.tb("teardown", "e2e-fail-rm", *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(retry, 0)
+    ctx.eq(container(ctx, "e2e-fail-rm")[0], "", "the retry removed the container")
+    gone = not wt(ctx, "e2e-fail-rm").exists() and not record_file(ctx, "e2e-fail-rm").exists()
+    ctx.check(gone and not manifest.exists(), "nothing left after the retry")
 
 
 @scenario("H11", "enter --template overrides the recorded template for one session")
@@ -1474,6 +1900,222 @@ def h11(ctx: Ctx) -> None:
     ghost = ctx.tb("enter", "e2e-launch", *ctx.wt_args(), "--template", "ghost", "--json")
     ctx.exit_is(ghost, 0)
     ctx.note("an explicit --template ghost on enter still enters the existing container")
+
+
+def inspect(ctx: Ctx, name: str, fmt: str) -> str:
+    return ctx.sh("docker", "inspect", container(ctx, name)[0], "--format", fmt).stdout.strip()
+
+
+@scenario("H12", "resource limits reach the engine; enter only restates them")
+def h12(ctx: Ctx) -> None:
+    limits = ["--cpus", "1", "--memory", "512m", "--pids-limit", "64"]
+    d = created(ctx, "e2e-lim", *docker_args(ctx)[2:], *limits)
+    ctx.eq(d.get("resources"), {"cpus": 1, "memory": "512m", "pids": 64}, "create resources")
+    host_config = "{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}} {{.HostConfig.PidsLimit}}"
+    ctx.eq(inspect(ctx, "e2e-lim", host_config), "536870912 1000000000 64", "docker inspect")
+    ctx.eq(listed(ctx).get("e2e-lim", {}).get("resources"), d.get("resources"), "list resources")
+    same = ctx.tb("enter", "e2e-lim", *ctx.wt_args(), "--memory", "512m", "--json")
+    ctx.exit_is(same, 0)
+    other = ctx.tb("enter", "e2e-lim", *ctx.wt_args(), "--memory", "1g", "--json")
+    ctx.exit_is(other, 5)
+    hint = ctx.json_err(other, "RESOURCE_MISMATCH").get("hint", "")
+    ctx.check("treebox teardown" in hint and "treebox create" in hint, "hint re-creates")
+    with_config(ctx, '[resources]\nmemory = "2g"\n')
+    try:
+        created(ctx, "e2e-lim-cfg", *docker_args(ctx)[2:])
+        with_config(ctx, '[resources]\nmemory = "3g"\n')
+        drift = ctx.json_out(ctx.tb("enter", "e2e-lim-cfg", *ctx.wt_args(), "--json")) or {}
+        ctx.eq((drift.get("resources_drift") or {}).get("memory"), "3g", "config drift reported")
+        ctx.eq(len(drift.get("warnings", [])), 1, "one drift warning")
+        steady = ctx.json_out(ctx.tb("enter", "e2e-lim", *ctx.wt_args(), "--json")) or {}
+        values = set((steady.get("resources_drift") or {}).values())
+        ctx.eq(values, {None}, "a flag-chosen limit never drifts")
+    finally:
+        with_config(ctx, "")
+
+
+@scenario(
+    "H13",
+    "the macOS Keychain login is staged into the sandbox",
+    requires=(*DOCKER, "macos"),
+    evidence="boundary",
+)
+def h13(ctx: Ctx) -> None:
+    (ctx.fx.home / ".claude" / ".credentials.json").unlink()
+    login = '{"keychain": "treebox-e2e-staged"}'
+    env = fake_keychain(ctx, login)
+    run = ctx.tb("create", "e2e-kc", *docker_args(ctx), "--json", env=env)
+    ctx.exit_is(run, 0)
+    staged = ctx.root / ".containers" / "e2e-kc" / "credentials" / "claude" / ".credentials.json"
+    ctx.check(staged.is_file() and not staged.is_symlink(), "staged as a regular file")
+    ctx.eq(staged.read_text().strip() if staged.is_file() else "", login, "staged content")
+    ctx.eq(staged.stat().st_mode & 0o077 if staged.is_file() else -1, 0, "private to the user")
+    name = container(ctx, "e2e-kc")[0]
+    inside = ctx.sh(
+        "docker",
+        "exec",
+        "-u",
+        "agent",
+        name,
+        "cat",
+        "/home/agent/.claude/.credentials.json",
+        check=False,
+    )
+    ctx.eq(inside.stdout.strip(), login, "the sandbox sees the login file")
+
+
+def firewall_template(ctx: Ctx) -> str:
+    """The offline template plus a firewall overlay whose init script only
+    counts its runs (and fails on demand): no iptables, no network. It proves
+    when treebox runs the firewall, not what a real firewall blocks."""
+    name = "e2e-fw"
+    dest = ctx.fx.treebox_home / "templates" / name
+    shutil.copytree(OFFLINE_TEMPLATE_DIR, dest, symlinks=False)
+    (dest / "firewall.json").write_text('{"env": {"TREEBOX_FIREWALL": "1"}}\n')
+    (dest / "init-firewall.sh").write_text(
+        "#!/bin/sh\n"
+        "if [ -f /tmp/treebox-e2e-firewall-fail ]; then\n"
+        '  echo "ERROR: injected firewall failure (treebox e2e)"; exit 1\n'
+        "fi\n"
+        "when=before-setup\n"
+        "[ -f /tmp/treebox-e2e-post-create ] && when=after-setup\n"
+        'echo "$when" >> /tmp/treebox-e2e-firewall-runs\n'
+    )
+    with (dest / "Dockerfile").open("a") as f:
+        f.write(
+            "COPY init-firewall.sh /usr/local/bin/init-firewall.sh\n"
+            "RUN chmod 0755 /usr/local/bin/init-firewall.sh\n"
+        )
+    return name
+
+
+@scenario("H14", "the firewall runs before setup and on every entry; a failure is FIREWALL_FAILED")
+def h14(ctx: Ctx) -> None:
+    template = firewall_template(ctx)
+    args = [*ctx.wt_args(), "--isolation", "docker", "--template", template, "--firewall"]
+    created(ctx, "e2e-fw", *args[2:])
+    name = container(ctx, "e2e-fw")[0]
+
+    def log() -> list[str]:
+        out = ctx.sh("docker", "exec", name, "cat", "/tmp/treebox-e2e-firewall-runs", check=False)
+        return out.stdout.split()
+
+    def runs() -> int:
+        return len(log())
+
+    after_create = runs()
+    ctx.eq(log()[:1], ["before-setup"], "the first run precedes the post-create setup")
+    ctx.exit_is(ctx.tb("enter", "e2e-fw", *ctx.wt_args(), "--print"), 0)
+    ctx.eq(runs(), after_create + 1, "an entry to a running container re-applies it")
+    ctx.sh("docker", "restart", "-t", "1", name)
+    ctx.exit_is(ctx.tb("enter", "e2e-fw", *ctx.wt_args(), "--print"), 0)
+    ctx.eq(runs(), after_create + 2, "the entry after a restart applies it again")
+    ctx.sh("docker", "exec", name, "touch", "/tmp/treebox-e2e-firewall-fail")
+    failed = ctx.tb("enter", "e2e-fw", *ctx.wt_args(), "--json")
+    ctx.exit_is(failed, 1)
+    err = ctx.json_err(failed, "FIREWALL_FAILED")
+    ctx.check(
+        "injected firewall failure" in err.get("message", ""), "message has the script's error"
+    )
+    ctx.check(f"treebox template path {template}" in err.get("hint", ""), "hint names the template")
+    ctx.eq(failed.stdout, "", "no entry command is emitted")
+    launch = ctx.tb("enter", "e2e-fw", *ctx.wt_args())
+    ctx.exit_is(launch, 1)
+    ctx.check(stub_record(launch.stdout) is None, "the agent is not launched")
+
+
+def wait_for_stub(ctx: Ctx, bg: Background, timeout: float = 60) -> dict[str, Any] | None:
+    """The stub's launch record once a background launch has printed it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and bg.running():
+        rec = stub_record(bg.stdout_so_far())
+        if rec is not None:
+            return rec
+        time.sleep(0.2)
+    return stub_record(bg.stdout_so_far())
+
+
+@scenario("H15", "a sandbox restarted under the agent is a runtime error, not an agent exit")
+def h15(ctx: Ctx) -> None:
+    created(ctx, "e2e-rst", *docker_args(ctx)[2:])
+    name = container(ctx, "e2e-rst")[0]
+    bg = ctx.tb_background("enter", "e2e-rst", *ctx.wt_args(), "--", "--stub-sleep=60")
+    ctx.check(wait_for_stub(ctx, bg) is not None, "the agent runs in the container")
+    ctx.sh("docker", "restart", "-t", "1", name)
+    run = bg.wait(timeout=120)
+    ctx.exit_is(run, 1)
+    ctx.check("stopped or restarted" in run.stderr, "says the sandbox stopped or restarted")
+    ctx.check("agent exited with status" not in run.stderr, "no agent exit line")
+
+
+@scenario("H16", "a harness binary missing from the image is HARNESS_MISSING at launch")
+def h16(ctx: Ctx) -> None:
+    created(ctx, "e2e-nocodex", *docker_args(ctx)[2:])
+    name = container(ctx, "e2e-nocodex")[0]
+    ctx.sh("docker", "exec", "-u", "root", name, "rm", "/usr/local/bin/codex")
+    run = ctx.tb("enter", "e2e-nocodex", *ctx.wt_args(), "--harness", "codex")
+    ctx.exit_is(run, 1)
+    ctx.check("'codex' not found in the sandbox" in run.stderr, "message names the binary")
+    ctx.check("agent exited with status" not in run.stderr, "a treebox failure, not an agent exit")
+    ok = ctx.tb("enter", "e2e-nocodex", *ctx.wt_args(), tags=("agent-exit",))
+    ctx.exit_is(ok, 0)
+
+
+@scenario("H17", "cancel stops the agent inside the container; the container keeps running")
+def h17(ctx: Ctx) -> None:
+    created(ctx, "e2e-cancel", *docker_args(ctx)[2:])
+    name = container(ctx, "e2e-cancel")[0]
+    bg = ctx.tb_background(
+        "enter", "e2e-cancel", *ctx.wt_args(), "--", "--stub-sleep=60", tags=("agent-exit",)
+    )
+    ctx.check(wait_for_stub(ctx, bg) is not None, "the agent runs in the container")
+    bg.signal(signal.SIGTERM)
+    run = bg.wait(timeout=60)
+    ctx.exit_is(run, 143)
+    ctx.check("Cancelled by SIGTERM" in run.stderr, "says it was cancelled")
+    ctx.check("agent exited with status" not in run.stderr, "no agent exit line")
+    top = ctx.sh("docker", "top", name, check=False).stdout
+    ctx.check("sleep 60" not in top, "the agent is gone from the container")
+    ctx.eq(container(ctx, "e2e-cancel")[1], "running", "the container keeps running")
+
+
+@scenario(
+    "H18",
+    "the bundled image: agents, Chromium without its own sandbox, a real firewall",
+    requires=("bundled-image",),
+)
+def h18(ctx: Ctx) -> None:
+    args = [*ctx.wt_args(), "--isolation", "docker", "--firewall"]
+    run = ctx.tb("create", "e2e-bundled", *args, "--print", timeout=3600)
+    ctx.exit_is(run, 0)
+    name = container(ctx, "e2e-bundled")[0]
+
+    def agent(*cmd: str) -> RunRecord:
+        return ctx.sh("docker", "exec", "-u", "agent", name, *cmd, check=False)
+
+    def rules() -> str:
+        return ctx.sh("docker", "exec", "-u", "root", name, "iptables", "-S", "OUTPUT").stdout
+
+    for binary in ("claude", "codex", "uv", "gh"):
+        ctx.eq(agent("sh", "-c", f"command -v {binary}").exit, 0, f"{binary} in the image")
+    chrome = agent(
+        "/opt/google/chrome/chrome", "--headless", "--no-sandbox", "--dump-dom", "about:blank"
+    )
+    ctx.eq(chrome.exit, 0, "Chromium runs headless in the container")
+    ctx.check("No usable sandbox" not in chrome.stderr, "Chromium needs no sandbox of its own")
+    blocked = agent("curl", "-sS", "--max-time", "5", "https://example.com")
+    ctx.check(blocked.exit != 0, "egress to a host outside the allowlist is blocked")
+    ctx.check("REJECT" in rules(), "the egress lockdown is in place")
+    route = ctx.sh("docker", "exec", name, "ip", "route", check=False).stdout.split()
+    gateway = route[route.index("via") + 1] if "via" in route else ""
+    ctx.check(
+        bool(gateway) and f"-d {gateway}/32 -j ACCEPT" not in rules(),
+        f"no blanket exception for the host gateway {gateway} (ALLOWED_HOST_PORTS is empty)",
+    )
+    ctx.sh("docker", "restart", "-t", "1", name)
+    ctx.check("REJECT" not in rules(), "a restart outside treebox drops the rules")
+    ctx.exit_is(ctx.tb("enter", "e2e-bundled", *ctx.wt_args(), "--print", timeout=600), 0)
+    ctx.check("REJECT" in rules(), "the next entry re-applies the lockdown")
 
 
 # --- I. interactive routes (pseudo-terminal) -----------------------------------------------------
@@ -1593,15 +2235,7 @@ def _setup_p(ctx: Ctx) -> None:
     return
 
 
-@scenario(
-    "P1",
-    "parallel creates of different names all succeed",
-    known_bug=(
-        "parallel `create` of different names races on the shared .git/config: one run "
-        "exits 1 (ERROR) with 'could not lock config file .git/config'"
-    ),
-    known_bug_signature=r"could not lock config file .*config: File exists",
-)
+@scenario("P1", "parallel creates of different names all succeed")
 def p1(ctx: Ctx) -> None:
     names = ["par-a", "par-b", "par-c", "par-d"]
     runs = ctx.tb_parallel([["create", n, *ctx.wt_args(), "--json"] for n in names])
@@ -1711,6 +2345,8 @@ def r37(ctx: Ctx) -> None:
     commit_with_index(ctx, "envdir", [("100644", ".env/config", "x=1\n")])
     run = ctx.tb("create", "--checkout", "envdir", *ctx.wt_args(), "--json")
     ctx.exit_is(run, 0)
+    warnings = (ctx.json_out(run) or {}).get("warnings", [])
+    ctx.check(any(".env not copied" in w for w in warnings), f"--json warnings: {warnings}")
     path = wt(ctx, "envdir")
     ctx.check((path / ".env").is_dir(), ".env stays a directory")
     ctx.eq((path / ".env" / "config").read_text(), "x=1\n", "tracked content intact")
@@ -1880,3 +2516,89 @@ def r46(ctx: Ctx) -> None:
         "✓ merged (PR #48)" in rows["squashed"], f"squashed row: {rows['squashed'].strip()!r}"
     )
     ctx.check(wt(ctx, "reused").is_dir() and wt(ctx, "squashed").is_dir(), "nothing removed")
+
+
+# --- U. unattended mode ------------------------------------------------------------------------
+
+
+@group("U", "unattended mode")
+def _setup_u(ctx: Ctx) -> None:
+    created(ctx, "u1")
+
+
+@scenario("U1", "create NAME -- ARGS puts the agent args in the entry command")
+def u1(ctx: Ctx) -> None:
+    run = ctx.tb("create", "u1-task", *ctx.wt_args(), "--json", "--", "-p", "a task")
+    ctx.exit_is(run, 0)
+    d = ctx.json_out(run) or {}
+    entry = d.get("entry_command") or [""]
+    ctx.check(bool(entry) and entry[-1].endswith("-p 'a task'"), f"entry_command: {entry[-1:]}")
+    ctx.eq(d.get("warnings"), [], "warnings")
+    replay = ctx.sh(*entry, check=False)
+    ctx.eq(
+        (stub_record(replay.stdout) or {}).get("args"),
+        [
+            "--dangerously-skip-permissions",
+            "-p",
+            "a task",
+        ],
+        "the replayed entry command gives the agent the args",
+    )
+    nameless = ctx.tb("create", *ctx.wt_args(), "--json", "--", "-p", "x")
+    ctx.exit_is(nameless, 2)
+
+
+@scenario("U2", "--non-interactive never prompts, also with a terminal", requires=("pty",))
+def u2(ctx: Ctx) -> None:
+    for args, env in (
+        (["--non-interactive", "teardown", "u1"], ctx.env),
+        (["teardown", "u1"], dict(ctx.env, TREEBOX_NON_INTERACTIVE="1")),
+        (["--non-interactive", "teardown"], ctx.env),
+    ):
+        with ctx.pty(*args, *ctx.wt_args(), env=env) as term:
+            code = term.wait(timeout=30)
+        text = term.screen_text()
+        ctx.eq(code, 5, f"exit of {' '.join(args)} on a terminal")
+        ctx.check("Remove worktree" not in text and "Select worktrees" not in text, "no prompt")
+        ctx.check("non-interactively" in text, "says it refuses without a prompt")
+    ctx.check(wt(ctx, "u1").is_dir(), "nothing removed")
+
+
+@scenario("U3", "the agent exit line names a non-zero agent status")
+def u3(ctx: Ctx) -> None:
+    for stub_arg, status, line in (
+        ("--stub-exit=3", 3, "treebox: agent exited with status 3"),
+        ("--stub-kill=KILL", 137, "treebox: agent exited with status 137 (killed by SIGKILL)"),
+    ):
+        run = ctx.tb("enter", "u1", *ctx.wt_args(), "--", stub_arg, tags=("agent-exit",))
+        ctx.exit_is(run, status)
+        ctx.eq(run.stderr.splitlines()[-1:], [line], "last stderr line")
+    ok = ctx.tb("enter", "u1", *ctx.wt_args(), tags=("agent-exit",))
+    ctx.exit_is(ok, 0)
+    ctx.check("agent exited" not in ok.stderr, "no line for an agent exit of 0")
+
+
+@scenario("U4", "a cancel signal stops the agent; treebox exits 128 + signal")
+def u4(ctx: Ctx) -> None:
+    for signum, code in ((signal.SIGTERM, 143), (signal.SIGINT, 130)):
+        bg = ctx.tb_background(
+            "enter", "u1", *ctx.wt_args(), "--", "--stub-sleep=60", tags=("agent-exit",)
+        )
+        rec = wait_for_stub(ctx, bg)
+        if not ctx.check(rec is not None, "the agent runs"):
+            bg.signal(signal.SIGKILL)
+            bg.wait()
+            return
+        assert rec is not None
+        bg.signal(signum)
+        run = bg.wait(timeout=60)
+        ctx.exit_is(run, code)
+        ctx.check(f"Cancelled by {signum.name}" in run.stderr, "says it was cancelled")
+        ctx.check("agent exited with status" not in run.stderr, "no agent exit line")
+        try:
+            os.kill(int(rec["pid"]), 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        ctx.check(not alive, f"the agent process {rec['pid']} is gone")
+    ctx.check(wt(ctx, "u1").is_dir(), "the worktree is kept")

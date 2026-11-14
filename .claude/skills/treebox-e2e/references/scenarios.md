@@ -78,6 +78,20 @@ Conventions used below:
 - [ ] **A8 help** - `tb --help`, bare `tb`, `tb create --help`, `tb template init -h`
       Expect: `--help` exits 0 and lists every visible command but not the
       `ls`/`rm` aliases; bare `tb` exits 2 with usage; subcommand help exits 0.
+- [ ] **A9 doctor --harness** - `tb doctor -H codex --json`; again with a `PATH`
+      that has the stub `claude` but no `codex`; again after
+      `rm "$HOME/.codex/auth.json"`; then plain `tb doctor --json`
+      Expect: exit 0 with `agent: codex` and `login: codex` rows ok; exit 1
+      with the `agent: codex` row failed; exit 1 with the `login: codex` row
+      failed; plain doctor (claude) exits 0 (the other harness's login is
+      optional).
+- [ ] **A10 macOS Keychain login** (macOS; boundary: a fake `security` first on
+      `PATH`, never the real Keychain) - `rm "$HOME/.claude/.credentials.json"`;
+      `tb doctor --json` with a `security` that prints a JSON login, then with
+      one that exits 44 (item not found)
+      Expect: exit 0, the `login: claude` row ok and its detail names the
+      Keychain, and treebox asked for the `Claude Code-credentials` item; then
+      exit 1 with the row failed. SKIP on other platforms.
 
 ## B. create
 
@@ -85,15 +99,20 @@ Conventions used below:
       Expect: exit 0; JSON on stdout with `name: "fix-auth"`,
       `branch: "fix-auth"`, `base: "main"`, `created: true`, `worktree_path`
       under `$ROOT`, `entry_command` that `cd`s into the worktree and execs the
-      harness. Filesystem: `$ROOT/fix-auth/.venv` exists; `$ROOT/fix-auth/.env`
-      content equals the repo's `.env` (`SECRET=canonical`); branch of the
-      worktree is `fix-auth`.
+      harness, `id` (10 lowercase hex), `port_base: 20000` and `port_count: 10`
+      (the first block of the default range), `warnings: []`; `list --json`
+      shows the same `id` and `port_base`. Filesystem: `$ROOT/fix-auth/.venv`
+      exists; `$ROOT/fix-auth/.env` content equals the repo's `.env`
+      (`SECRET=canonical`); branch of the worktree is `fix-auth`.
 - [ ] **B2 nameless create (petname placeholder)** — `tb create --repo "$REPO" --root "$ROOT" --json`
       Expect: exit 0; generated `name` (petname), `branch` = `treebox/<name>`;
       `tb list --json` shows it with `"unnamed": true`.
 - [ ] **B3 slash name flattening** — `tb create feature/auth --repo "$REPO" --root "$ROOT" --json`
       Expect: exit 0; `branch: "feature/auth"`; directory leaf is
-      `feature--auth`; `name` is the flattened form.
+      `feature--auth`; `name` is the flattened form. Then
+      `tb create --checkout treebox/a/b … --json` (a placeholder-shaped
+      branch): `name: "a--b"` (the `treebox/` prefix drops, the rest
+      flattens), and no nested `treebox/` directory exists.
 - [ ] **B4 --base** — `tb create from-dev --base dev --repo "$REPO" --root "$ROOT" --json`
       (first push a commit to `dev`, so `origin/dev` differs from `main`)
       Expect: exit 0; `base: "dev"`; the new branch's head equals
@@ -157,11 +176,14 @@ owns this setup; none needs B1 to run first.
       (no `--print`: this launches the agent, which in the fixture is the stub)
       Expect: exit 0; the stub's record on stdout shows `name=claude`, `cwd` =
       the worktree, args exactly `--dangerously-skip-permissions`,
-      `in_container=no`, `api_key=unset`.
+      `in_container=no`, `api_key=unset`, and `TREEBOX_NAME=launch-host`,
+      `TREEBOX_ID` / `TREEBOX_PORT_BASE` equal to `list --json`'s `id` /
+      `port_base`, `TREEBOX_PORT_COUNT=10`.
 - [ ] **B16 launch without the agent binary** - B15's command with the stub dir
       removed from `PATH` (and no other `claude` reachable)
-      Expect: exit 1; stderr names `'claude' not found on PATH`; no traceback;
-      the provisioned worktree stays for a later `enter`.
+      Expect: exit 1 (`HARNESS_MISSING`); stderr names `'claude' not found on
+      PATH`; no traceback; nothing provisioned (no worktree, no branch): the
+      agent is checked before provisioning.
 - [ ] **B17 BRANCH_IN_USE** - `tb create dup --checkout fix-auth … --json` (fix-auth is checked out)
       Expect: exit 5, `BRANCH_IN_USE`; nothing created.
 - [ ] **B18 INVALID_BRANCH** - `tb create --checkout bad..ref … --json`
@@ -185,6 +207,38 @@ owns this setup; none needs B1 to run first.
 - [ ] **B24 --cold** - `tb create cold-x … --cold --print`
       Expect: exit 0; stderr reports the setup as `from-source (cold)`; `.venv`
       exists; no `treebox-cold-*` dir is left in `$TMPDIR`.
+- [ ] **B25 LOGIN_MISSING** - `rm "$HOME/.claude/.credentials.json"` (the
+      fixture's `security` finds no Keychain item), then
+      `tb --non-interactive create b25 …` and
+      `TREEBOX_NON_INTERACTIVE=1 tb create b25 …` (launches)
+      Expect: exit 1 each; stderr says `No claude login for an unattended
+      launch`; the agent never starts; no worktree, no branch.
+- [ ] **B26 resource flags without an engine** - `tb create b26 … --memory 4g
+      --json` (host isolation); `tb create e2e-b26 … --isolation docker
+      --memory lots --json`; `… --isolation docker --cpus 1.5 --memory 512m
+      --pids-limit 64 --dry-run --json`
+      Expect: exit 2 `RESOURCE_UNSUPPORTED`; exit 2 `INVALID_RESOURCE`; neither
+      leaves a worktree or branch; the plan has `resources: {cpus: 1.5,
+      memory: "512m", pids: 64}` and its `docker run` carries `--cpus 1.5
+      --memory 512m --pids-limit 64`.
+- [ ] **B27 INVALID_ROOT** - a plain file `$SBX/afile`; `create`, `enter`,
+      `list` and `teardown` with `--root "$SBX/afile"` and with
+      `--root "$SBX/afile/below"` (`--json`)
+      Expect: exit 2 `INVALID_ROOT` each; the real worktree is untouched.
+- [ ] **B28 the branch's own .gitmodules** - add submodule `sub` on `main`;
+      branch `b28-extra` adds a `ghost` entry to `.gitmodules`; branch
+      `b28-nosub` drops `.gitmodules` and `sub`. `tb create b28 … --dry-run
+      --json`, `tb create --checkout b28-extra … --dry-run --json`, then the
+      real `--print` and `tb create --checkout b28-nosub … --json`
+      Expect: the `main` plan has `# copy submodule sub …`; the `b28-extra` plan
+      has `# submodules: skipped ghost …`, and the real run notes `skipped
+      ghost` on stderr, copies `sub`, and leaves `git status` clean (the
+      branch's `.gitmodules` is never written); `b28-nosub` gets no `sub` and
+      is clean too.
+- [ ] **B29 RUNNING_AS_ROOT** (root only) - as uid 0,
+      `tb create e2e-root … --isolation docker --json`
+      Expect: exit 1 `RUNNING_AS_ROOT`; nothing provisioned. SKIP when the run
+      is not root (the Mac and the CI runners are not).
 
 ## C. enter
 
@@ -217,41 +271,19 @@ Setup: `tb create fix-auth … --json` (as B1).
       (worktree was created with host isolation)
       Expect: exit 5 conflict — an explicit mismatched `--isolation` never
       silently re-provisions; the recorded choice wins over config drift too.
-- [ ] **C8 policy and setup result live in the host-owned record** — write a
-      state file into the sandbox-writable git dir
-      (`$(git -C "$ROOT/fix-auth" rev-parse --absolute-git-dir)/treebox-state.json`)
-      with `{"isolation": "docker", "template": "/etc", "provisioned": true}`,
-      then `tb enter fix-auth … --print`
-      Expect: exit 0, still the host launch command; `tb list --json` still
-      reports `host` (the policy comes from `$ROOT/.records/fix-auth.json`).
-- [ ] **C10 failed setup is a failed create; enter retries** — with
-      `setup_hook = ["exit 7"]` in `$TREEBOX_CONFIG`, `tb create c10 … --json`
-      Expect: exit 1, `"code": "SETUP_FAILED"`, the message names
-      `setup · hook 1` and status 7, `error.path` is
-      `$ROOT/.logs/c10.setup.log`; the worktree is kept; `list --json` shows
-      `setup: "failed"`, `deps: "unknown"`. `tb enter c10 … --json` runs the
-      hook again; after fixing the hook it exits 0 and `list` shows `fresh`.
-- [ ] **C11 invalid linkage** — `rm "$ROOT/c10/.git"`, then
-      `tb enter c10 … --json`
-      Expect: exit 5, `"code": "INVALID_LINKAGE"`; `list --json` shows
-      `health: "invalid_linkage"`, `missing: true`; `tb teardown c10 … --force`
-      removes the directory and the registration.
-- [ ] **C9 no record: recreate** - `tb create e2e-norec … --print`, then
-      `rm "$ROOT/.records/e2e-norec.json"` and `tb enter e2e-norec … --json`
-      Expect: exit 5, `"code": "RECORD_MISSING"`, hint names
-      `treebox teardown e2e-norec` and `treebox create`; nothing launches;
-      `list` shows isolation unknown and `health: "unreadable_state"`.
-      `tb teardown e2e-norec … --force --json` (no extra flag): exit 0, the
-      worktree and its record are gone.
 
 - [ ] **C8 real launch on enter** - `tb enter fix-auth … -- --stub-exit=7 "continue the refactor"`
-      Expect: exit 7 (enter exits with the agent's status); the stub saw
+      Expect: exit 7 (enter exits with the agent's status); the last stderr
+      line is `treebox: agent exited with status 7`; the stub saw
       `--dangerously-skip-permissions --stub-exit=7 'continue the refactor'` in
       the worktree dir.
-- [ ] **C9 UNKNOWN_ISOLATION** - create `c9-corrupt`, set `"isolation": "qemu"` in
-      its `treebox-state.json` (in `git rev-parse --absolute-git-dir`), then
+- [ ] **C9 RECORD_INVALID** - create `c9-corrupt`, set `"isolation": "qemu"` in
+      its record `$ROOT/.records/c9-corrupt.json`, then
       `tb enter c9-corrupt … --json`
-      Expect: exit 5, `UNKNOWN_ISOLATION`.
+      Expect: exit 5, `RECORD_INVALID`, `error.path` is the record; `list
+      --json` shows `health: "unreadable_state"` and isolation `""`; a plain
+      `tb teardown c9-corrupt … --force --json` exits 0 and removes the
+      worktree and its record.
 - [ ] **C10 recorded harness** - `tb create c10-codex … --harness codex`, then
       `tb enter c10-codex … --print`, with `--harness claude`, and once more without
       Expect: codex, then claude (a per-session override), then codex again.
@@ -262,6 +294,47 @@ Setup: `tb create fix-auth … --json` (as B1).
       change the manifest, then `--verbose --print`
       Expect: `--quiet` leaves stderr empty; `--verbose` streams uv's own output
       (`Resolved …`) during the re-sync.
+- [ ] **C13 policy lives in the host-owned record** - write a state file into
+      the sandbox-writable git dir
+      (`$(git -C "$ROOT/fix-auth" rev-parse --absolute-git-dir)/treebox-state.json`)
+      with `{"isolation": "docker", "template": "/etc", "provisioned": true}`,
+      then `tb enter fix-auth … --print`
+      Expect: exit 0, still the host launch command; `tb list --json` still
+      reports `host`, as does `$ROOT/.records/fix-auth.json`.
+- [ ] **C14 failed setup is a failed create; enter retries** - with
+      `setup_hook = ["exit 7"]` in `$TREEBOX_CONFIG`, `tb create c14 … --json`
+      Expect: exit 1, `SETUP_FAILED`, the message names `setup · hook 1` and
+      status 7, `error.path` is `$ROOT/.logs/c14.setup.log` (it exists); the
+      worktree is kept; `list --json` shows `setup: "failed"`,
+      `deps: "unknown"`. `tb enter c14 … --json` runs the hook again (exit 1,
+      `SETUP_FAILED`); after fixing the hook it exits 0 and `list` shows
+      `setup: "done"`, `deps: "fresh"`.
+- [ ] **C15 INVALID_LINKAGE** - create `c15`, `rm "$ROOT/c15/.git"`, then
+      `tb enter c15 … --json`
+      Expect: exit 5, `INVALID_LINKAGE`; `list --json` shows
+      `health: "invalid_linkage"`, `missing: true`; `tb teardown c15 … --force`
+      removes the directory and the registration.
+- [ ] **C16 RECORD_MISSING: recreate** - `tb create e2e-norec … --print`, then
+      `rm "$ROOT/.records/e2e-norec.json"` and `tb enter e2e-norec … --json`
+      Expect: exit 5, `RECORD_MISSING`, hint names `treebox teardown e2e-norec`
+      and `treebox create`; nothing is emitted; `list` shows isolation `""`
+      and `health: "unreadable_state"`. `tb teardown e2e-norec … --force
+      --json` (no extra flag): exit 0, the worktree is gone.
+- [ ] **C17 RECORD_CONFLICT** - with `setup_hook = ["exit 7"]`,
+      `tb create c17 … --harness codex --json` (exit 1, `SETUP_FAILED`); with
+      an empty config, `tb create c17 … --harness claude --json`, then the same
+      with `--harness codex`
+      Expect: the resumed create with other settings exits 5
+      `RECORD_CONFLICT` and its hint gives the recorded ones (`-H codex`); the
+      one with the recorded settings exits 0 and finishes setup
+      (`setup: "done"`).
+- [ ] **C18 absolute path refs** - `tb enter "$ROOT/fix-auth" … --json`; `tb
+      enter "$ROOT/fix" … --json` and `tb teardown "$ROOT/fix" … --force
+      --json` (a path no worktree is registered at, a substring of one); `tb
+      teardown "$ROOT/fix-auth" … --force --json`
+      Expect: exit 0 with that `worktree_path`; exit 3 `NOT_FOUND` both (a path
+      never falls back to a substring match), `fix-auth` intact; exit 0 and it
+      is removed.
 
 ## D. list
 
@@ -278,7 +351,10 @@ a registration treebox never provisioned (`git -C "$REPO" worktree add -b d-raw
 - [ ] **D2 json shape** — `tb list --repo "$REPO" --root "$ROOT" --json`
       Expect: exit 0; `worktrees[]` where each entry has `name`, `branch`,
       `unnamed`, `missing`, `path`, `base`, `isolation`, `harness`, `deps`
-      (`fresh|stale`), `env`, `health` (`healthy`), `setup` (`done`).
+      (`fresh|stale`), `env`, `health`, `setup`, `id`, `port_base`,
+      `port_count`, `resources`. `d-one`: `health: "healthy"`, `setup:
+      "done"`; `d-raw` (no record): isolation `""`, `health:
+      "unreadable_state"`, `setup: ""`, `port_base` and `resources` `null`.
 - [ ] **D3 empty root** — `tb list --repo "$REPO" --root "$SBX/empty" --json`
       Expect: exit 0; `"worktrees": []` (not an error).
 
@@ -295,10 +371,11 @@ Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
       the uncommitted-changes path instead.
       `tb teardown e2e-clean-td --repo "$REPO" --root "$ROOT"` (no `--force`, stdin
       not a TTY)
-      Expect: exit 5; worktree untouched; message says `--yes` (or `--force`) is
-      required for non-interactive teardown. Then `--yes`: exit 0, removed.
-      With a dirty tree, `--yes` is still exit 5 `DIRTY_WORKTREE` (it confirms
-      only).
+      Expect: exit 5 (`NEEDS_CONFIRMATION` with `--json`); worktree
+      untouched; message says `--yes` (or `--force`) is required for
+      non-interactive teardown. With a dirty `fix-auth`, `--yes --json` is
+      still exit 5 `DIRTY_WORKTREE` (it confirms only). Then `-y`: exit 0,
+      `e2e-clean-td` removed.
 - [ ] **E2 dirty worktree needs --force** — `touch "$ROOT/fix-auth/junk.txt"`,
       teardown without `--force`
       Expect: exit 5 (dirty), worktree intact; then with `--force`: removed.
@@ -332,9 +409,11 @@ Setup: `e2e-clean-td` (clean), and `fix-auth` with its branch renamed to
       `tb teardown repo --repo "$REPO" --root "$SBX" --force --json` (a root that
       contains the repo, a branch named like its directory)
       Expect: exit 5, `MAIN_WORKTREE`; the main checkout intact.
-- [ ] **E10 teardown --isolation mismatch** - `tb teardown e2e-clean-td … --isolation docker`
-      (human, then `--force --json`)
-      Expect: exit 5 both; `ISOLATION_MISMATCH`; nothing removed.
+- [ ] **E10 WORKTREE_LOCKED** - `git -C "$REPO" worktree lock "$ROOT/e2e-clean-td"`,
+      then `tb teardown e2e-clean-td … --force --json`
+      Expect: exit 5 `WORKTREE_LOCKED` (also with `--force`), the hint says
+      `worktree unlock`; nothing removed. After the unlock the same teardown
+      exits 0.
 - [ ] **E11 teardown --quiet / --verbose** - `--force --quiet` on one throwaway,
       `--force --verbose` on another
       Expect: exit 0; `--quiet` leaves stderr empty; `--verbose` reports the removal.
@@ -372,11 +451,15 @@ own `copytpl` before testing permissions.
 - [ ] **F8 bad names and self-copy** - `tb template init ../escape --json`;
       `tb template init mytpl --from mytpl --force --json`
       Expect: exit 2 `INVALID_NAME`; exit 2 `TEMPLATE_CONFLICT`, `mytpl` intact.
-- [ ] **F9 copy and overwrite failures** (non-root) - `chmod 555` the templates
-      dir, `tb template init denied --json`; restore it, put a read-only subdir in
-      `copytpl`, `tb template init copytpl --force --json`
-      Expect: exit 1 `COPY_FAILED`; exit 1 `OVERWRITE_FAILED`, and no
-      `.copytpl.treebox-tmp` staging dir left behind. SKIP as root.
+- [ ] **F9 init --force is all-or-nothing** (non-root) - `chmod 555` an empty
+      templates dir, `tb template init denied --json`; restore it, `tb template
+      init copytpl`, mark it, `chmod 555` the templates dir again and `tb
+      template init copytpl --force --json`; restore it, put a read-only subdir
+      in `copytpl`, `tb template init copytpl --force`
+      Expect: exit 1 `COPY_FAILED`; exit 1 `OVERWRITE_FAILED` and the old
+      template is byte-for-byte unchanged; exit 0 with a warning on stderr that
+      the previous copy could not be removed, and `copytpl` is the complete new
+      template (`valid: true`, no marker). SKIP as root.
 
 ## G. config (user-level TOML)
 
@@ -420,6 +503,25 @@ Each writes `$TREEBOX_CONFIG`, runs, then restores the empty file (`: > "$TREEBO
       Expect: `templateDirOverride` is the dir and wins for any name; the plan's
       build carries `--build-arg TZ=Europe/Helsinki`. (`TREEBOX_HOME` is F3,
       `TREEBOX_CONFIG` is G1.)
+- [ ] **G14 [ports]** - `[ports] start = 30000, end = 30019, block_size = 10`;
+      create `g14-a`, `g14-b`, then `g14-c`; tear down `g14-a`; create `g14-c`
+      again; `tb enter g14-b … --json`
+      Expect: `port_base` 30000 and 30010; `g14-c` exits 5 `PORTS_EXHAUSTED`
+      with `error.path` = `$TREEBOX_HOME/ports.json` and leaves no worktree or
+      branch; after the teardown `g14-c` gets 30000; the enter keeps 30010.
+- [ ] **G15 PORT_LEDGER_INVALID** - write `not json` to `$TREEBOX_HOME/ports.json`,
+      `tb create g15 … --json`
+      Expect: exit 1 `PORT_LEDGER_INVALID`, `error.path` is the ledger, the
+      ledger is byte-for-byte unchanged, no worktree.
+- [ ] **G16 [resources]** - `[resources] memory = "2g", pids = 128`;
+      `tb create e2e-g16 … --isolation docker --dry-run --json`, again with
+      `--memory 1g`; `tb create g16-host … --json` (host); then
+      `memory = "lots"` and `tb list … --json`
+      Expect: the plan's `resources` is `{cpus: null, memory: "2g", pids: 128}`
+      and its `docker run` carries `--memory 2g --pids-limit 128`; the flag
+      wins (`1g`); the host create exits 0 and records no limits (config
+      limits never refuse a host worktree); the bad value is exit 2
+      `INVALID_CONFIG`.
 
 ## H. docker isolation (requires a reachable engine and the base image)
 
@@ -453,19 +555,13 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       Expect: the rendered container config/build context (and staged credential
       copies) live under `$ROOT/.containers/<branch>/`, **not** inside the worktree
       — the boxed agent must not be able to edit its own sandbox definition.
-- [ ] **H3 unknown template is loud** — `tb create e2e-tpl-ghost … --isolation docker --template ghost`
-      Expect: a loud non-zero exit (no fallback to the bundled default) whose
-      message names the missing template. Note the exit code is `1` here (the
-      failure surfaces mid-provision, after the worktree is added host-side), not
-      the `3` that `template path ghost` / `template init --from ghost` return — an
-      inconsistency worth flagging, but not itself a failure of this scenario.
-      Because provisioning is host-side and completes `worktree add` before the
-      docker step fails, `$ROOT/e2e-tpl-ghost/` is **left on disk** (a re-run would
-      then hit SLUG_CONFLICT); the sandbox files under `.containers/` are not
-      written. That leftover worktree is expected given the provision-then-run
-      architecture — record it, don't fail on it. Note: under *host* isolation an
-      unknown `--template` is currently accepted silently (templates are
-      docker-only) — also expected.
+- [ ] **H3 unknown template is loud** - `tb create e2e-tpl-ghost … --isolation docker --template ghost --json`, twice
+      Expect: exit 3 `TEMPLATE_NOT_FOUND` both times (no fallback to the
+      bundled default), the message names the template; the template is
+      resolved before provisioning, so no worktree, branch, sandbox files or
+      container is left and the second run gets the same error, never
+      `SLUG_CONFLICT`. (Under *host* isolation an unknown `--template` is
+      accepted: templates are docker-only.)
 - [ ] **H4 recorded isolation reused** — `tb enter e2e-dockered … --print` with no
       `--isolation` flag
       Expect: exit 0; still docker (recorded at create), even if the config
@@ -475,56 +571,15 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       Expect: exit 0; the container is running again (`docker ps`) *before* the
       command is printed, so the emitted `docker exec …` replays cleanly — a
       stopped sandbox never yields a dead entry command: run the printed command
-      and the stub answers from inside the container. With a `--firewall`
-      worktree, egress lockdown is re-applied on the restart (iptables rules
-      don't survive a container restart); the offline template has no firewall,
-      so that half needs a firewall-capable template and is not automated.
+      and the stub answers from inside the container. (The firewall on every
+      entry is H14; the real egress lockdown after a restart is H18.)
 - [ ] **H6 docker teardown** — `tb teardown e2e-dockered … --force --json`; then
       `--remove-volumes` on a fresh `e2e-dockered2`; then `--skip-container` on a
       fresh `e2e-dockered3`
       Expect: exit 0 each; `--remove-volumes` reports `volumes_removed: true`;
       `--skip-container` reports `container: "skipped"` and leaves the container
       running (the `e2e-` name means `e2e_cleanup` still reaps it later); the
-      worktree dir is removed. A cleanup step that fails is a failed teardown:
-      put a `docker` wrapper first on `PATH` that exits 1 for `rm` of the
-      `treebox-e2e-*` container. Expect exit 1, `TEARDOWN_INCOMPLETE`,
-      `complete: false`, `remaining` names the container; the worktree, its
-      record and `.containers/<name>/treebox-resources.json` stay. Without the
-      wrapper the same teardown exits 0 and leaves no container, image, volume,
-      manifest or record.
-
-- [ ] **H7 resource limits** - `tb create e2e-lim … --isolation docker --cpus 1
-      --memory 512m --pids-limit 64 --json`; then `tb enter e2e-lim … --memory 1g
-      --json`; then `tb create e2e-lim-host … --memory 4g --json` (host isolation)
-      Expect: create exit 0 with `resources: {cpus: 1, memory: "512m", pids: 64}`,
-      and `docker inspect` of the container shows `HostConfig.Memory` 536870912,
-      `NanoCpus` 1000000000, `PidsLimit` 64 (`list --json` shows the same
-      `resources`); the enter exits 5 `RESOURCE_MISMATCH` with re-create commands
-      in the hint; the host create exits 2 `RESOURCE_UNSUPPORTED` and leaves no
-      worktree. A bad value (`--memory lots`) exits 2 `INVALID_RESOURCE` with no
-      worktree, branch or image left behind. Drift: with `[resources] memory =
-      "2g"`, `create e2e-lim … --memory 4g`, then set `memory = "3g"`: `enter
-      --print` shows no `limits:` warning and `enter --json` has
-      `resources_drift` all `null` (a flag choice never drifts); a worktree whose
-      memory came from the config warns once per `enter` and `enter --json`
-      shows `resources_drift.memory: "3g"`.
-
-## U. unattended mode
-
-- [ ] **U1 agent args on create** - `tb create u1 --repo "$REPO" --root "$ROOT" --json -- -p "a task"`
-      Expect: exit 0; `entry_command` ends with the agent args; `warnings: []`.
-- [ ] **U2 no prompt with a terminal** - with a pty attached (`python3 -c
-      'import pty,sys; pty.spawn(sys.argv[1:])' ...`), `tb --non-interactive
-      teardown u1 --repo "$REPO" --root "$ROOT"`
-      Expect: exit 5 `NEEDS_CONFIRMATION` at once, no prompt.
-- [ ] **U3 agent exit line** - stub `claude` (exits 3) first on `PATH`;
-      `tb enter u1 --repo "$REPO" --root "$ROOT"`
-      Expect: exit 3; last stderr line `treebox: agent exited with status 3`.
-- [ ] **U4 cancellation** - stub `claude` that sleeps; `kill -TERM` the
-      treebox process during `tb enter u1 ...`
-      Expect: exit 143; the stub process is gone; error `CANCELLED`. For a
-      docker worktree (`e2e-` name), `docker top` shows no stub afterwards
-      and the container is still running.
+      worktree dir is removed. (A cleanup step that fails is H10.)
 
 - [ ] **H7 real launch in the container** - `tb create e2e-launch …` (no
       `--print`), then `tb enter e2e-launch … -- --stub-exit=3`
@@ -539,16 +594,81 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       `tb enter e2e-gone … --json`
       Expect: exit 1, `ERROR`, message `No container exists …` (never a dead
       `docker exec` command).
-- [ ] **H10 injected engine failure** (boundary) - create `e2e-gone`, remove
-      its container, and verify teardown still succeeds. Create `e2e-fail-rm`.
-      Put `tests/e2e/fakes` first on
-      `PATH` with `TREEBOX_E2E_DOCKER_FAIL=rm` and `TREEBOX_E2E_REAL_DOCKER` set;
-      `tb teardown e2e-fail-rm … --force --json`
-      Expect: exit 0; `container: "failed"`; the worktree removed anyway.
+- [ ] **H10 incomplete teardown** (boundary) - put `tests/e2e/fakes` first on
+      `PATH` with `TREEBOX_E2E_DOCKER_FAIL=rm` and `TREEBOX_E2E_REAL_DOCKER`
+      set. Create `e2e-gone`, remove its container by hand, and tear it down
+      through the fake. Then create `e2e-fail-rm` and
+      `tb teardown e2e-fail-rm … --force --json` through the fake; then the
+      same teardown without the fake
+      Expect: `e2e-gone` exits 0 (no container to remove). `e2e-fail-rm` exits
+      1 `TEARDOWN_INCOMPLETE`: the record says `container: "failed"`,
+      `complete: false`, `remaining` names the container, and the worktree,
+      its record and `.containers/e2e-fail-rm/treebox-resources.json` stay.
+      The retry exits 0 and leaves no container, worktree, record or
+      manifest.
 - [ ] **H11 enter --template** - `tb enter e2e-launch … --template e2e-offline --print`,
       then `--template ghost --json`
       Expect: exit 0 both: the template is read only when setup re-runs, so an
       existing container stays enterable.
+- [ ] **H12 resource limits** - `tb create e2e-lim … --cpus 1 --memory 512m
+      --pids-limit 64 --json`; `tb enter e2e-lim … --memory 512m --json` and
+      `--memory 1g --json`. Drift: with `[resources] memory = "2g"` create
+      `e2e-lim-cfg`, set `memory = "3g"`, then `enter --json` of `e2e-lim-cfg`
+      and of `e2e-lim`
+      Expect: create exit 0 with `resources: {cpus: 1, memory: "512m", pids:
+      64}`; `docker inspect` shows `HostConfig.Memory` 536870912, `NanoCpus`
+      1000000000, `PidsLimit` 64; `list --json` shows the same `resources`. The
+      same value enters (exit 0); another exits 5 `RESOURCE_MISMATCH` with
+      `treebox teardown` / `treebox create` in the hint. `e2e-lim-cfg` reports
+      `resources_drift.memory: "3g"` and one warning; `e2e-lim` (limits chosen
+      by flags) has `resources_drift` all `null`.
+- [ ] **H13 macOS Keychain login staged** (macOS + docker; boundary: a fake
+      `security`) - `rm "$HOME/.claude/.credentials.json"`, a `security` that
+      prints a JSON login, `tb create e2e-kc … --json`
+      Expect: exit 0; `$ROOT/.containers/e2e-kc/credentials/claude/.credentials.json`
+      is a regular file with that login and no group or other permission
+      bits; `cat /home/agent/.claude/.credentials.json` in the container shows
+      it. SKIP without macOS or docker.
+- [ ] **H14 firewall on every entry, FIREWALL_FAILED** - a template `e2e-fw`:
+      the offline template plus `firewall.json` (`TREEBOX_FIREWALL=1`) and an
+      `init-firewall.sh` that appends to `/tmp/treebox-e2e-firewall-runs` and
+      fails when `/tmp/treebox-e2e-firewall-fail` exists (it counts runs; it
+      blocks nothing). `tb create e2e-fw … --template e2e-fw --firewall
+      --json`; `tb enter … --print`; `docker restart` the container and
+      `enter --print` again; create the fail flag, then `tb enter … --json`
+      and a plain `tb enter …` (launch)
+      Expect: the first run happened before the post-create setup; each entry
+      adds one run, also to a running container and after a restart outside
+      treebox; with the flag: exit 1 `FIREWALL_FAILED` whose message has the
+      script's `ERROR` line and whose hint names `treebox template path
+      e2e-fw`, stdout empty (no entry command), and the launch exits 1
+      without starting the agent.
+- [ ] **H15 sandbox restarted under the agent** - `tb enter e2e-rst … --
+      --stub-sleep=60` in the background; once the stub runs, `docker restart
+      -t 1` the container
+      Expect: exit 1; stderr says the sandbox `stopped or restarted`; no agent
+      exit line (the agent's own status is unknown).
+- [ ] **H16 HARNESS_MISSING in the sandbox** - `docker exec -u root <ctr> rm
+      /usr/local/bin/codex`, then `tb enter e2e-nocodex … --harness codex`
+      (launch); then a plain `tb enter e2e-nocodex …`
+      Expect: exit 1, stderr says `'codex' not found in the sandbox`, no agent
+      exit line; the plain enter (claude) exits 0.
+- [ ] **H17 cancellation in the container** - `tb enter e2e-cancel … --
+      --stub-sleep=60` in the background; once the stub runs, SIGTERM the
+      treebox process
+      Expect: exit 143, stderr `Cancelled by SIGTERM`, no agent exit line;
+      `docker top` shows no `sleep 60`; the container is still running.
+- [ ] **H18 bundled image** (opt-in: `TREEBOX_E2E_BUNDLED_IMAGE=1`; builds the
+      5.6 GB bundled image and needs the network) - `tb create e2e-bundled …
+      --isolation docker --firewall --print` with the default template
+      Expect: exit 0; `claude`, `codex`, `uv` and `gh` are on the agent's
+      `PATH`; `/opt/google/chrome/chrome --headless --no-sandbox --dump-dom
+      about:blank` exits 0 as the agent (Chromium needs no sandbox of its
+      own); `curl https://example.com` fails (egress lockdown) and `iptables
+      -S OUTPUT` has `REJECT` and no blanket `ACCEPT` for the host gateway (the
+      template's `ALLOWED_HOST_PORTS` is empty). After `docker restart` the
+      rules are gone; the next `enter --print` puts them back. SKIP unless
+      opted in.
 
 ## I. interactive prompts (pseudo-terminal)
 
@@ -572,11 +692,8 @@ terminal (stdin, stdout and stderr a tty); the harness uses Python's `pty`.
 ## P. parallel dispatch
 
 - [ ] **P1 parallel creates** - four `tb create par-<x> … --json` started at once
-      Expect: exit 0 each; every worktree listed with fresh deps and a `.env`.
-      Known product bug on `main` (56271e6): concurrent `git worktree add -b`
-      runs collide on the shared `.git/config` lock and one create exits 1
-      (`could not lock config file .git/config: File exists`). The harness
-      reports this as KNOWN-BUG, by its signature only.
+      Expect: exit 0 each (the repository lock serializes the shared git
+      writes); every worktree listed with fresh deps and a `.env`.
 - [ ] **P2 same name at once** - two `tb create par-same … --json` at once
       Expect: one exits 0, the other 5 (`LOCK_HELD`, `BRANCH_EXISTS` or
       `SLUG_CONFLICT`); exactly one registration.
@@ -593,9 +710,10 @@ Each fails on `e8a7fa1` (before the fixes) and passes after them.
 
 - [ ] **R37 `.env` directory (#37)** - a branch `envdir` that commits `.env/config`;
       `tb create --checkout envdir … --json`, then `tb enter envdir … --print`
-      Expect: exit 0 both; `.env` stays a directory with its tracked content;
-      `list --json` says `env: absent`; enter warns `.env not copied` on
-      stderr; no traceback.
+      Expect: exit 0 both; the create's `warnings` has the `.env not copied`
+      entry; `.env` stays a directory with its tracked content; `list --json`
+      says `env: absent`; enter warns `.env not copied` on stderr; no
+      traceback.
 - [ ] **R38 stray directory hint (#38)** - `mkdir "$ROOT/junk"`, `tb create junk … --json`
       Expect: exit 5 `SLUG_CONFLICT` whose hint gives `rm -rf …` and does not
       recommend `treebox teardown junk` (which exits 3 for it); after the
@@ -630,6 +748,33 @@ Each fails on `e8a7fa1` (before the fixes) and passes after them.
       resolves); open the chooser with `tests/e2e/fakes` first on `PATH`
       Expect: `reused` shows `merge not verified for current tip`, never
       `✓ merged`; `squashed` shows `✓ merged (PR #48)`; Ctrl+C removes nothing.
+
+## U. unattended mode
+
+Setup: `tb create u1 … --json`.
+
+- [ ] **U1 agent args on create** - `tb create u1-task … --json -- -p "a task"`;
+      replay its `entry_command` (with the stub first on `PATH`); `tb create
+      … --json -- -p x` (no name)
+      Expect: exit 0; `entry_command` ends with `-p 'a task'`; `warnings: []`;
+      the replay gives the agent `--dangerously-skip-permissions -p 'a task'`;
+      agent args without a name exit 2.
+- [ ] **U2 no prompt with a terminal** - on a pty: `tb --non-interactive
+      teardown u1 …`, `TREEBOX_NON_INTERACTIVE=1 tb teardown u1 …`, and
+      `tb --non-interactive teardown …` (no refs)
+      Expect: exit 5 each at once, no confirmation prompt and no chooser; the
+      message says it refuses non-interactively; `u1` is kept.
+- [ ] **U3 agent exit line** - `tb enter u1 … -- --stub-exit=3`, `-- --stub-kill=KILL`,
+      then a plain `tb enter u1 …`
+      Expect: exit 3 with the last stderr line `treebox: agent exited with
+      status 3`; exit 137 with `treebox: agent exited with status 137 (killed
+      by SIGKILL)`; exit 0 and no such line.
+- [ ] **U4 cancellation** - `tb enter u1 … -- --stub-sleep=60` in the
+      background; once the stub runs, SIGTERM the treebox process; again with
+      SIGINT
+      Expect: exit 143, then 130; stderr `Cancelled by SIGTERM` /
+      `Cancelled by SIGINT` (`CANCELLED`), no agent exit line; the stub
+      process is gone; the worktree is kept. (The docker case is H17.)
 
 ## Cross-cutting invariants (assert continuously, fail the run on any hit)
 
