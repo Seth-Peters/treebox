@@ -41,7 +41,7 @@ Your loop, in order:
    ambiguous, choose the smallest reasonable reading and record it under
    "Assumptions" in the PR; nobody is waiting to answer questions.
 2. **Implement.** Follow the `implement` skill.
-3. **Verify.** Follow the `verify` skill. No success claim without evidence.
+3. **Verify.** Follow the `verify-treebox` skill. No success claim without evidence.
 4. **Review.** Follow the `review` skill: the `reviewer` subagent, which starts
    with a fresh context, tries to prove the change wrong.
 5. **Fix and re-verify** after each review round. At most 2 fix rounds.
