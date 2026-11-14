@@ -23,7 +23,7 @@
 #           e2e_reap_docker  (docker-only sweep; safe anytime, even after a crash)
 set -uo pipefail
 
-# The treebox checkout this skill lives in (.claude/skills/treebox-e2e/ -> repo root).
+# The treebox checkout this skill lives in (.claude/skills/verify-treebox/ -> repo root).
 TB_PROJECT="${TB_PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../../.." && pwd)}"
 export TB_PROJECT
 

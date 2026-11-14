@@ -4,7 +4,7 @@ Fast and deterministic (no CLI runs, no docker): this is the part of the
 end-to-end suite that ``validate.sh`` gates on. It derives the user-visible
 routes from the source (Typer commands and options, ``--json`` error codes,
 config keys, environment variables) and fails when the feature map in
-``.claude/skills/treebox-e2e/references/feature-map.md`` misses one, keeps a
+``.claude/skills/verify-treebox/references/routes.md`` misses one, keeps a
 stale one, points at a source symbol that does not exist, or names a scenario
 that ``scenarios.md`` and ``tests/e2e/scenarios.py`` do not both define.
 """
@@ -28,8 +28,8 @@ from treebox.config import USER_KEYS
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "treebox"
-REFS = ROOT / ".claude" / "skills" / "treebox-e2e" / "references"
-FEATURE_MAP = REFS / "feature-map.md"
+REFS = ROOT / ".claude" / "skills" / "verify-treebox" / "references"
+FEATURE_MAP = REFS / "routes.md"
 SCENARIOS_MD = REFS / "scenarios.md"
 
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
