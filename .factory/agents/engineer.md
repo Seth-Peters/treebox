@@ -56,7 +56,7 @@ work. They outrank the original spec where they conflict.
 Hard rules:
 
 - Work only on the branch named in the footer, never on `main`. Never merge.
-- Do not modify `factory/` or `.claude/`: the factory changes only through its
+- Do not modify `.factory/` or `.claude/`: the factory changes only through its
   own improvement loop, not through the work it produces.
 - Never print, commit, or echo credentials.
 - If you finish without a PR, end with a short message explaining why.
