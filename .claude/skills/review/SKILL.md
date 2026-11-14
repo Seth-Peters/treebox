@@ -32,9 +32,9 @@ turn. Do not run placeholder commands (`echo waiting`, `sleep`) to pass the time
 
 - **approve**, and you change nothing: go open the PR.
 - **changes-requested**: fix every `blocking` finding (and `minor` ones that are
-  cheap), commit, follow the `verify` skill again, then review again.
+  cheap), commit, follow the `verify-treebox` skill again, then review again.
 - **approve** with `minor` findings that you fix: this is also a fix round.
-  Commit, follow the `verify` skill again, then review again.
+  Commit, follow the `verify-treebox` skill again, then review again.
 
 The reviewer's last verdict must cover the final commit. Never push a commit
 the reviewer has not seen, and never report a verdict for a diff that it

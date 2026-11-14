@@ -50,7 +50,7 @@ Things worth finding, each tied to specific sessions:
 - the engineer misunderstood specs of a certain shape (`agents/engineer.md`, `implement`)
 - developers had to steer mid-run for the same kind of reason (the steering
   messages are in the transcript: what did the factory keep missing?)
-- verification that was skipped, shallow, or claimed without evidence (`verify`)
+- verification that was skipped, shallow, or claimed without evidence (`verify-treebox`)
 - time and tokens burned on environment setup or missing tools (`environments/`)
 - the reviewer approved changes a human later had to fix, or blocked on noise
   (`agents/reviewer.md`, `review` skill)

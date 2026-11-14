@@ -1,5 +1,5 @@
 ---
-name: verify
+name: verify-treebox
 description: Prove a factory change works end to end and breaks nothing, with evidence. Use when you are the factory engineer and your change is implemented, and again after every fix round.
 ---
 
