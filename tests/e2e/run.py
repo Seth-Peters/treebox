@@ -2,11 +2,11 @@
 
     uv run python tests/e2e/run.py evidence --out DIR [--groups A,B,...]
         [--require docker] [--inject-failure]
-    uv run python tests/e2e/run.py fixture     # a fixture for a manual sweep
+    uv run python tests/e2e/run.py fixture     # a fixture for a manual drive
     uv run python tests/e2e/run.py reap        # remove leftover e2e docker resources
 
 ``evidence`` runs every scenario in ``scenarios.py`` (ids and pass criteria:
-``.claude/skills/treebox-e2e/references/scenarios.md``) against fresh
+``.claude/skills/verify-treebox/references/scenarios.md``) against fresh
 disposable fixtures and writes the evidence bundle to DIR, which must be
 outside this repository:
 
@@ -320,17 +320,68 @@ def _docker_up() -> bool:
         return False
 
 
+# Caller variables the fixture's treebox passes through: the ones a user sets
+# in front of a command to change what treebox does. Everything else comes from
+# the hermetic environment.
+PASSTHROUGH = (
+    "NO_COLOR",
+    "TERM",
+    "COLUMNS",
+    "TZ",
+    "TREEBOX_NON_INTERACTIVE",
+    "TREEBOX_TEMPLATE_DIR",
+    "TREEBOX_CONFIG",
+    "XDG_CACHE_HOME",
+    "DOCKER_HOST",
+    # The shell-completion protocol (what an installed completion script sets).
+    "_TREEBOX_COMPLETE",
+    "COMP_WORDS",
+    "COMP_CWORD",
+)
+
+
+def fixture_launcher(fx: Fixture) -> str:
+    """The fixture's ``treebox`` (``$SBX/bin/treebox``): this checkout's
+    console script with the hermetic environment, so a command in the
+    caller's shell is the command a user types. ``E2E_PATH`` replaces the
+    ``PATH`` treebox sees (to hide a tool); an agent on it that is not the
+    stub (by content) is refused."""
+    env = {k: v for k, v in sorted(fx.env.items()) if k != "PATH"}
+    env_args = " ".join(shlex.quote(f"{k}={v}") for k, v in env.items())
+    passthrough = " ".join(f'${{{name}+"{name}=${name}"}}' for name in PASSTHROUGH)
+    stub = shlex.quote(str(harness.STUB_AGENT))
+    return (
+        "#!/bin/sh\n"
+        "# The fixture's treebox: this checkout's build, a scratch HOME, TREEBOX_HOME\n"
+        "# and TREEBOX_CONFIG, the stub agent first on PATH. No output of its own.\n"
+        "# E2E_PATH replaces the PATH treebox sees; a claude or codex on it that is\n"
+        "# not the stub agent is refused. Passed through from the caller:\n"
+        f"# {' '.join(PASSTHROUGH)}.\n"
+        f'path="${{E2E_PATH:-{fx.env["PATH"]}}}"\n'
+        "set -f\n"
+        "IFS=:\n"
+        "for dir in $path; do\n"
+        "  for agent in claude codex; do\n"
+        f'    if [ -e "$dir/$agent" ] && ! cmp -s "$dir/$agent" {stub}; then\n'
+        '      echo "fixture: refusing to run: a real $agent is reachable at $dir/$agent" >&2\n'
+        "      exit 125\n"
+        "    fi\n"
+        "  done\n"
+        "done\n"
+        "unset IFS\n"
+        f'exec env -i {env_args} PATH="$path" {passthrough} {shlex.quote(str(fx.tb_bin))} "$@"\n'
+    )
+
+
 def fixture(args: argparse.Namespace) -> int:
-    """Build one fixture for a manual sweep and print shell assignments."""
+    """Build one fixture for a manual drive: ``$SBX/bin/treebox`` and
+    ``$SBX/fixture.env`` (the shell assignments, also printed)."""
     fx = Fixture.create(tb_bin=treebox_bin(), base_env=dict(os.environ))
     fx.install_offline_template()
-    env_args = " ".join(shlex.quote(f"{k}={v}") for k, v in sorted(fx.env.items()))
-    launcher = fx.sbx / "tb"
-    launcher.write_text(
-        "#!/bin/sh\n"
-        "# The fixture's treebox: the hermetic env, the stub agent first on PATH.\n"
-        f'exec env -i {env_args} {shlex.quote(str(fx.tb_bin))} "$@"\n'
-    )
+    bin_dir = fx.sbx / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "treebox"
+    launcher.write_text(fixture_launcher(fx))
     launcher.chmod(0o755)
     values = {
         "SBX": fx.sbx,
@@ -340,10 +391,12 @@ def fixture(args: argparse.Namespace) -> int:
         "TREEBOX_HOME": fx.treebox_home,
         "TREEBOX_CONFIG": fx.config,
         "E2E_TEMPLATE": harness.OFFLINE_TEMPLATE,
+        "E2E_TREEBOX_BIN": fx.tb_bin,
         "E2E_MARK": "e2e",
     }
-    for key, value in values.items():
-        print(f"export {key}={shlex.quote(str(value))}")
+    exports = "".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in values.items())
+    (fx.sbx / "fixture.env").write_text(exports)
+    print(exports, end="")
     return 0
 
 

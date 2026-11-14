@@ -1,12 +1,16 @@
-"""The e2e feature map, the scenario prose and the scenario code stay in step.
+"""The e2e route table, the feature map, the scenario prose and the scenario code stay
+in step.
 
 Fast and deterministic (no CLI runs, no docker): this is the part of the
 end-to-end suite that ``validate.sh`` gates on. It derives the user-visible
 routes from the source (Typer commands and options, ``--json`` error codes,
-config keys, environment variables) and fails when the feature map in
+config keys, environment variables) and fails when the route table in
 ``.claude/skills/verify-treebox/references/routes.md`` misses one, keeps a
 stale one, points at a source symbol that does not exist, or names a scenario
-that ``scenarios.md`` and ``tests/e2e/scenarios.py`` do not both define.
+that ``scenarios.md`` and ``tests/e2e/scenarios.py`` do not both define. It
+also keeps the per-feature map (``.claude/skills/verify-treebox/features/``)
+and the route table in step: every route names a feature file, every feature
+file is in the index and named by a route, and every link in the map resolves.
 """
 
 from __future__ import annotations
@@ -28,9 +32,12 @@ from treebox.config import USER_KEYS
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "treebox"
-REFS = ROOT / ".claude" / "skills" / "verify-treebox" / "references"
-FEATURE_MAP = REFS / "routes.md"
+SKILL_DIR = ROOT / ".claude" / "skills" / "verify-treebox"
+REFS = SKILL_DIR / "references"
+ROUTES_MD = REFS / "routes.md"
 SCENARIOS_MD = REFS / "scenarios.md"
+FEATURES = SKILL_DIR / "features"
+FEATURES_README = FEATURES / "README.md"
 
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 import harness  # noqa: E402
@@ -42,19 +49,21 @@ INVARIANT_IDS = {"X1", "X2", "X3", "X4", "X5"}
 @dataclasses.dataclass(frozen=True)
 class Row:
     key: str
+    features: tuple[str, ...]
     sources: tuple[str, ...]
     scenarios: tuple[str, ...]
 
 
 def map_rows() -> list[Row]:
     rows: list[Row] = []
-    for line in FEATURE_MAP.read_text().splitlines():
-        match = re.match(r"^\| `([^`]+)` \| (.+?) \| (.+?) \|$", line)
+    for line in ROUTES_MD.read_text().splitlines():
+        match = re.match(r"^\| `([^`]+)` \| (.*?) \| (.+?) \| (.+?) \|$", line)
         if not match:
             continue
-        sources = tuple(re.findall(r"`([^`]+)`", match.group(2)))
-        ids = tuple(s.strip() for s in match.group(3).split(","))
-        rows.append(Row(match.group(1), sources, ids))
+        features = tuple(f.strip() for f in match.group(2).split(",") if f.strip())
+        sources = tuple(re.findall(r"`([^`]+)`", match.group(3)))
+        ids = tuple(s.strip() for s in match.group(4).split(","))
+        rows.append(Row(match.group(1), features, sources, ids))
     return rows
 
 
@@ -165,7 +174,7 @@ def symbol_exists(ref: str) -> bool:
 def test_every_derived_route_has_a_row() -> None:
     keys = {row.key for row in map_rows()}
     missing = sorted(derived_routes() - keys)
-    assert not missing, f"add these routes to {FEATURE_MAP.name}: {missing}"
+    assert not missing, f"add these routes to {ROUTES_MD.name}: {missing}"
 
 
 def test_no_stale_rows() -> None:
@@ -206,6 +215,65 @@ def test_every_scenario_is_mapped_and_every_mapped_id_exists() -> None:
     mapped = {sid for row in map_rows() for sid in row.scenarios}
     assert not mapped - known, f"rows name unknown scenarios: {sorted(mapped - known)}"
     assert not known - mapped, f"scenarios no row names: {sorted(known - mapped)}"
+
+
+def feature_files() -> set[str]:
+    """The feature files of the map, by name without ``.md``."""
+    return {f.stem for f in FEATURES.glob("*.md") if f.name != "README.md"}
+
+
+def map_links(path: Path) -> list[str]:
+    """The relative link targets of one map file (no URLs, no bare anchors)."""
+    targets = re.findall(r"\]\(([^)\s]+)\)", path.read_text())
+    return [t for t in targets if not re.match(r"[a-z]+:", t) and not t.startswith("#")]
+
+
+def test_every_route_row_parses_with_a_feature() -> None:
+    rows = {row.key: row for row in map_rows()}
+    lines = re.findall(r"^\| `([^`]+)` \|", ROUTES_MD.read_text(), re.M)
+    assert len(lines) == len(rows), (
+        f"rows in {ROUTES_MD.name} that do not have the four columns "
+        f"Route | Feature | Source | Scenarios: {sorted(set(lines) - set(rows))}"
+    )
+    no_feature = sorted(key for key, row in rows.items() if not row.features)
+    assert not no_feature, f"these routes name no feature: {no_feature}"
+
+
+def test_every_route_names_an_existing_feature() -> None:
+    known = feature_files()
+    bad = [(row.key, f) for row in map_rows() for f in row.features if f not in known]
+    assert not bad, (
+        f"these routes name a feature with no file in {FEATURES.relative_to(ROOT)}/: {bad}"
+    )
+
+
+def test_every_feature_file_is_named_by_a_route() -> None:
+    named = {f for row in map_rows() for f in row.features}
+    unnamed = sorted(feature_files() - named)
+    assert not unnamed, f"no row in {ROUTES_MD.name} names these feature files: {unnamed}"
+
+
+def test_every_feature_file_is_in_the_index() -> None:
+    linked = {
+        (FEATURES_README.parent / t.split("#")[0]).resolve() for t in map_links(FEATURES_README)
+    }
+    missing = sorted(
+        f"{name}.md"
+        for name in feature_files()
+        if (FEATURES / f"{name}.md").resolve() not in linked
+    )
+    assert not missing, f"{FEATURES_README.relative_to(ROOT)} does not link: {missing}"
+
+
+def test_every_map_link_resolves() -> None:
+    files = [FEATURES_README, *sorted(FEATURES.glob("*.md")), ROUTES_MD]
+    dead = [
+        (f.relative_to(ROOT).as_posix(), t)
+        for f in dict.fromkeys(files)
+        for t in map_links(f)
+        if not (f.parent / t.split("#")[0]).exists()
+    ]
+    assert not dead, f"links in the feature map that do not resolve: {dead}"
 
 
 def test_docker_scenarios_use_the_e2e_prefix() -> None:
