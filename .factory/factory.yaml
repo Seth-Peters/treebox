@@ -36,10 +36,10 @@ task:
 # Everything that shapes how the factory behaves; never the product it builds.
 factory_code:
   editable:
-    - factory/**
+    - .factory/**
     - .claude/**
   never:
-    - factory/retros/**         # past retros are history; only new ones are added
-    - factory/claude-lock.json  # written by `ant apply` after merge, never by hand
+    - .factory/retros/**         # past retros are history; only new ones are added
+    - .factory/claude-lock.json  # written by `ant apply` after merge, never by hand
     - src/**
     - tests/**

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live end-to-end smoke test of the factory against Claude Managed Agents.
 #
-#   factory/scripts/smoke.sh <issue-number> [ref]
+#   .factory/scripts/smoke.sh <issue-number> [ref]
 #
 # Applies the factory definition, stores the worker's GitHub token, delegates
 # the issue, waits for the session to settle, and exports the full transcript
@@ -16,7 +16,7 @@ out="tmp/factory-smoke/issue-${issue}"
 mkdir -p "$out"
 exec > >(tee "$out/smoke.log") 2>&1
 
-factory() { uv run --quiet --project factory factory "$@"; }
+factory() { uv run --quiet --project .factory factory "$@"; }
 step() { printf '\n== %s ==\n' "$*"; }
 
 step "preflight"
@@ -31,8 +31,8 @@ step "factory check"
 factory check
 
 step "ant apply"
-(cd factory && ant apply .)
-echo "lockfile:"; cat factory/claude-lock.json
+(cd .factory && ant apply .)
+echo "lockfile:"; cat .factory/claude-lock.json
 
 step "store the worker's GitHub token in the vault"
 factory vault set-github-token | grep -v -i token || true
@@ -51,5 +51,5 @@ gh pr list --state all --search "$issue in:body" \
   --json number,url,title,isDraft,baseRefName,headRefName,labels | tee "$out/prs.json"
 
 step "done"
-echo "Evidence in $out/. Commit factory/claude-lock.json when you're happy:"
-echo "  git add factory/claude-lock.json && git commit -m 'chore(factory): apply' && git push"
+echo "Evidence in $out/. Commit .factory/claude-lock.json when you're happy:"
+echo "  git add .factory/claude-lock.json && git commit -m 'chore(factory): apply' && git push"

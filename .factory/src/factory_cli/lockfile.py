@@ -1,7 +1,7 @@
 """Read the claude-lock.json that `ant apply` writes.
 
 We only read it: `ant apply` owns the file. Its resource keys are paths
-relative to the directory `ant apply` ran in (factory/), spelled `./<path>`.
+relative to the directory `ant apply` ran in (.factory/), spelled `./<path>`.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class Lockfile:
         found = self.resources.get(key)
         if found is None:
             raise FactoryError(
-                f"{LOCKFILE_NAME} has no entry for {key}; run `ant apply` from factory/ first"
+                f"{LOCKFILE_NAME} has no entry for {key}; run `ant apply` from .factory/ first"
             )
         if found.kind != kind:
             raise FactoryError(f"{LOCKFILE_NAME}: {key} is a {found.kind}, expected {kind}")
@@ -69,7 +69,7 @@ def load_lockfile(factory_dir: Path) -> Lockfile:
         return parse_lockfile(json.loads(path.read_text()))
     except FileNotFoundError as exc:
         raise FactoryError(
-            f"no {LOCKFILE_NAME} in {factory_dir}; run `ant apply .` from factory/ first"
+            f"no {LOCKFILE_NAME} in {factory_dir}; run `ant apply .` from .factory/ first"
         ) from exc
     except json.JSONDecodeError as exc:
         raise FactoryError(f"{path}: invalid JSON: {exc}") from exc

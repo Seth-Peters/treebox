@@ -170,10 +170,10 @@ def test_lockfile_errors_on_missing_or_wrong_kind() -> None:
 @pytest.mark.parametrize(
     ("path", "pattern", "expected"),
     [
-        ("factory/agents/engineer.md", "factory/**", True),
-        ("src/treebox/cli.py", "factory/**", False),
-        ("factory/x.md", "factory/*.md", True),
-        ("factory/a/x.md", "factory/*.md", False),
+        (".factory/agents/engineer.md", ".factory/**", True),
+        ("src/treebox/cli.py", ".factory/**", False),
+        (".factory/x.md", ".factory/*.md", True),
+        (".factory/a/x.md", ".factory/*.md", False),
     ],
 )
 def test_glob_matching(path: str, pattern: str, expected: bool) -> None:
@@ -181,19 +181,19 @@ def test_glob_matching(path: str, pattern: str, expected: bool) -> None:
 
 
 def test_boundary_blocks_product_code_and_history() -> None:
-    rules = FactoryCode(editable=("factory/**", ".claude/**"), never=("factory/retros/**",))
+    rules = FactoryCode(editable=(".factory/**", ".claude/**"), never=(".factory/retros/**",))
     bad = {
         v.path
         for v in violations(
-            ["factory/agents/e.md", "factory/retros/old.md", "src/treebox/cli.py"], rules
+            [".factory/agents/e.md", ".factory/retros/old.md", "src/treebox/cli.py"], rules
         )
     }
-    assert bad == {"factory/retros/old.md", "src/treebox/cli.py"}
+    assert bad == {".factory/retros/old.md", "src/treebox/cli.py"}
 
 
 def test_real_boundary(manifest: Manifest) -> None:
-    assert boundary_problems(manifest, ["factory/agents/reviewer.md"]) == []
-    assert boundary_problems(manifest, ["factory/claude-lock.json"]) != []
+    assert boundary_problems(manifest, [".factory/agents/reviewer.md"]) == []
+    assert boundary_problems(manifest, [".factory/claude-lock.json"]) != []
     assert boundary_problems(manifest, ["tests/test_units.py"]) != []
 
 
@@ -306,7 +306,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _sh(tmp_path, "git", "init", "-q", "--bare", "-b", "main", str(origin))
     _sh(tmp_path, "git", "clone", "-q", str(origin), str(work))
     shutil.copytree(
-        FACTORY_DIR, work / "factory", ignore=shutil.ignore_patterns(".venv", "*cache*", "tests")
+        FACTORY_DIR, work / ".factory", ignore=shutil.ignore_patterns(".venv", "*cache*", "tests")
     )
     shutil.copytree(REPO_ROOT / ".claude", work / ".claude", symlinks=True)
     lock = {
@@ -317,7 +317,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "./vaults/github-worker.yaml": {"kind": "vault", "id": "vlt_1"},
         }
     }
-    (work / "factory" / "claude-lock.json").write_text(json.dumps(lock))
+    (work / ".factory" / "claude-lock.json").write_text(json.dumps(lock))
     ident = ("-c", "user.email=t@e", "-c", "user.name=t")
     _sh(work, "git", *ident, "add", "-A")
     _sh(work, "git", *ident, "commit", "-qm", "init")

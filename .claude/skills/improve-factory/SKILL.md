@@ -16,15 +16,15 @@ Factory skills and agent prompts are documents agents read: load the
 
 ## 1. Find the unreviewed runs
 
-- A run is **reviewed** when a file in `factory/retros/` lists its session ID.
+- A run is **reviewed** when a file in `.factory/retros/` lists its session ID.
   List the reviewed IDs with
-  `grep -rhoE 'sesn_[A-Za-z0-9]+' factory/retros/ | sort -u`.
+  `grep -rhoE 'sesn_[A-Za-z0-9]+' .factory/retros/ | sort -u`.
   Every other session of a `factory` issue is unreviewed, whatever its
   factory version or base ref.
 - Factory tasks are GitHub issues labelled `factory`:
   `gh issue list --label factory --state all --json number,title,state,createdAt,closedAt`.
 - Each issue's sessions (one per attempt) come from
-  `uv run --project factory factory status --issue <n>`. Every session's
+  `uv run --project .factory factory status --issue <n>`. Every session's
   metadata carries `factory_version`, `factory_sha`, `agent_version`, `issue`,
   `branch`, and `requested_by`.
 - If fewer than **5** unreviewed runs exist, say so in your reply and in the
@@ -33,7 +33,7 @@ Factory skills and agent prompts are documents agents read: load the
 ## 2. Read each run
 
 - **Transcript (primary):**
-  `uv run --project factory factory transcript --issue <n> --out <scratch dir>`
+  `uv run --project .factory factory transcript --issue <n> --out <scratch dir>`
   writes every event in order (each message, tool call, and tool result,
   including developer steering messages) plus each subagent thread (the
   reviewer) and a `summary.json` of event and tool counts. Use a scratch
@@ -85,20 +85,20 @@ For each finding, the fix lands where it can fail loudly:
 A mechanical rule written as prose is a weak fix: prefer the check. Prose in
 the engineer's prompt or skills is for steps, not standards.
 
-If `factory/scorers/` contains scorers, apply each to every run and include
+If `.factory/scorers/` contains scorers, apply each to every run and include
 the scores. (It's empty for now: scoring is a planned addition.)
 
 ## 4. Garden
 
 Follow the `garden` skill with the runs you just read. It asks the other
 question: what about the *codebase* lets agents keep making the same mistake?
-It updates `factory/garden.md` and files `garden` issues for recurring
+It updates `.factory/garden.md` and files `garden` issues for recurring
 classes; it never edits product code. Its findings go in the retro's
 "Garden" section. This step is separate from the one factory change in step 6.
 
 ## 5. Write the retro
 
-Create `factory/retros/<YYYY-MM-DD>.md` (never edit an existing retro):
+Create `.factory/retros/<YYYY-MM-DD>.md` (never edit an existing retro):
 
 ```markdown
 # Factory retro <date>
@@ -127,14 +127,14 @@ to see in the next retro if it worked>
 - Make **one** coherent change for the strongest finding: a reproducible
   failure, or a behavior pattern seen in 5 or more runs. Other findings go in
   the retro for next time. When no finding qualifies, the retro alone is the
-  PR: it marks the runs as reviewed. The `factory/garden.md` update from
+  PR: it marks the runs as reviewed. The `.factory/garden.md` update from
   step 4 rides in the same PR.
-- You may edit what `factory_code.editable` in `factory/factory.yaml` allows
-  (`factory/`, `.claude/`), never what `factory_code.never` lists: no product
+- You may edit what `factory_code.editable` in `.factory/factory.yaml` allows
+  (`.factory/`, `.claude/`), never what `factory_code.never` lists: no product
   source or tests, no past retros, no hand-edits to `claude-lock.json`.
-- Bump `version` in `factory/factory.yaml`: minor for a behavior change,
+- Bump `version` in `.factory/factory.yaml`: minor for a behavior change,
   patch for wording-only.
-- Run `uv run --project factory factory check --boundary`. It fails if the
+- Run `uv run --project .factory factory check --boundary`. It fails if the
   diff against `origin/main` touches a forbidden path or the factory
   definition is broken. Fix the change, don't loosen the rules in the same PR.
 - Branch `factory-improve/<date>`, commit, and open the PR with `gh pr create`
