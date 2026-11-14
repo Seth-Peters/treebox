@@ -209,6 +209,23 @@ def test_bad_resources_table_is_invalid_config(repo: Path, root: str, home: Path
     assert json.loads(res.stderr)["error"]["code"] == "INVALID_CONFIG"
 
 
+def test_internal_config_fields_are_unknown_keys(home: Path):
+    """``explicit_resources`` is set by the CLI, never by TOML: a config that
+    names it is an unknown key, and a typo is never pointed at it."""
+    from dataclasses import fields
+
+    from treebox.config import USER_KEYS
+
+    assert {f.name for f in fields(Config)} - USER_KEYS == {"explicit_resources"}
+    _config(home, 'explicit_resources = ["cpus"]\n')
+    with pytest.raises(ValueError, match="unknown key 'explicit_resources'"):
+        load_config()
+    _config(home, 'explicit_resourcez = ["cpus"]\n')
+    with pytest.raises(ValueError, match="unknown key") as exc:
+        load_config()
+    assert "explicit_resources" not in str(exc.value).replace("explicit_resourcez", "")
+
+
 def test_resources_must_be_a_table(home: Path):
     _config(home, 'resources = "4g"\n')
     with pytest.raises(ValueError, match="resources"):

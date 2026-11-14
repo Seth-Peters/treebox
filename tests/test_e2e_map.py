@@ -24,7 +24,7 @@ import typer
 from test_contract import _emitted_error_codes
 
 from treebox.cli import app
-from treebox.config import Config
+from treebox.config import USER_KEYS
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "treebox"
@@ -94,17 +94,10 @@ def error_routes() -> set[str]:
     return {f"error {c}" for c in _emitted_error_codes()}
 
 
-# Config fields that are not settings: never read from TOML (see their
-# comments in config.py), so they are no route.
-INTERNAL_CONFIG_FIELDS = {"explicit_resources"}
-
-
 def config_routes() -> set[str]:
-    return {
-        f"config {f.name}"
-        for f in dataclasses.fields(Config)
-        if f.name not in INTERNAL_CONFIG_FIELDS
-    }
+    """The keys a user config may set (``config.USER_KEYS``); the other
+    Config fields are internal and no route."""
+    return {f"config {key}" for key in USER_KEYS}
 
 
 def env_routes() -> set[str]:
