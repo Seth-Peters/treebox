@@ -60,7 +60,7 @@ def _token(required: bool) -> str:
 
 def _locate(args: argparse.Namespace) -> tuple[Path, Manifest]:
     repo = git.repo_root(Path.cwd())
-    factory_dir = Path(args.factory_dir) if args.factory_dir else repo / "factory"
+    factory_dir = Path(args.factory_dir) if args.factory_dir else repo / ".factory"
     return repo, load_manifest(factory_dir)
 
 
@@ -228,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factory", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--factory-dir", help="directory holding factory.yaml (default: ./factory)")
+    parser.add_argument("--factory-dir", help="directory holding factory.yaml (default: .factory)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     dlg = sub.add_parser("delegate", help="file a task issue and start a worker session")

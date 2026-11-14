@@ -24,7 +24,7 @@ to arguments before doing anything else:
 So `/delegate issue 38 from my current branch` is:
 
 ```bash
-uv run --project factory factory delegate --issue 38 --ref "$(git branch --show-current)"
+uv run --project .factory factory delegate --issue 38 --ref "$(git branch --show-current)"
 ```
 
 Run it directly; no confirmation is needed for an existing issue.
@@ -42,11 +42,11 @@ say which branch the PR will target.
 2. **Dispatch.** Save the brief to a temp file and run, from the repo root:
 
    ```bash
-   uv run --project factory factory delegate --title "<title>" --brief-file <path>
+   uv run --project .factory factory delegate --title "<title>" --brief-file <path>
    ```
 
    To delegate an issue that already exists, run
-   `uv run --project factory factory delegate --issue <n>` instead.
+   `uv run --project .factory factory delegate --issue <n>` instead.
 
    This files the GitHub issue (labelled `factory`), starts the worker session,
    and comments the session ID on the issue. Add `--dry-run` first to see
@@ -61,7 +61,7 @@ say which branch the PR will target.
 When the developer notices something wrong or wants to add context mid-run:
 
 ```bash
-uv run --project factory factory steer --issue <n> "<their message>"
+uv run --project .factory factory steer --issue <n> "<their message>"
 ```
 
 It reaches the running session as a developer message and is recorded on the
@@ -70,15 +70,15 @@ issue. Pass the developer's words, not a paraphrase.
 ## Check on a task
 
 ```bash
-uv run --project factory factory status --issue <n>           # sessions + status
-uv run --project factory factory status --issue <n> --wait    # block until it settles
+uv run --project .factory factory status --issue <n>           # sessions + status
+uv run --project .factory factory status --issue <n> --wait    # block until it settles
 ```
 
 ## If something fails
 
 The CLI exits non-zero with the reason on stderr. Common causes: not logged in
-(`ant auth login`), `factory/claude-lock.json` missing (run `ant apply .` in
-`factory/` and commit it), `FACTORY_GITHUB_TOKEN` unset, or `gh` not logged in.
+(`ant auth login`), `.factory/claude-lock.json` missing (run `ant apply .` in
+`.factory/` and commit it), `FACTORY_GITHUB_TOKEN` unset, or `gh` not logged in.
 Report the cause; don't work around it.
 
 **"Local factory code differs from origin/…"** means the worker would run

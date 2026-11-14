@@ -1,4 +1,4 @@
-"""Load and validate factory/factory.yaml."""
+"""Load and validate .factory/factory.yaml."""
 
 from __future__ import annotations
 
