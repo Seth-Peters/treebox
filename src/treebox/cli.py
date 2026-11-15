@@ -64,7 +64,14 @@ from .models import (
     worktree_path,
     worktree_root,
 )
-from .output import DoctorCheck, Reporter, StepError, format_age, format_elapsed
+from .output import (
+    DoctorCheck,
+    Reporter,
+    StepError,
+    format_age,
+    format_elapsed,
+    trim_line_ends,
+)
 from .resources import ResourceLimitError, ResourceLimits
 from .runners import (
     VALID_ISOLATION,
@@ -2664,5 +2671,12 @@ app.command(name="ls", hidden=True)(list_cmd)
 app.command(name="rm", hidden=True)(teardown)
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """The ``treebox`` console script: the app, with no trailing whitespace
+    on any line off a terminal (Typer's help is printed before ``main``)."""
+    trim_line_ends()
     app()
+
+
+if __name__ == "__main__":
+    run()

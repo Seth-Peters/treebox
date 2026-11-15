@@ -382,6 +382,20 @@ a registration treebox never provisioned (`git -C "$REPO" worktree add -b d-raw
 
 - [ ] **D4 ls alias** - `treebox ls … --json`
       Expect: exit 0; the same payload as `list --json`.
+- [ ] **D5 every human command in a pipe** - with `COLUMNS=80 NO_COLOR=1`,
+      stdout and stderr both pipes, a worktree root longer than any terminal
+      (`$SBX/<a 132-column directory>/wts`) and a template with a long name
+      whose files are broken (no `Dockerfile`, no `post-create.sh`, `{bad` in
+      `container.json`): `create d5-wt --print`, `create d5-plan --dry-run`,
+      `enter d5-wt --print`, `list`, `template list`, `doctor`, `teardown d5-wt
+      --force`, `version`, `--help`, `create --help`, `template --help`.
+      Expect: every command exits 0; on both streams no line is longer than
+      1000 columns and no line ends in whitespace (a pipe has no width, so
+      nothing is padded or stretched to it); the root footer is `  Root:
+      <root>` on one line; the worktree path is whole on one line of the
+      create, dry-run and enter output; each `--print` is one line; the long
+      template's row holds its name and the whole `○ missing: Dockerfile,
+      post-create.sh; invalid: container.json` on one line.
 
 ## E. teardown
 
@@ -556,7 +570,7 @@ Setup: install the offline template (`tests/e2e/offline-template`) as
 `cp -RL tests/e2e/offline-template "$TREEBOX_HOME/templates/e2e-offline"`), and
 pass `--isolation docker --template e2e-offline` (`…` below). The template
 builds with no network once its pinned base image is present, and its agent is
-the stub, so no scenario here needs the bundled 5.6 GB image or launches a real
+the stub, so no scenario here needs the bundled 3.2 GB image or launches a real
 agent. Its base image declares no `VOLUME`, so its containers get no
 anonymous volume. H21 adds one on purpose; treebox's teardown removes it with
 the container, and X5 fails if any is left. Without a reachable engine or the
@@ -693,7 +707,7 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       Expect: exit 143, stderr `Cancelled by SIGTERM`, no agent exit line;
       `docker top` shows no `sleep 60`; the container is still running.
 - [ ] **H18 bundled image** (opt-in: `TREEBOX_E2E_BUNDLED_IMAGE=1`; builds the
-      5.6 GB bundled image and needs the network) - `treebox create e2e-bundled …
+      3.2 GB bundled image and needs the network) - `treebox create e2e-bundled …
       --isolation docker --firewall --print` with the default template
       Expect: exit 0; `claude`, `codex`, `uv` and `gh` are on the agent's
       `PATH`; `/opt/google/chrome/chrome --headless --no-sandbox --dump-dom

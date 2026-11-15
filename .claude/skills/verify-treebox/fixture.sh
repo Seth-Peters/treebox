@@ -28,8 +28,36 @@
 # fake Keychain tool alone).
 # Docker names: name every docker worktree `e2e-...`, so its container, image
 # and volume are `treebox-e2e-*` and the reaper finds them.
-# Helpers: e2e_doctor (read-only health check), e2e_reap_docker (remove
+# Helpers: e2e_guard (exits non-zero unless this shell drives the fixture:
+# run it at the top of every block or script that drives treebox),
+# e2e_doctor (read-only health check), e2e_reap_docker (remove
 # `treebox-e2e-*` docker resources), e2e_cleanup (reap, then remove $SBX).
+#
+# Source it as a command of its own. Executed (`bash fixture.sh`), or sourced
+# in a pipeline (`source fixture.sh | tail`), a subshell (`( … )`, `$( … )`)
+# or a shell that is not bash, its variables and PATH die at once and a later
+# `treebox` is the release on PATH with the real HOME: it refuses to build.
+
+# Refuse where the fixture's environment cannot survive. Plain POSIX up to
+# the bash check, so a shell that is not bash gets the message too.
+_e2e_use="source .claude/skills/verify-treebox/fixture.sh   (from the treebox checkout, in bash, as a command of its own: not in a pipeline, a subshell or \$(...))"
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "fixture: FIXTURE NOT BUILT: this shell is not bash. Start bash, then: $_e2e_use" >&2
+  # shellcheck disable=SC2317
+  return 2 2>/dev/null || exit 2
+fi
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  echo "fixture: FIXTURE NOT BUILT: fixture.sh was executed, not sourced. Its SBX and PATH would die with" \
+    "this process, and treebox would be the release on PATH with your real HOME. Use: $_e2e_use" >&2
+  exit 2
+fi
+if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
+  echo "fixture: FIXTURE NOT BUILT: fixture.sh is sourced in a subshell (a pipeline such as" \
+    "'source fixture.sh | tail', '( ... )' or '\$(...)'). Its SBX and PATH would die with the subshell," \
+    "and treebox would be the release on PATH with your real HOME. Use: $_e2e_use" >&2
+  return 2
+fi
+unset _e2e_use
 set -uo pipefail
 
 # The treebox checkout this skill lives in (.claude/skills/verify-treebox/ -> repo root).
@@ -64,15 +92,30 @@ esac
 export PATH
 hash -r
 
+# The fixture guard: exits non-zero unless `treebox` is $SBX/bin/treebox and
+# its HOME, TREEBOX_HOME and TREEBOX_CONFIG are under $SBX (see guard.sh).
+# Exported, so a bash script started from this shell has it too; in a shell
+# where the fixture is lost it does not exist, which fails as well (127).
+E2E_GUARD="$TB_PROJECT/.claude/skills/verify-treebox/guard.sh"
+export E2E_GUARD
+e2e_guard() { "$E2E_GUARD"; }
+export -f e2e_guard
+
 # One read-only check: is this fixture worth driving? Prints one line per
 # check and returns 1 when a hard check fails. The engine is reported, not
 # required: without one, docker work is SKIP.
 e2e_doctor() {
-  local fail=0 py resolved src version doctor_json engine
+  local fail=0 py resolved src version doctor_json engine guard
   _e2e_ok() { printf 'ok    %s\n' "$*"; }
   _e2e_fail() { printf 'FAIL  %s\n' "$*"; fail=1; }
   _e2e_note() { printf 'note  %s\n' "$*"; }
   py="$(dirname "$E2E_TREEBOX_BIN")/python"
+
+  if guard="$(e2e_guard 2>&1)"; then
+    _e2e_ok "e2e_guard: the fixture is not lost"
+  else
+    _e2e_fail "${guard%%$'\n'*}"
+  fi
 
   resolved="$(type -P treebox)"
   if [ "$resolved" = "$SBX/bin/treebox" ]; then
@@ -166,5 +209,6 @@ e2e_cleanup() {
 
 echo "fixture ready: SBX=$SBX REPO=$REPO ROOT=$ROOT TREEBOX_HOME=$TREEBOX_HOME" >&2
 echo "  treebox: $SBX/bin/treebox (this checkout's build; run e2e_doctor before driving)" >&2
+echo "  guard: e2e_guard || exit 1   (at the top of every shell block or script that drives treebox)" >&2
 echo "  new shell: source $TB_PROJECT/.claude/skills/verify-treebox/fixture.sh --attach $SBX" >&2
 echo "  cleanup: e2e_cleanup (sandbox + treebox-e2e-* docker resources)" >&2

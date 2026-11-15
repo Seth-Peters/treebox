@@ -8,6 +8,7 @@ Read this index first, then use the matching feature file as the recipe; `../ref
 - Work from the treebox checkout under test, in **bash**: `source .claude/skills/verify-treebox/fixture.sh`. In a new shell, attach to the same fixture with `source .claude/skills/verify-treebox/fixture.sh --attach "$SBX"`.
 - The fixture is a throwaway bare origin and clone (`$REPO`: a uv project, `main` and `dev` on `origin`, an untracked `.env` with `SECRET=canonical`), a worktree root `$ROOT`, a scratch `HOME`, `TREEBOX_HOME` and `TREEBOX_CONFIG` (an empty file), and the offline docker template `e2e-offline`.
 - `treebox` on `PATH` is this checkout's build (`$SBX/bin/treebox`), with the controlled stub agent first on its `PATH`. Run `e2e_doctor` and require every line `ok` before the first drive.
+- Start every shell block or script that drives treebox with `e2e_guard || exit 1`. It fails unless `treebox` on `PATH` is the fixture's build.
 - Docker features need `engine: reachable` in `e2e_doctor` and the offline template's base image; without them they are SKIP.
 - Never drive the real repo, the real `~/.treebox`, `~/.claude`, `~/.codex` or the macOS Keychain, and never launch a real agent.
 

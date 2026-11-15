@@ -32,7 +32,7 @@ Repository = "https://github.com/Seth-Peters/treebox"
 Issues = "https://github.com/Seth-Peters/treebox/issues"
 
 [project.scripts]
-treebox = "treebox.cli:app"
+treebox = "treebox.cli:run"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.15", "mypy>=1.14", "pre-commit>=4"]

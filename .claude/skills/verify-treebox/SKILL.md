@@ -16,6 +16,7 @@ treebox is a short-lived CLI with `--help`, `--json`, `--dry-run` and classified
 ## Hard rules
 
 - **Never launch a real agent.** The fixture's `treebox` and the evidence run put the controlled stub agent (`tests/e2e/stub-agent`) first on treebox's `PATH`, and refuse to run when any other `claude` or `codex` is reachable there. In docker the offline template's agent is the same stub. So a bare `treebox create` / `treebox enter` (a real launch) is safe in the fixture. A printed host entry command (`sh -c 'cd … && exec claude …'`) is not: never run it in your own shell, where `claude` is the real agent. Replay it only with the stub first: `PATH="$SBX/stub-bin:$PATH" sh -c '…'`.
+- **Run `e2e_guard || exit 1` first in every shell block or script that drives treebox.** It is a deterministic check: it exits non-zero unless `treebox` on `PATH` is the fixture's build and its `HOME`, `TREEBOX_HOME` and `TREEBOX_CONFIG` are in the fixture. Its message says what is wrong and how to correct it.
 - **Never use the real repo, the real `~/.treebox`, `~/.claude`, `~/.codex` or the macOS Keychain.** The fixture scopes `HOME`, `TREEBOX_HOME`, `TREEBOX_CONFIG`, the repo and the worktree root under one temp dir. Its `~/.claude` and `~/.codex` hold fake login files, and its stub dir holds a fake `security` that finds no Keychain item.
 - **Collect, do not abort.** A failed drive or scenario is a finding to record; keep going so one regression does not hide the rest.
 - **Judge behavior, not prose.** Exit codes, JSON fields, files on disk, stdout/stderr separation, git and container state. Exact human text is `tests/golden/`'s job.
@@ -30,13 +31,20 @@ From the treebox checkout, in **bash**:
 source .claude/skills/verify-treebox/fixture.sh
 ```
 
-It builds the fixture with the same code as the evidence run (`tests/e2e/run.py fixture`) and prints `fixture ready: SBX=… REPO=… ROOT=… TREEBOX_HOME=…` on stderr. Ready means that line was printed and `e2e_doctor` is all `ok`. After it:
+Source it as a command of its own: never in a pipeline (`source … | tail`), a subshell (`( … )`, `$( … )`), or as an executed script (`bash fixture.sh`), and only from bash. Its variables and `PATH` would die at once, so it refuses there: `fixture: FIXTURE NOT BUILT: …` on stderr with the correct invocation, status 2, and no fixture is built. It builds the fixture with the same code as the evidence run (`tests/e2e/run.py fixture`) and prints `fixture ready: SBX=… REPO=… ROOT=… TREEBOX_HOME=…` on stderr. Ready means that line was printed and `e2e_doctor` is all `ok`. After it:
 
 - `treebox` is `$SBX/bin/treebox`, first on `PATH`: this checkout's console script with the fixture's environment. It adds no output of its own, so stream checks see only treebox.
 - `$SBX`, `$REPO`, `$ROOT`: sandbox root, fixture clone, worktree root. `$SBX/stub-bin` holds the stub agent and the fake `security`; `$SBX/safe-bin` holds the fake `security` alone. `$TREEBOX_HOME`, `$TREEBOX_CONFIG`, `$E2E_HOME`: the scratch treebox home, config and `HOME`. `$E2E_TEMPLATE` is `e2e-offline`.
 - Every drive is one command, for example `treebox create fix-auth --repo "$REPO" --root "$ROOT" --json`.
 
-Shell state does not survive between separate tool calls. In a new shell, attach to the same fixture instead of building another: `source .claude/skills/verify-treebox/fixture.sh --attach "$SBX"` (the path is in the ready line). Sourcing without `--attach` gives a fresh fixture.
+Shell state does not survive between separate tool calls. In a new shell, attach to the same fixture instead of building another: `source .claude/skills/verify-treebox/fixture.sh --attach "$SBX"` (the path is in the ready line). Sourcing without `--attach` gives a fresh fixture. So a block in a new shell starts like this:
+
+```bash
+cd <treebox checkout>
+source .claude/skills/verify-treebox/fixture.sh --attach /path/from/the/ready/line
+e2e_guard || exit 1
+treebox list --repo "$REPO" --root "$ROOT" --json
+```
 
 ## Doctor
 
@@ -48,6 +56,7 @@ e2e_doctor
 
 Each line is `ok`, `FAIL` or `note`; it returns 1 on any `FAIL`. It proves:
 
+- `e2e_guard` passes: the fixture is not lost.
 - `treebox` on `PATH` is `$SBX/bin/treebox`, it runs this checkout's console script (`$E2E_TREEBOX_BIN`, under the checkout's `.venv`), the package imports from this checkout's `src/`, and `treebox version` is that build's version. An older release on `PATH` (for example `~/.local/bin/treebox`) is listed as `shadowed`.
 - `TREEBOX_CONFIG`, `HOME` and `TREEBOX_HOME` are scratch paths under `$SBX`.
 - `treebox doctor` passes, its `agent: claude` row is `$SBX/stub-bin/claude` (the stub is first on treebox's `PATH`) and its `login: claude` row is the fake login under `$SBX/home`.
@@ -59,18 +68,22 @@ Each line is `ok`, `FAIL` or `note`; it returns 1 on any `FAIL`. It proves:
 1. Read `features/README.md`: the baseline, the conventions and the index.
 2. Pick the feature file(s) the change touches. `references/routes.md` names the feature of every route; `git diff --stat` against the routes' source column finds them.
 3. Run its `Driving it with treebox` bullets, exactly as written, in a fresh fixture. Use `--json` for assertions and read the field; read the human output too, piped and with `NO_COLOR=1`, and be picky about alignment, wrapping and wording.
-4. A behavior no bullet covers: drive it by hand the same way, record the command and the result, and add the bullet (see `/maintain-verify-treebox`).
+4. A behavior no bullet covers: drive it by hand the same way, record the command and the result, and add the bullet (the `maintain-verify-treebox` skill, step 3, gives the shape).
 
 To run a scenario's executable checks instead: `uv run python tests/e2e/run.py evidence --only H12,C18 --out "$TMPDIR/treebox-evidence-$(date +%s)"`.
 
+### Verifying all of main
+
+Run the gate and the full sweep (`./scripts/validate.sh`, then `run.py evidence`, with `--require docker` where an engine exists). Then, for each feature file, drive its first two bullets and each bullet that covers behavior merged recently (`git log --oneline -30 -- src/treebox`). Report which bullets you drove.
+
 ### The docker features: the offline path
 
-The docker features never need the bundled 5.6 GB image or a network build:
+The docker features never need the bundled 3.2 GB image or a network build:
 
 - **Operator template** `tests/e2e/offline-template/` (installed as `$TREEBOX_HOME/templates/e2e-offline`; pass `--template e2e-offline`). Its Dockerfile starts from a digest-pinned `buildpack-deps:trixie-scm` (the official Debian image with git) and only edits local files, so once that base image is present the build needs no network, and it works for any host uid. The base image declares no `VOLUME`: a base image volume gives every container an anonymous volume, which a container left for the reaper keeps until the reap. Treebox's teardown removes it with the container (`docker rm -f -v`).
 - **Controlled launch executable** `tests/e2e/stub-agent`. On the host the fixture links it as `claude` and `codex` in `$SBX/stub-bin`. In the offline template it is `post-create.sh` and the Dockerfile links it as `/usr/local/bin/claude` and `/usr/local/bin/codex`. As an agent it prints a record (its argv, cwd, uid, whether it runs in a container, whether `ANTHROPIC_API_KEY` is set) and obeys `--stub-exit=N`, `--stub-kill=SIG` and `--stub-sleep=N`. As `post-create.sh` it writes `/tmp/treebox-e2e-post-create`.
 
-The firewall test template (`features/firewall.md`) proves when treebox runs the firewall, not what a real firewall blocks. The real egress lockdown, the bundled agents and Chromium need the bundled image: H18 builds it only with `TREEBOX_E2E_BUNDLED_IMAGE=1` (about 5.6 GB, needs the network) and is SKIP otherwise.
+The firewall test template (`features/firewall.md`) proves when treebox runs the firewall, not what a real firewall blocks. The real egress lockdown, the bundled agents and Chromium need the bundled image: H18 builds it only with `TREEBOX_E2E_BUNDLED_IMAGE=1` (about 3.2 GB in `docker images`, measured on Docker 27.4 for arm64; it needs the network) and is SKIP otherwise.
 
 ### Live and boundary evidence
 
@@ -143,6 +156,7 @@ The evidence run cleans up after itself and checks this as invariant X5. It foll
 | --- | --- | --- |
 | `fixture.sh` | `source .claude/skills/verify-treebox/fixture.sh` | Build a fresh fixture and put its `treebox` first on `PATH`. |
 | `fixture.sh --attach` | `source .claude/skills/verify-treebox/fixture.sh --attach "$SBX"` | Use an existing fixture in a new shell. |
+| `e2e_guard` | `e2e_guard \|\| exit 1` | Exits non-zero unless `treebox` is `$SBX/bin/treebox` and its `HOME`, `TREEBOX_HOME`, `TREEBOX_CONFIG` are under `$SBX`. Exported to bash scripts started from the fixture shell. Its implementation, `.claude/skills/verify-treebox/guard.sh`, does the same checks from any shell. |
 | `e2e_doctor` | `e2e_doctor` | The read-only health check (see Doctor). |
 | `e2e_reap_docker` | `e2e_reap_docker` | Remove `treebox-e2e-*` containers (with their anonymous volumes), images and volumes; safe anytime, also after a crash. |
 | `e2e_cleanup` | `e2e_cleanup` | Reap, remove `$SBX`, restore `PATH`. |
@@ -158,4 +172,4 @@ The evidence run cleans up after itself and checks this as invariant X5. It foll
 - Shared code (`cli.py`, `provision.py`, `output.py`, `record.py`, the runners): the full sweep, `uv run python tests/e2e/run.py evidence --out …`, with `--require docker` where an engine exists.
 - A route that is new or changed (a flag, an error code, a config key, an environment variable): `tests/test_e2e_map.py` fails until `references/routes.md` has its row (with its feature) and a scenario covers it.
 
-To keep the feature map honest as treebox changes, run `/maintain-verify-treebox`.
+To keep the feature map honest as treebox changes, run the `maintain-verify-treebox` skill (`/maintain-verify-treebox`). An agent can start it, but only when a person asks for the maintain pass: it drives every feature and can open a pull request.

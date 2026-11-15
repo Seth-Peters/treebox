@@ -60,5 +60,5 @@ Preconditions: the fixture, `e2e_doctor` with `engine: reachable`, and the offli
 - The offline template has no `uv sync`: dependency setup in a docker sandbox is the template's post-create.
 - In the container, the staged credential files show as `root`-owned through Docker Desktop's file sharing; check the mode on the host side.
 - `TEARDOWN_INCOMPLETE` needs a docker step that fails on demand; it is the boundary scenario H10 (a fake `docker` that fails `rm`).
-- The bundled image (H18) builds 5.6 GB and needs the network; it runs only with `TREEBOX_E2E_BUNDLED_IMAGE=1`.
+- The bundled image (H18) builds about 3.2 GB and needs the network; it runs only with `TREEBOX_E2E_BUNDLED_IMAGE=1`.
 - Scenarios: H1, H2, H4, H5, H6, H7, H8, H9, H10, H13, H15, H16, H17, H18, H19, H20, H21, B22, B23, B29, G13, R44.

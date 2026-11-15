@@ -71,7 +71,7 @@ AGENT_NAMES = ("claude", "codex")
 # absent. The fixture's copy finds nothing ("item not found" is status 44).
 FAKE_SECURITY = "#!/bin/sh\n# treebox e2e: no Keychain item, never the real Keychain.\nexit 44\n"
 # Opt-in for the scenario that builds the bundled sandbox image (about
-# 5.6 GB, needs the network): set to 1.
+# 3.2 GB, needs the network): set to 1.
 BUNDLED_IMAGE_OPT_IN = "TREEBOX_E2E_BUNDLED_IMAGE"
 DOCUMENTED_EXIT_CODES = frozenset({0, 1, 2, 3, 4, 5})
 
@@ -532,7 +532,7 @@ def probe_prerequisites(base_env: Mapping[str, str]) -> dict[str, Prerequisite]:
         "opted in"
         if opted
         else f"opt-in: set {BUNDLED_IMAGE_OPT_IN}=1 to build the bundled image "
-        "(about 5.6 GB, needs the network)",
+        "(about 3.2 GB, needs the network)",
     )
     shell_ok = _shell_detection_works()
     add(
@@ -1043,9 +1043,15 @@ class VolumeWatch:
     makes the ledger current: it creates a marker volume and waits until its
     create event arrives (the engine delivers events in order, so every
     earlier event has arrived too). If the stream is lost, ``error`` says so
-    and X5 fails: the run can no longer prove it left no volume behind."""
+    and X5 fails: the run can no longer prove it left no volume behind.
+
+    ``docker events`` connects to the engine some time after it starts, and
+    the engine never delivers an event from before that. So the first sync
+    (``_wait_live``) makes a new marker every ``LIVE_PROBE`` seconds until
+    one arrives: a marker made too early cannot fail the run."""
 
     SYNC_TIMEOUT = 30.0
+    LIVE_PROBE = 1.0
 
     def __init__(self, env: Mapping[str, str]) -> None:
         self._env = dict(env)
@@ -1072,7 +1078,7 @@ class VolumeWatch:
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
         atexit.register(self.close)  # never leave the subscriber running
-        self.sync()  # the subscription is live before any scenario runs
+        self._wait_live()  # the subscription is live before any scenario runs
 
     def _read(self) -> None:
         assert self._proc.stdout is not None
@@ -1086,9 +1092,9 @@ class VolumeWatch:
             self.error = self.error or "the docker event stream ended"
             self._cond.notify_all()
 
-    def sync(self) -> None:
-        if self.error:
-            return
+    def _probe(self, timeout: float) -> str | None:
+        """Create a marker volume and wait up to ``timeout`` for its create
+        event. Returns the marker when the event did not arrive."""
         self._markers += 1
         marker = f"{DOCKER_PREFIX}sync-{os.getpid()}-{self._markers}"
         made = subprocess.run(
@@ -1097,18 +1103,33 @@ class VolumeWatch:
         try:
             if made.returncode != 0:
                 self.error = f"cannot create the sync marker volume {marker}"
-                return
+                return None
             with self._cond:
-                seen = self._cond.wait_for(
+                self._cond.wait_for(
                     lambda: self._ledger.seen_created(marker) or self.error is not None,
-                    timeout=self.SYNC_TIMEOUT,
+                    timeout=timeout,
                 )
-                if not seen:
-                    self.error = f"no docker event for {marker} in {self.SYNC_TIMEOUT:.0f}s"
+                return None if self._ledger.seen_created(marker) else marker
         finally:
             subprocess.run(
                 ["docker", "volume", "rm", "-f", marker], capture_output=True, env=self._env
             )
+
+    def _wait_live(self) -> None:
+        deadline = time.monotonic() + self.SYNC_TIMEOUT
+        while self.error is None:
+            left = deadline - time.monotonic()
+            if self._probe(max(min(self.LIVE_PROBE, left), 0.0)) is None or self.error:
+                return
+            if left <= self.LIVE_PROBE:
+                self.error = f"no docker event for a sync marker in {self.SYNC_TIMEOUT:.0f}s"
+
+    def sync(self) -> None:
+        if self.error:
+            return
+        missed = self._probe(self.SYNC_TIMEOUT)
+        if missed and not self.error:
+            self.error = f"no docker event for {missed} in {self.SYNC_TIMEOUT:.0f}s"
 
     def owned(self) -> set[str]:
         """The volumes this run created for its own containers (some may be gone)."""

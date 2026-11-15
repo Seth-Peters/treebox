@@ -45,7 +45,7 @@ printf 'COPY init-firewall.sh /usr/local/bin/init-firewall.sh\nRUN chmod 0755 /u
 ## Gotchas
 
 - The offline template has no `firewall.json` on purpose: `--firewall` with it is `TEMPLATE_INVALID`. Use the `e2e-fw` copy above.
-- The counting script blocks nothing. What a real firewall blocks (egress lockdown, no blanket host-gateway `ACCEPT`, rules back after a restart) needs the bundled image: H18, opt-in with `TREEBOX_E2E_BUNDLED_IMAGE=1`, 5.6 GB and the network.
+- The counting script blocks nothing. What a real firewall blocks (egress lockdown, no blanket host-gateway `ACCEPT`, rules back after a restart) needs the bundled image: H18, opt-in with `TREEBOX_E2E_BUNDLED_IMAGE=1`, about 3.2 GB and the network.
 - iptables rules do not survive a container restart; that is why every entry runs the script. A count that does not grow after `docker restart` is a product bug.
 - The failure hint prints the full re-create command with the fixture's `--repo` and `--root`; it is safe to copy into the fixture.
 - Scenarios: G10, H14, H18.

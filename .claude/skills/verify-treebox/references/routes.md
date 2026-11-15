@@ -205,7 +205,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `behavior branch .gitmodules and dry-run submodule plan` | create | `provision.py::plan_submodules`, `provision.py::copy_submodules` | B28 |
 | `behavior pre-push guard` | create | `provision.py::create` | B13 |
 | `behavior progress and color off a terminal` | create | `output.py::Reporter` | B14 |
-| `behavior no wrapping or truncation off a terminal` | list, doctor | `output.py::new_console`, `output.py::Reporter.render_list` | D1 |
+| `behavior no wrapping or truncation off a terminal` | list, template, doctor | `output.py::new_console`, `output.py::fit_width`, `output.py::print_block`, `output.py::trim_line_ends`, `output.py::Reporter.render_list`, `output.py::Reporter.render_template_list` | D1, D5 |
 | `behavior exact path refs in hints` | unattended, remote-workers | `models.py::path_ref` | B7, U4, H15 |
 | `behavior .env refresh on enter` | enter | `provision.py::enter` | C2 |
 | `behavior deps re-sync on manifest change` | enter | `provision.py::enter`, `ecosystems.py::lockfile_hash` | C3 |
