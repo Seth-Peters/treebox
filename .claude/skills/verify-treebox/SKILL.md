@@ -16,7 +16,7 @@ treebox is a short-lived CLI with `--help`, `--json`, `--dry-run` and classified
 ## Hard rules
 
 - **Never launch a real agent.** The fixture's `treebox` and the evidence run put the controlled stub agent (`tests/e2e/stub-agent`) first on treebox's `PATH`, and refuse to run when any other `claude` or `codex` is reachable there. In docker the offline template's agent is the same stub. So a bare `treebox create` / `treebox enter` (a real launch) is safe in the fixture. A printed host entry command (`sh -c 'cd … && exec claude …'`) is not: never run it in your own shell, where `claude` is the real agent. Replay it only with the stub first: `PATH="$SBX/stub-bin:$PATH" sh -c '…'`.
-- **Run `e2e_guard || exit 1` at the top of every shell block or script that drives treebox.** It exits non-zero unless `type -P treebox` is `$SBX/bin/treebox` and treebox's `HOME`, `TREEBOX_HOME` and `TREEBOX_CONFIG` are under `$SBX`. In a shell where the fixture is lost, `e2e_guard` itself does not exist, which fails too (127). See "A lost fixture" below.
+- **Run `e2e_guard || exit 1` first in every shell block or script that drives treebox.** It is a deterministic check: it exits non-zero unless `treebox` on `PATH` is the fixture's build and its `HOME`, `TREEBOX_HOME` and `TREEBOX_CONFIG` are in the fixture. Its message says what is wrong and how to correct it.
 - **Never use the real repo, the real `~/.treebox`, `~/.claude`, `~/.codex` or the macOS Keychain.** The fixture scopes `HOME`, `TREEBOX_HOME`, `TREEBOX_CONFIG`, the repo and the worktree root under one temp dir. Its `~/.claude` and `~/.codex` hold fake login files, and its stub dir holds a fake `security` that finds no Keychain item.
 - **Collect, do not abort.** A failed drive or scenario is a finding to record; keep going so one regression does not hide the rest.
 - **Judge behavior, not prose.** Exit codes, JSON fields, files on disk, stdout/stderr separation, git and container state. Exact human text is `tests/golden/`'s job.
@@ -46,13 +46,6 @@ e2e_guard || exit 1
 treebox list --repo "$REPO" --root "$ROOT" --json
 ```
 
-### A lost fixture
-
-The fixture lives in one shell's variables and `PATH`. It is lost when `fixture.sh` was sourced in a pipeline or a subshell, when a later tool call starts a new shell without `--attach`, or after `e2e_cleanup`. Then nothing tells you: `treebox` resolves to whatever else is on `PATH` (often the released treebox in `~/.local/bin`), with your real `HOME`, and every drive writes into the real `~/.treebox` and uses your real logins and agent.
-
-- **How to notice it:** `e2e_guard` fails (`e2e_guard: FIXTURE LOST: …`, or `e2e_guard: command not found`), the first line of `e2e_doctor` is `FAIL`, `type -P treebox` is not `$SBX/bin/treebox`, `echo "$SBX"` is empty, or a `~/.treebox` appears that was not there before.
-- **What to do:** stop driving. Attach (`--attach "$SBX"`) or build a new fixture, run `e2e_guard`, and tell the user if a command already ran outside the fixture (a new `~/.treebox`, a real worktree), so they can check and clean it.
-
 ## Doctor
 
 One read-only check that answers "is this fixture worth driving?". Run it before the first drive, after any drive that failed or surprised you, and in every new shell:
@@ -81,12 +74,7 @@ To run a scenario's executable checks instead: `uv run python tests/e2e/run.py e
 
 ### Verifying all of main
 
-To verify `main` as a whole (no single change), not every bullet of every feature:
-
-1. The gate and the full sweep: `./scripts/validate.sh`, then `uv run python tests/e2e/run.py evidence --out "$TMPDIR/treebox-evidence-$(date +%s)"`, with `--require docker` where an engine exists.
-2. Find the recently merged behavior: `git log --oneline -30 -- src/treebox` (and `git show --stat <sha>` for one commit). Map each changed source file to its features with the source column of `references/routes.md`.
-3. For each feature file, in a fresh fixture, drive at least its first two `Driving it with treebox` bullets plus every bullet that covers behavior from step 2. Say in the report which bullets you drove and which you did not.
-4. A bullet whose command chains a second command (`treebox … | cat`, `treebox … && git …`, `treebox …; ls …`): record treebox's own exit code separately from the chain's. Run treebox alone first, `treebox … >"$OUT/x.stdout" 2>"$OUT/x.stderr"; echo $? >"$OUT/x.exit"`, then run the second command on the saved output or state. In a pipeline, `${PIPESTATUS[0]}` is treebox's exit code; `$?` is the last command's.
+Run the gate and the full sweep (`./scripts/validate.sh`, then `run.py evidence`, with `--require docker` where an engine exists). Then, for each feature file, drive its first two bullets and each bullet that covers behavior merged recently (`git log --oneline -30 -- src/treebox`). Report which bullets you drove.
 
 ### The docker features: the offline path
 
