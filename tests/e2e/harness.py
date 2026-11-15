@@ -26,6 +26,7 @@ failed scenario and a crash: see ``Bundle``.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import dataclasses
 import datetime as dt
@@ -41,6 +42,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -950,7 +952,7 @@ def _short_argv(run: RunRecord, sbx: Path | None = None) -> str:
 # --- state capture ---------------------------------------------------------------
 
 
-def capture_state(fx: Fixture, docker: bool) -> dict[str, Any]:
+def capture_state(fx: Fixture, docker: bool, watch: VolumeWatch | None = None) -> dict[str, Any]:
     """The git, filesystem and container state a scenario left behind."""
 
     def out(argv: list[str]) -> str:
@@ -985,7 +987,7 @@ def capture_state(fx: Fixture, docker: bool) -> dict[str, Any]:
         "files": files[:2000],
     }
     if docker:
-        state["docker"] = docker_resources(fx.env)
+        state["docker"] = docker_resources(fx.env, watch)
     return state
 
 
@@ -997,8 +999,138 @@ def e2e_owned(kind: str, lines: Sequence[str]) -> list[str]:
     return [line for line in lines if line.split(" ", 1)[0].startswith(prefixes)]
 
 
-def docker_resources(env: Mapping[str, str]) -> dict[str, list[str]]:
-    """Containers, images and volumes that carry the e2e prefixes."""
+class VolumeLedger:
+    """Which volumes the e2e run created for its own containers, from the
+    engine's container and volume events (``docker events --format json``).
+
+    A base image ``VOLUME`` gives a container an anonymous volume with a random
+    hex name, which no name prefix can find. A volume is the run's own only
+    when the engine reported both events while the run watched: the volume was
+    created, and it was mounted into a container whose name carries the e2e
+    prefix. A volume that existed before the run fails the first test; a volume
+    that other work on the same engine creates for its own containers fails
+    the second. So the reaper can remove what the run made, and only that."""
+
+    def __init__(self) -> None:
+        self._e2e_containers: set[str] = set()
+        self._created: set[str] = set()
+        self._mounted_by: dict[str, set[str]] = {}
+
+    def feed(self, event: Mapping[str, Any]) -> None:
+        actor = event.get("Actor") or {}
+        attrs = actor.get("Attributes") or {}
+        kind, action, ident = event.get("Type"), event.get("Action"), actor.get("ID", "")
+        if kind == "container" and action == "create":
+            if str(attrs.get("name", "")).startswith(DOCKER_PREFIX):
+                self._e2e_containers.add(ident)
+        elif kind == "volume" and action == "create":
+            self._created.add(ident)
+        elif kind == "volume" and action == "mount":
+            self._mounted_by.setdefault(ident, set()).add(str(attrs.get("container", "")))
+
+    def seen_created(self, name: str) -> bool:
+        return name in self._created
+
+    def owned(self) -> set[str]:
+        return {v for v in self._created if self._mounted_by.get(v, set()) & self._e2e_containers}
+
+
+class VolumeWatch:
+    """A ``VolumeLedger`` fed live by ``docker events`` for the whole run.
+
+    The engine keeps only a short event history, so the watch subscribes once,
+    before the first scenario, and reads the stream on a thread. ``sync``
+    makes the ledger current: it creates a marker volume and waits until its
+    create event arrives (the engine delivers events in order, so every
+    earlier event has arrived too). If the stream is lost, ``error`` says so
+    and X5 fails: the run can no longer prove it left no volume behind."""
+
+    SYNC_TIMEOUT = 30.0
+
+    def __init__(self, env: Mapping[str, str]) -> None:
+        self._env = dict(env)
+        self._ledger = VolumeLedger()
+        self._cond = threading.Condition()
+        self._markers = 0
+        self.error: str | None = None
+        self._proc = subprocess.Popen(
+            [
+                "docker",
+                "events",
+                "--format",
+                "{{json .}}",
+                "--filter",
+                "type=container",
+                "--filter",
+                "type=volume",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=self._env,
+        )
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+        atexit.register(self.close)  # never leave the subscriber running
+        self.sync()  # the subscription is live before any scenario runs
+
+    def _read(self) -> None:
+        assert self._proc.stdout is not None
+        for line in self._proc.stdout:
+            with contextlib.suppress(ValueError):
+                event = json.loads(line)
+                with self._cond:
+                    self._ledger.feed(event)
+                    self._cond.notify_all()
+        with self._cond:
+            self.error = self.error or "the docker event stream ended"
+            self._cond.notify_all()
+
+    def sync(self) -> None:
+        if self.error:
+            return
+        self._markers += 1
+        marker = f"{DOCKER_PREFIX}sync-{os.getpid()}-{self._markers}"
+        made = subprocess.run(
+            ["docker", "volume", "create", marker], capture_output=True, env=self._env
+        )
+        try:
+            if made.returncode != 0:
+                self.error = f"cannot create the sync marker volume {marker}"
+                return
+            with self._cond:
+                seen = self._cond.wait_for(
+                    lambda: self._ledger.seen_created(marker) or self.error is not None,
+                    timeout=self.SYNC_TIMEOUT,
+                )
+                if not seen:
+                    self.error = f"no docker event for {marker} in {self.SYNC_TIMEOUT:.0f}s"
+        finally:
+            subprocess.run(
+                ["docker", "volume", "rm", "-f", marker], capture_output=True, env=self._env
+            )
+
+    def owned(self) -> set[str]:
+        """The volumes this run created for its own containers (some may be gone)."""
+        self.sync()
+        with self._cond:
+            return self._ledger.owned()
+
+    def close(self) -> None:
+        if self._proc.poll() is not None:
+            return
+        self.error = self.error or "closed"
+        self._proc.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self._proc.wait(timeout=10)
+        self._thread.join(timeout=10)
+
+
+def docker_resources(
+    env: Mapping[str, str], watch: VolumeWatch | None = None
+) -> dict[str, list[str]]:
+    """Containers, images and volumes that carry the e2e prefixes, plus the
+    unprefixed volumes (anonymous ones) the watch proves the run created."""
 
     def lines(argv: list[str]) -> list[str]:
         proc = subprocess.run(argv, capture_output=True, text=True, env=dict(env))
@@ -1012,20 +1144,33 @@ def docker_resources(env: Mapping[str, str]) -> dict[str, list[str]]:
             e2e_owned("images", lines(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]))
         )
     )
-    volumes = e2e_owned("volumes", lines(["docker", "volume", "ls", "--format", "{{.Name}}"]))
+    live = lines(["docker", "volume", "ls", "--format", "{{.Name}}"])
+    volumes = e2e_owned("volumes", live)
+    if watch is not None:
+        owned = watch.owned()
+        volumes += [v for v in live if v in owned and v not in volumes]
     return {"containers": containers, "images": images, "volumes": volumes}
 
 
-def reap_docker(env: Mapping[str, str]) -> dict[str, list[str]]:
-    """Remove every e2e-prefixed container, image and volume, and nothing
-    else: names are matched by exact prefix, never by substring."""
+def unprefixed(volumes: Sequence[str]) -> list[str]:
+    """The volumes no e2e name prefix covers: anonymous, or a foreign name."""
+    return [v for v in volumes if not v.startswith(DOCKER_VOLUME_PREFIXES)]
+
+
+def reap_docker(env: Mapping[str, str], watch: VolumeWatch | None = None) -> dict[str, list[str]]:
+    """Remove every e2e-prefixed container, image and volume, and the volumes
+    the watch proves the run created, and nothing else: names are matched by
+    exact prefix, never by substring. Containers go with ``-v``, which also
+    removes their own anonymous volumes (never a named one), so a reap without
+    a watch (``run.py reap`` after a crash) still takes the anonymous volumes
+    of the e2e containers that remain."""
     if not shutil.which("docker", path=env.get("PATH")):
         return {"containers": [], "images": [], "volumes": []}
-    found = docker_resources(env)
+    found = docker_resources(env, watch)
     run_env = dict(env)
     ids = [line.split()[1] for line in found["containers"]]
     if ids:
-        subprocess.run(["docker", "rm", "-f", *ids], capture_output=True, env=run_env)
+        subprocess.run(["docker", "rm", "-f", "-v", *ids], capture_output=True, env=run_env)
     if found["images"]:
         subprocess.run(["docker", "rmi", "-f", *found["images"]], capture_output=True, env=run_env)
     if found["volumes"]:

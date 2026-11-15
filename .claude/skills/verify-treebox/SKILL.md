@@ -20,7 +20,7 @@ treebox is a short-lived CLI with `--help`, `--json`, `--dry-run` and classified
 - **Collect, do not abort.** A failed drive or scenario is a finding to record; keep going so one regression does not hide the rest.
 - **Judge behavior, not prose.** Exit codes, JSON fields, files on disk, stdout/stderr separation, git and container state. Exact human text is `tests/golden/`'s job.
 - **A skip is never a pass.** A missing prerequisite (no docker engine, no base image, root or non-root user, not macOS, no shell detection, the bundled image not opted in) is SKIP with the reason, and the report says what went unexercised. With no reachable engine, the docker work is SKIP, never PASS; with an engine, it runs.
-- Docker names: name every docker worktree `e2e-…`, so its container, image and volume are `treebox-e2e-*` and the reaper finds them. The reaper removes those prefixes only.
+- Docker names: name every docker worktree `e2e-…`, so its container, image and volume are `treebox-e2e-*` and the reaper finds them. The reaper removes those prefixes only, plus the anonymous volumes of the run's own containers (see Cleanup). A template must not give a container a volume without the prefix: no base image `VOLUME`, no unprefixed mount.
 
 ## Launch
 
@@ -67,7 +67,7 @@ To run a scenario's executable checks instead: `uv run python tests/e2e/run.py e
 
 The docker features never need the bundled 5.6 GB image or a network build:
 
-- **Operator template** `tests/e2e/offline-template/` (installed as `$TREEBOX_HOME/templates/e2e-offline`; pass `--template e2e-offline`). Its Dockerfile starts from a digest-pinned `alpine/git` and only edits local files, so once that base image is present the build needs no network, and it works for any host uid.
+- **Operator template** `tests/e2e/offline-template/` (installed as `$TREEBOX_HOME/templates/e2e-offline`; pass `--template e2e-offline`). Its Dockerfile starts from a digest-pinned `buildpack-deps:trixie-scm` (the official Debian image with git) and only edits local files, so once that base image is present the build needs no network, and it works for any host uid. The base image declares no `VOLUME`: a base image volume gives every container an anonymous volume that `docker rm -f` leaves behind.
 - **Controlled launch executable** `tests/e2e/stub-agent`. On the host the fixture links it as `claude` and `codex` in `$SBX/stub-bin`. In the offline template it is `post-create.sh` and the Dockerfile links it as `/usr/local/bin/claude` and `/usr/local/bin/codex`. As an agent it prints a record (its argv, cwd, uid, whether it runs in a container, whether `ANTHROPIC_API_KEY` is set) and obeys `--stub-exit=N`, `--stub-kill=SIG` and `--stub-sleep=N`. As `post-create.sh` it writes `/tmp/treebox-e2e-post-create`.
 
 The firewall test template (`features/firewall.md`) proves when treebox runs the firewall, not what a real firewall blocks. The real egress lockdown, the bundled agents and Chromium need the bundled image: H18 builds it only with `TREEBOX_E2E_BUNDLED_IMAGE=1` (about 5.6 GB, needs the network) and is SKIP otherwise.
@@ -133,7 +133,9 @@ treebox teardown e2e-a e2e-b --repo "$REPO" --root "$ROOT" --force --remove-volu
 e2e_cleanup
 ```
 
-`e2e_cleanup` reaps `treebox-e2e-*` docker resources, removes `$SBX`, and takes `$SBX/bin` off `PATH`, so a later `treebox` is never a dead fixture's. Evidence you saved outside `$SBX` (and every evidence bundle) survives it. Never kill processes by name: stop the ones you started. Then check that nothing is left: `docker ps -a --filter name=treebox-e2e-`, `docker images 'treebox-e2e-*'`, `docker volume ls --filter name=treebox-e2e-` are empty, and `~/.treebox` is unchanged (it does not exist on a machine without a real treebox setup). The evidence run cleans up after itself and checks this as invariant X5.
+`e2e_cleanup` reaps `treebox-e2e-*` docker resources, removes `$SBX`, and takes `$SBX/bin` off `PATH`, so a later `treebox` is never a dead fixture's. Evidence you saved outside `$SBX` (and every evidence bundle) survives it. Never kill processes by name: stop the ones you started. Then check that nothing is left: `docker ps -a --filter name=treebox-e2e-`, `docker images 'treebox-e2e-*'`, `docker volume ls --filter name=treebox-e2e-` are empty, no volume is new in `docker volume ls` (an anonymous volume has a random hex name, so the name filter does not show it), and `~/.treebox` is unchanged (it does not exist on a machine without a real treebox setup).
+
+The evidence run cleans up after itself and checks this as invariant X5. It follows the engine's events (`docker events`) from before the first scenario, and takes a volume as its own only when the engine reported that the volume was created during the run and mounted into a `treebox-e2e-*` container. So on an engine that other work uses at the same time, it never claims a volume that existed before the run or that other work made for its own containers. X5 fails when a docker scenario left any volume without the `treebox-e2e-` prefix (anonymous or another name), also when the reaper then removed it, and when anything the run made remains after the cleanup. `e2e_reap_docker` alone (after a crash) has no event history: it removes the prefixed resources, and the e2e containers with `docker rm -f -v`, which also takes their anonymous volumes (never a named one). An anonymous volume whose container is already gone it cannot find; remove that one by hand.
 
 ## Helpers
 
@@ -142,7 +144,7 @@ e2e_cleanup
 | `fixture.sh` | `source .claude/skills/verify-treebox/fixture.sh` | Build a fresh fixture and put its `treebox` first on `PATH`. |
 | `fixture.sh --attach` | `source .claude/skills/verify-treebox/fixture.sh --attach "$SBX"` | Use an existing fixture in a new shell. |
 | `e2e_doctor` | `e2e_doctor` | The read-only health check (see Doctor). |
-| `e2e_reap_docker` | `e2e_reap_docker` | Remove `treebox-e2e-*` containers, images and volumes; safe anytime, also after a crash. |
+| `e2e_reap_docker` | `e2e_reap_docker` | Remove `treebox-e2e-*` containers (with their anonymous volumes), images and volumes; safe anytime, also after a crash. |
 | `e2e_cleanup` | `e2e_cleanup` | Reap, remove `$SBX`, restore `PATH`. |
 | `$SBX/bin/treebox` | `treebox …`; `E2E_PATH=… treebox …` | This checkout's CLI with the hermetic environment. Passes through `NO_COLOR`, `TERM`, `COLUMNS`, `TZ`, `TREEBOX_NON_INTERACTIVE`, `TREEBOX_TEMPLATE_DIR`, `TREEBOX_CONFIG`, `XDG_CACHE_HOME`, `UV_CACHE_DIR`, `DOCKER_HOST` and the completion variables; `E2E_PATH` replaces its `PATH` (exit 125 when a real agent, or on macOS the real `security`, is on it: start it with `$SBX/safe-bin`). |
 | `run.py evidence` | `uv run python tests/e2e/run.py evidence --out DIR [--groups …] [--only …] [--require docker] [--inject-failure]` | The full scenario sweep and its bundle. |

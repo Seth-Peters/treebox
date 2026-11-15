@@ -72,6 +72,7 @@ def run_scenario(
     fx: Fixture,
     prereqs: dict[str, harness.Prerequisite],
     all_runs: list[tuple[str, RunRecord]],
+    watch: harness.VolumeWatch | None = None,
 ) -> tuple[Result, dict[str, Any] | None]:
     missing = [p for p in sc.requires if not prereqs[p].available]
     if missing:
@@ -105,7 +106,7 @@ def run_scenario(
         verdict, reason = "known-bug", f"{sc.known_bug} [{reason}]"
     elif sc.known_bug and verdict == "pass":
         ctx.note(f"known bug did not reproduce in this run: {sc.known_bug}")
-    state = harness.capture_state(fx, prereqs["docker"].available)
+    state = harness.capture_state(fx, prereqs["docker"].available, watch)
     result = Result(
         id=sc.id,
         group=sc.group,
@@ -193,6 +194,9 @@ def evidence(args: argparse.Namespace) -> int:
 
     all_runs: list[tuple[str, RunRecord]] = []
     fixture_dirs: list[Path] = []
+    # Follows the engine's events for the whole run, so the reaper and X5 also
+    # find the anonymous volumes of the run's own containers (VolumeLedger).
+    watch = harness.VolumeWatch(base_env) if prereqs["docker"].available else None
     leftovers: dict[str, dict[str, list[str]]] = {}
     setups: list[dict[str, Any]] = []
     interrupted = False
@@ -226,13 +230,13 @@ def evidence(args: argparse.Namespace) -> int:
                     if setup_error:
                         bundle.add(_fail(sc, setup_error), None)
                         continue
-                    result, state = run_scenario(sc, fx, prereqs, all_runs)
+                    result, state = run_scenario(sc, fx, prereqs, all_runs, watch)
                     mark = result.verdict.upper()
                     print(f"   {mark} {sc.id} {sc.title}: {result.reason}", file=sys.stderr)
                     bundle.add(result, state)
                 finally:
                     if prereqs["docker"].available:
-                        found = harness.reap_docker(fx.env)
+                        found = harness.reap_docker(fx.env, watch)
                         if any(found.values()):
                             leftovers[sc.id] = found
                     fx.remove()
@@ -244,7 +248,14 @@ def evidence(args: argparse.Namespace) -> int:
         judged = harness.runs_for_invariants(all_runs, bundle.results)
         for result in harness.invariant_results(judged):
             bundle.add(result, None)
-        bundle.add(_pollution(real_treebox_home, before_home, before_status, fixture_dirs), None)
+        bundle.add(
+            _pollution(
+                real_treebox_home, before_home, before_status, fixture_dirs, leftovers, watch
+            ),
+            None,
+        )
+    if watch is not None:
+        watch.close()
 
     failed = [r for r in bundle.results if r.verdict == "fail"]
     required_missing = [p for p in required if not prereqs[p].available]
@@ -275,9 +286,20 @@ def evidence(args: argparse.Namespace) -> int:
 
 
 def _pollution(
-    home: Path, before_home: dict[str, tuple[int, int]], before_status: str, fixtures: list[Path]
+    home: Path,
+    before_home: dict[str, tuple[int, int]],
+    before_status: str,
+    fixtures: list[Path],
+    leftovers: dict[str, dict[str, list[str]]],
+    watch: harness.VolumeWatch | None,
 ) -> Result:
-    """X5: the run left no trace on the host outside its bundle."""
+    """X5: the run left no trace on the host outside its bundle.
+
+    Docker scenarios may leave ``treebox-e2e-*`` resources for the reaper (a
+    running container and its named volume): the prefix is how the reaper,
+    also after a crash, finds them. A volume without the prefix (an anonymous
+    volume, or a foreign name) is a leak even when the run's own reaper found
+    it through the watch: no name rule finds it later."""
     checks = [
         harness.Check(
             harness.snapshot_tree(home) == before_home, f"nothing changed under real {home}"
@@ -290,12 +312,33 @@ def _pollution(
             not [f for f in fixtures if f.exists()], f"all {len(fixtures)} fixture dirs removed"
         ),
     ]
-    remaining = harness.docker_resources(os.environ) if _docker_up() else None
+    remaining = harness.docker_resources(os.environ, watch) if _docker_up() else None
+    if watch is not None:
+        checks.append(
+            harness.Check(
+                watch.error is None,
+                "the docker event watch followed the whole run"
+                + (f" ({watch.error})" if watch.error else ""),
+            )
+        )
+        leaked = {
+            sid: names
+            for sid, found in leftovers.items()
+            if (names := harness.unprefixed(found["volumes"]))
+        }
+        checks.append(
+            harness.Check(
+                not leaked,
+                "no docker scenario left an anonymous or unprefixed volume behind"
+                + (f" ({leaked})" if leaked else ""),
+            )
+        )
     if remaining is not None:
         checks.append(
             harness.Check(
                 not any(remaining.values()),
-                f"no {harness.DOCKER_PREFIX}* containers, images or volumes remain ({remaining})",
+                f"no {harness.DOCKER_PREFIX}* containers or images and no run-created "
+                f"volumes remain ({remaining})",
             )
         )
     failed = [c for c in checks if not c.ok]

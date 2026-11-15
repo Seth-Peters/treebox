@@ -1,6 +1,6 @@
 """The e2e harness's own logic: verdicts, the run's exit status, the summary,
-stream checks and the docker reaper's name filter. Pure functions only: no
-CLI runs, no docker."""
+stream checks, and the docker reaper's name filter and volume ledger. Pure
+functions only: no CLI runs, no docker."""
 
 from __future__ import annotations
 
@@ -127,3 +127,33 @@ def test_a_known_bugs_runs_are_not_judged_again_by_the_invariants() -> None:
     assert judged == [("A1", ok)]
     x1 = next(r for r in harness.invariant_results(judged) if r.id == "X1")
     assert x1.verdict == "pass"
+
+
+def _event(kind: str, action: str, ident: str, **attrs: str) -> dict[str, object]:
+    return {"Type": kind, "Action": action, "Actor": {"ID": ident, "Attributes": attrs}}
+
+
+def test_the_volume_ledger_claims_only_volumes_made_for_e2e_containers() -> None:
+    ledger = harness.VolumeLedger()
+    for event in (
+        _event("container", "create", "c-e2e", name="treebox-e2e-dockered-0123456789"),
+        _event("container", "create", "c-other", name="other-work"),
+        # An anonymous volume of the run's own container: ours.
+        _event("volume", "create", "a1b2"),
+        _event("volume", "mount", "a1b2", container="c-e2e", destination="/git"),
+        # Other work's anonymous volume, made while the run watched: not ours.
+        _event("volume", "create", "c3d4"),
+        _event("volume", "mount", "c3d4", container="c-other", destination="/git"),
+        # A volume from before the run, mounted into an e2e container: not ours.
+        _event("volume", "mount", "e5f6", container="c-e2e", destination="/data"),
+        # Created but never mounted (the sync marker): not claimed.
+        _event("volume", "create", "treebox-e2e-sync-1-1"),
+    ):
+        ledger.feed(event)
+    assert ledger.owned() == {"a1b2"}
+    assert ledger.seen_created("treebox-e2e-sync-1-1")
+
+
+def test_unprefixed_volumes_are_the_leaks() -> None:
+    names = ["treebox-e2e-vol-e2e-a", "treebox-shellhistory-e2e-a", "a1b2c3", "data"]
+    assert harness.unprefixed(names) == ["a1b2c3", "data"]
