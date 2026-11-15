@@ -6,8 +6,9 @@
 # The base image is pinned by digest (buildpack-deps trixie-scm, the official
 # Debian image with git, multi-arch index) so a run is reproducible and the
 # local copy satisfies the build offline. It declares no VOLUME: a base image
-# VOLUME gives every container an anonymous volume, and `docker rm -f` (how
-# treebox removes a container) leaves that volume behind on the engine.
+# VOLUME gives every container an anonymous volume. Treebox's teardown removes
+# it with the container (`docker rm -f -v`), but a container a scenario leaves
+# for the reaper would keep it until the reap. H21 adds one on purpose.
 FROM buildpack-deps:trixie-scm@sha256:4f34e1d673fdb65371de9f88bdd32c4e30152fe692b35604aef5c0b3c0e6da10
 
 ARG TZ=UTC

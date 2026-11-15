@@ -386,7 +386,13 @@ nothing. Refuses to remove a worktree with uncommitted changes unless you pass
 and it refuses with `NEEDS_CONFIRMATION` (exit `5`) unless you pass `--yes`.
 `--yes` only answers the prompt: a worktree with uncommitted changes is still
 refused (`DIRTY_WORKTREE`, exit `5`); `--force` removes it anyway. For
-docker-sandboxed worktrees, `--remove-volumes` also removes
+docker-sandboxed worktrees, teardown removes the container together with its
+anonymous volumes (a `VOLUME` line in the template's image, `docker rm -v`),
+so what the agent wrote there is removed too; a named volume is never removed
+that way. A template that must keep data after a teardown mounts a
+[named volume](configuration.md#volumes-what-survives-a-teardown).
+An anonymous volume that another container still uses (`--volumes-from`) is
+kept by Docker. `--remove-volumes` also removes
 per-workspace volumes authorized by the
 [runner-owned manifest](how-it-works.md#freshness-is-enforced-not-hoped-for) written outside
 the sandbox mount at create time, so they are still removed when the container
@@ -399,7 +405,8 @@ a prompt).
 
 **An incomplete cleanup is a failed `teardown`.** Teardown follows the
 [cleanup model](how-it-works.md#lifecycle-setup-and-cleanup): runner resources
-(container, image, volumes, sandbox files) first, then the worktree directory
+(container with its anonymous volumes, image, named volumes, sandbox files)
+first, then the worktree directory
 and its git registration, then the ownership record. When a step cannot
 finish - a container, image or volume removal fails, Docker is not reachable,
 or git refuses to remove the worktree - teardown exits `1` with
