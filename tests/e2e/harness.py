@@ -71,7 +71,7 @@ AGENT_NAMES = ("claude", "codex")
 # absent. The fixture's copy finds nothing ("item not found" is status 44).
 FAKE_SECURITY = "#!/bin/sh\n# treebox e2e: no Keychain item, never the real Keychain.\nexit 44\n"
 # Opt-in for the scenario that builds the bundled sandbox image (about
-# 5.6 GB, needs the network): set to 1.
+# 3.2 GB, needs the network): set to 1.
 BUNDLED_IMAGE_OPT_IN = "TREEBOX_E2E_BUNDLED_IMAGE"
 DOCUMENTED_EXIT_CODES = frozenset({0, 1, 2, 3, 4, 5})
 
@@ -532,7 +532,7 @@ def probe_prerequisites(base_env: Mapping[str, str]) -> dict[str, Prerequisite]:
         "opted in"
         if opted
         else f"opt-in: set {BUNDLED_IMAGE_OPT_IN}=1 to build the bundled image "
-        "(about 5.6 GB, needs the network)",
+        "(about 3.2 GB, needs the network)",
     )
     shell_ok = _shell_detection_works()
     add(
