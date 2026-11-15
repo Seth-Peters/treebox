@@ -2986,7 +2986,7 @@ def test_teardown_json_reports_failed_volume_removal_honestly(
     assert row["volumes_removed"] is False
     assert (row["removed"], row["complete"]) == (False, False)
     assert row["remaining"] == ["volumes treebox-shellhistory-volfail (docker volume rm failed)"]
-    assert ["rm", "-f", "abc123"] in calls
+    assert ["rm", "-f", "-v", "abc123"] in calls
     assert ["volume", "rm", "treebox-shellhistory-volfail"] in calls
     assert wt.is_dir() and record.exists(wt)
     assert (Path(root) / ".containers" / "volfail" / "treebox-resources.json").is_file()

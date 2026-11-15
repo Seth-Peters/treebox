@@ -114,8 +114,9 @@ exit `1`); an interrupted one stays `pending`. `list` reports `deps: fresh` or
 
 **Cleanup.** `teardown` removes one worktree's resources in a fixed order:
 
-1. Runner resources: container, image, volumes (with `--remove-volumes`), and
-   the sandbox files that hold the resource manifest.
+1. Runner resources: the container with its anonymous volumes, the image,
+   the named per-workspace volumes (with `--remove-volumes`), and the sandbox
+   files that hold the resource manifest.
 2. The worktree: its directory and its git registration.
 3. Ownership: the host-owned record and the setup log, then the worktree's
    [port block](#port-blocks).
@@ -198,7 +199,12 @@ and volume ownership to
 sandbox mount. `teardown` validates and trusts only that manifest for the
 image, and `teardown --remove-volumes` for the volumes, so it can still remove
 them when the container (a manual `docker rm`) and user template are both
-gone. An image the manifest does not name is never removed.
+gone. An image the manifest does not name is never removed. The container's
+anonymous volumes (a `VOLUME` line in its image) need no manifest entry: they
+belong to that one container and go with it (`docker rm -v`), so a plain
+teardown leaves none behind, and `-v` never removes a named volume. A
+container removed by hand with `docker rm` without `-v` leaves its anonymous
+volume, and treebox cannot find it after that.
 
 If an operator manually deletes the rendered config directory (and with it the
 manifest) of a docker worktree that still has its record, the worktree stays

@@ -14,6 +14,7 @@ Used with: [Create](./create.md) made what it removes, [List](./list.md) shows w
 - `teardown-corrupt`: a worktree without its `.git` pointer is removed and its registration pruned.
 - `teardown-prompt`: on a terminal, a confirmation prompt, and with no refs a chooser with status badges.
 - `teardown-output`: `--json` is a record per worktree; `--quiet` and `--verbose` change only stderr.
+- `teardown-volumes`: a docker container goes with its anonymous volumes (a base image `VOLUME`); a named volume goes only with `--remove-volumes`.
 
 ## How to get to it (user POV)
 
@@ -38,6 +39,7 @@ Preconditions: the fixture, `e2e_doctor` all `ok`. Create `clean-td` and `fix-au
 - **Main checkout.** Run `git -C "$REPO" branch repo`, then `treebox teardown repo --repo "$REPO" --root "$SBX" --force --json`. Exit 5 `MAIN_WORKTREE`, `$REPO` intact.
 - **Locked.** Create `locked`, run `git -C "$REPO" worktree lock "$ROOT/locked"`, then `treebox teardown locked --repo "$REPO" --root "$ROOT" --force --json`. Exit 5 `WORKTREE_LOCKED`, the hint gives the `git … worktree unlock …` command. After that unlock, the same teardown exits 0.
 - **Quiet and verbose.** `treebox teardown q-one --repo "$REPO" --root "$ROOT" --force --quiet` leaves stderr empty. `--force --verbose` on another worktree prints the steps, `container  skipped · host isolation`, `worktree  removed …`, `ports  released …`, `branch  kept …` (the default prints them too), plus the raw output of the commands it runs.
+- **Anonymous volumes (docker).** Needs the engine. With the `e2e-anonvol` template of [Docker sandbox](./docker-sandbox.md) (the offline template plus `VOLUME /data`), create `e2e-anon`, then `treebox teardown e2e-anon --repo "$REPO" --root "$ROOT" --force --json`. Exit 0, `volumes_removed` false, `complete` true; `docker volume ls` has no new hex-named volume, only the kept `treebox-e2e-vol-e2e-anon`.
 - **Prompt on a terminal.** Create `i-keep` and `i-yes`. On macOS, `script -q /dev/null CMD` gives a command a pseudo-terminal. `(sleep 3; printf 'n\r') | script -q /dev/null treebox teardown i-keep --repo "$REPO" --root "$ROOT"` shows `Remove worktree i-keep? [y/N]:`, exits 1 with `Aborted.`, and `i-keep` stays. The same with `printf 'y\r'` for `i-yes` exits 0 and removes it.
 - **Chooser.** `(sleep 3; printf ' '; sleep 0.5; printf '\r'; sleep 2; printf '\r') | script -q /dev/null treebox teardown --repo "$REPO" --root "$ROOT"` opens `Select worktrees to tear down` with one row per worktree and a status badge (`✓ merged`, `empty`), ticks the first row, confirms, skips the branch question, and exits 0 with only that worktree removed. `printf '\003'` (Ctrl+C) instead removes nothing.
 
@@ -50,5 +52,6 @@ Preconditions: the fixture, `e2e_doctor` all `ok`. Create `clean-td` and `fix-au
 - The chooser's merged badge needs the forge; the fixture's origin is a local path, so the boundary scenario R46 uses a fake `gh`.
 - In the chooser, a dirty pick is kept (`kept · uncommitted changes`) while the clean picks are removed, and the exit is 5 (I5). A branch whose worktree directory is already gone is still a target: its record says `removed` false, exit 0.
 - Another operation on the same worktree makes teardown exit 5 `LOCK_HELD`; a substring that matches two worktrees is exit 2 `AMBIGUOUS_REF`.
+- The anonymous volume holds what the agent wrote to that path (a database's data directory): teardown removes it, as it removes the container. Data that must survive a teardown belongs in a named volume that the template mounts. An anonymous volume that another container still uses (`--volumes-from`) the engine keeps, and teardown still exits 0 (H21).
 - `TEARDOWN_INCOMPLETE` (exit 1) needs a failing engine step; it is driven in [Docker sandbox](./docker-sandbox.md) and by H10.
-- Scenarios: E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, C18, I1, I2, I3, I4, I5, R46.
+- Scenarios: E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, C18, H21, I1, I2, I3, I4, I5, R46.

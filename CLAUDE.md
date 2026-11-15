@@ -120,7 +120,11 @@ Module map:
   at the runner's constructor, never through the protocol. Docker image and
   volume ownership lives in the runner-owned
   `.containers/<worktree>/treebox-resources.json` manifest outside the
-  sandbox mount, never in sandbox-writable worktree state.
+  sandbox mount, never in sandbox-writable worktree state. A container's
+  anonymous volumes (a base image `VOLUME`) are not in it: teardown removes
+  them with the container (`docker rm -f -v`, which never takes a named
+  volume); named volumes go only on the manifest's authority with
+  `--remove-volumes`.
 - **`cli.py`** (Typer) is the entry point: `create [NAME] / enter <ref> /
   list / teardown <ref>... / template <init|list|path> / doctor / version`
   (`ls`/`rm` are hidden aliases of list/teardown, `template ls` of

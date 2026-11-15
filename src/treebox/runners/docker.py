@@ -1161,8 +1161,9 @@ class DockerRunner:
         return volumes
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
-        """Remove the worktree's container/image (and, when this runner was
-        constructed with ``remove_volumes``, its per-workspace volumes). Every
+        """Remove the worktree's container with its anonymous volumes, its
+        image (and, when this runner was constructed with ``remove_volumes``,
+        its per-workspace named volumes). Every
         step runs even when an earlier one failed, and each resource a step
         could not remove is reported in ``remaining``; the host-owned resource
         manifest (in the sandbox files dir) is then kept, so a retry still
@@ -1207,7 +1208,13 @@ class DockerRunner:
             image = None  # already gone: nothing to remove or report
         container_failed = container_kept = False
         if ids:
-            if self._engine_attempt(["rm", "-f", *ids], reporter=reporter):
+            # `-v` also removes the container's anonymous volumes (a base image
+            # `VOLUME`): nameless, nothing can use them again once the container
+            # is gone, so without it each teardown leaks one. It never removes
+            # a named volume; those stay under the manifest rule below. One
+            # still used by another container (`--volumes-from`) the engine
+            # keeps, and `docker rm` still exits 0.
+            if self._engine_attempt(["rm", "-f", "-v", *ids], reporter=reporter):
                 reporter.ok("container", f"removed {' '.join(ids)}")
             else:
                 container_failed = container_kept = True

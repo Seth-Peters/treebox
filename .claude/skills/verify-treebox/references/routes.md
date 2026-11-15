@@ -80,7 +80,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `teardown --root` | teardown | `resolve.py::resolve_ref` | R43 |
 | `teardown --yes` | teardown | `cli.py::teardown` | E1 |
 | `teardown --delete-branch` | teardown | `cli.py::_teardown_one` | E4, I5 |
-| `teardown --remove-volumes` | teardown, docker-sandbox | `runners/docker.py::DockerRunner.teardown` | H6 |
+| `teardown --remove-volumes` | teardown, docker-sandbox | `runners/docker.py::DockerRunner.teardown` | H6, H21 |
 | `teardown --force` | teardown | `cli.py::teardown` | E2, E3, E7 |
 | `teardown --skip-container` | teardown, docker-sandbox | `cli.py::_teardown_one` | H6 |
 | `teardown --json` | teardown | `cli.py::TeardownRecord` | E4 |
@@ -233,6 +233,7 @@ is not a flag, an error code, a config key or an environment variable.
 | `behavior bundled firewall host ports` | firewall | `assets.py::template_dir` | H18 |
 | `behavior in-container git` | docker-sandbox | `runners/docker.py::DockerRunner._inject` | H8 |
 | `behavior cleanup model` | teardown, docker-sandbox | `cleanup.py::cleanup_one`, `runners/docker.py::DockerRunner.teardown`, `runners/host.py::HostRunner.teardown` | H6, H9, H10, E3 |
+| `behavior anonymous volumes removed with the container` | teardown, docker-sandbox | `runners/docker.py::DockerRunner.teardown` | H21 |
 | `behavior .env or .gitmodules directory` | create | `provision.py::copy_env` | R37 |
 | `behavior stray directory hint` | create | `provision.py::SlugConflictError` | R38 |
 | `behavior nested worktree roots` | enter, teardown | `models.py::Worktree.at`, `resolve.py::Candidate.registered` | R43 |
