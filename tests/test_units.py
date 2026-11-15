@@ -1686,7 +1686,7 @@ def test_docker_teardown_removes_own_image_and_manifest_volumes(tmp_path: Path):
 
     assert result.container == "cleaned"
     assert result.volumes_removed is True
-    assert ["rm", "-f", "abc123"] in fake.calls
+    assert ["rm", "-f", "-v", "abc123"] in fake.calls
     assert ["image", "rm", image] in fake.calls
     volume_rms = [c for c in fake.calls if c[:2] == ["volume", "rm"]]
     assert volume_rms == [["volume", "rm", "treebox-claude-config"]]
@@ -1705,9 +1705,37 @@ def test_docker_teardown_keeps_foreign_image_and_volumes_by_default(tmp_path: Pa
 
     assert result.container == "cleaned"
     assert result.volumes_removed is False
-    assert ["rm", "-f", "abc123"] in fake.calls
+    assert ["rm", "-f", "-v", "abc123"] in fake.calls
     assert not any(c[:2] == ["image", "rm"] for c in fake.calls)
     assert not any(c[:2] == ["volume", "rm"] for c in fake.calls)
+
+
+@pytest.mark.parametrize("remove_volumes", [False, True], ids=["plain", "remove-volumes"])
+def test_docker_teardown_removes_the_container_with_its_anonymous_volumes(
+    tmp_path: Path, remove_volumes: bool
+):
+    """The container goes with ``docker rm -f -v``: its anonymous volumes (a
+    base image ``VOLUME``) have no name, so nothing finds them after the
+    container is gone. ``-v`` never takes a named volume, so the named-volume
+    rule is unchanged: the manifest's volume is removed only with
+    ``remove_volumes``, by its own ``docker volume rm``."""
+    wt = _boxed_worktree(tmp_path)
+    fake = _FakeDocker(
+        ids="abc123\ndef456\n",
+        volumes="treebox-shellhistory-wt\n",
+        volume_ls="treebox-shellhistory-wt\n",
+    )
+    runner = DockerRunner(Config(isolation="docker"), remove_volumes=remove_volumes, docker=fake)
+    _write_resource_manifest(runner, wt, ["treebox-shellhistory-wt"])
+
+    result = runner.teardown(wt, reporter=_RecordingReporter())
+
+    assert result.container == "cleaned"
+    assert result.remaining == ()
+    assert [c for c in fake.calls if c[0] == "rm"] == [["rm", "-f", "-v", "abc123", "def456"]]
+    volume_rms = [c for c in fake.calls if c[:2] == ["volume", "rm"]]
+    assert volume_rms == ([["volume", "rm", "treebox-shellhistory-wt"]] if remove_volumes else [])
+    assert result.volumes_removed is remove_volumes
 
 
 @pytest.mark.parametrize("image_left", [True, False], ids=["image-left", "image-gone"])
@@ -1803,7 +1831,7 @@ def test_docker_teardown_continues_past_destructive_command_failure(
     wt = _boxed_worktree(tmp_path)
     image = DockerRunner(Config(isolation="docker"))._slug(wt)
     failed_commands = {
-        "container": ("rm", "-f", "abc123"),
+        "container": ("rm", "-f", "-v", "abc123"),
         "image": ("image", "rm", image),
         "volume": ("volume", "rm", "treebox-claude-config"),
     }

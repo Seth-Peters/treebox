@@ -2247,6 +2247,72 @@ def h20(ctx: Ctx) -> None:
     ctx.exit_is(gone, 0)
 
 
+def anonymous_volume_template(ctx: Ctx) -> str:
+    """The offline template plus a ``VOLUME /data`` line, as many base images
+    have (database images, ``alpine/git``): every container gets an anonymous
+    volume with a random hex name, which no name prefix finds."""
+    name = "e2e-anonvol"
+    dest = ctx.fx.treebox_home / "templates" / name
+    shutil.copytree(OFFLINE_TEMPLATE_DIR, dest, symlinks=False)
+    with (dest / "Dockerfile").open("a") as f:
+        f.write("VOLUME /data\n")
+    return name
+
+
+def anonymous_volume(ctx: Ctx, name: str) -> str:
+    """The name of the volume the engine made for the image's ``VOLUME /data``."""
+    return inspect(
+        ctx,
+        name,
+        '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}',
+    )
+
+
+def volume_exists(ctx: Ctx, volume: str) -> bool:
+    return ctx.sh("docker", "volume", "inspect", volume, check=False).exit == 0
+
+
+@scenario("H21", "teardown removes the container's anonymous volumes, never a named one")
+def h21(ctx: Ctx) -> None:
+    template = anonymous_volume_template(ctx)
+    args = ["--isolation", "docker", "--template", template]
+    named = "treebox-e2e-vol-e2e-anon"
+    created(ctx, "e2e-anon", *args)
+    anon = anonymous_volume(ctx, "e2e-anon")
+    ctx.check(bool(anon) and not anon.startswith("treebox-"), f"anonymous volume {anon!r}")
+    ctx.check(volume_exists(ctx, anon) and volume_exists(ctx, named), "both volumes exist")
+    ctx.sh("docker", "exec", container(ctx, "e2e-anon")[0], "sh", "-c", "echo x > /data/agent")
+    plain = ctx.tb("teardown", "e2e-anon", *ctx.wt_args(), "--force", "--json")
+    ctx.exit_is(plain, 0)
+    rec = ((ctx.json_out(plain) or {}).get("worktrees") or [{}])[0]
+    ctx.eq(
+        (rec.get("container"), rec.get("volumes_removed"), rec.get("complete")),
+        ("cleaned", False, True),
+        "record",
+    )
+    ctx.check(bool(anon) and not volume_exists(ctx, anon), "the anonymous volume went with it")
+    ctx.check(volume_exists(ctx, named), "a plain teardown keeps the named volume")
+
+    # A container that `enter` re-created (after a manual `docker rm -v`)
+    # gets a new anonymous volume; teardown removes that one too, and
+    # --remove-volumes also the manifest's named volume.
+    named2 = "treebox-e2e-vol-e2e-anon2"
+    created(ctx, "e2e-anon2", *args)
+    first = anonymous_volume(ctx, "e2e-anon2")
+    ctx.sh("docker", "rm", "-f", "-v", container(ctx, "e2e-anon2")[0])
+    ctx.exit_is(ctx.tb("enter", "e2e-anon2", *ctx.wt_args(), "--json"), 0)
+    again = anonymous_volume(ctx, "e2e-anon2")
+    ctx.check(bool(again) and again != first, f"the re-created container has {again!r}")
+    full = ctx.tb("teardown", "e2e-anon2", *ctx.wt_args(), "--force", "--remove-volumes", "--json")
+    ctx.exit_is(full, 0)
+    rec = ((ctx.json_out(full) or {}).get("worktrees") or [{}])[0]
+    ctx.eq(
+        (rec.get("volumes_removed"), rec.get("complete")), (True, True), "--remove-volumes record"
+    )
+    ctx.check(bool(again) and not volume_exists(ctx, again), "its anonymous volume is gone")
+    ctx.check(not volume_exists(ctx, named2), "--remove-volumes removed the named volume")
+
+
 # --- I. interactive routes (pseudo-terminal) -----------------------------------------------------
 
 

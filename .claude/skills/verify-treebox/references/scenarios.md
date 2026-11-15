@@ -558,7 +558,8 @@ pass `--isolation docker --template e2e-offline` (`…` below). The template
 builds with no network once its pinned base image is present, and its agent is
 the stub, so no scenario here needs the bundled 5.6 GB image or launches a real
 agent. Its base image declares no `VOLUME`, so its containers get no
-anonymous volume (X5 fails if one appears). Without a reachable engine or the
+anonymous volume. H21 adds one on purpose; treebox's teardown removes it with
+the container, and X5 fails if any is left. Without a reachable engine or the
 base image, every H scenario is a SKIP, never a pass.
 
 **Name every worktree here with the `e2e-` prefix** (see the docker naming marker
@@ -714,6 +715,23 @@ each create `e2e-launch`. These scenarios need no earlier H scenario.
       `treebox teardown e2e-comma … --force --json`
       Expect: exit 1 `SANDBOX_FAILED`: docker cannot mount a path with `,`; the
       hint says to use paths without `,`; no container; the teardown exits 0.
+- [ ] **H21 anonymous volumes go with the container** - a template
+      `e2e-anonvol`: the offline template plus a `VOLUME /data` line in its
+      Dockerfile (as database images and `alpine/git` have). `treebox create
+      e2e-anon … --template e2e-anonvol --json`, write a file to `/data` in the
+      container, `treebox teardown e2e-anon … --force --json`. Then create
+      `e2e-anon2`, `docker rm -f -v` its container, `treebox enter e2e-anon2 …
+      --json` (re-creates it), and `treebox teardown e2e-anon2 … --force
+      --remove-volumes --json`
+      Expect: each container has an anonymous volume at `/data` (a hex name)
+      and the template's named volume `treebox-e2e-vol-<name>`. The plain
+      teardown exits 0 (`container: "cleaned"`, `volumes_removed: false`,
+      `complete: true`), the anonymous volume is gone and the named one is
+      kept. The re-created container has a new anonymous volume; the
+      `--remove-volumes` teardown exits 0 with `volumes_removed: true` and
+      removes it and the named volume. By hand, `docker volume ls` shows no
+      volume that was not there before, except the kept named one. Before the
+      fix, each teardown left the anonymous volume behind (X5 fails then).
 
 ## I. interactive prompts (pseudo-terminal)
 

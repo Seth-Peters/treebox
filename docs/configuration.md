@@ -313,6 +313,29 @@ treebox does not replace them with updated bundled scripts. Any container
 config in the target repo itself is deliberately ignored. See
 [how it works](how-it-works.md#the-sandbox-config-lives-outside-the-box).
 
+### Volumes: what survives a teardown
+
+A template can give a sandbox two kinds of Docker volume, and `treebox teardown`
+treats them differently:
+
+- **Anonymous volumes** come from a `VOLUME` line in the `Dockerfile`, or in
+  its base image (many images have one: database images keep their data
+  directory there, `alpine/git` keeps `/git`). Docker gives each container its
+  own volume with a random hex name. Teardown removes it together with the
+  container (`docker rm -v`), with or without `--remove-volumes`: it has no
+  name, so nothing can use it again once the container is gone. Whatever the
+  agent wrote under that path (for example a database's data) goes with it.
+- **Named volumes** come from a `type=volume` entry in `mounts`. A source with
+  `${workspaceName}` (the bundled
+  `treebox-shellhistory-${workspaceName}`) is per worktree: treebox records it
+  in the host-owned resource manifest at create, a plain teardown keeps it, and
+  `teardown --remove-volumes` removes it. A source without `${workspaceName}`
+  can be shared by many worktrees, so teardown never removes it.
+
+If data must survive a teardown, mount a named volume at that path in
+`mounts`; a `VOLUME` line alone does not keep it. The bundled template
+declares no `VOLUME`.
+
 ### Build inputs
 
 The image is not published. Each machine builds it from the template. The
