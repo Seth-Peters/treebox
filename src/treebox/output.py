@@ -13,16 +13,17 @@ the JSON reaches stdout.
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import IO
+from typing import IO, TextIO
 
 from rich import box
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.live import Live
 from rich.measure import Measurement
 from rich.padding import Padding
@@ -88,9 +89,16 @@ def format_age(seconds: float) -> str:
     return f"{seconds / (7 * 86400):.0f}w"
 
 
-# The width of a console that is not a terminal (a pipe, a file). A pipe has
-# no width, and a script reads it line by line, so a table row or a path is
-# never wrapped or cut there; only a terminal's width shapes the output.
+# A console that is not a terminal (a pipe, a file) has no width: a script
+# reads it line by line, so a table row or a path is never wrapped or cut
+# there; only a terminal's width shapes the output. Rich needs a number, so
+# such a console gets _UNBOUNDED_WIDTH, which only turns Rich's wrapping and
+# cropping off. It is never a width to fill or to budget against, so every
+# renderer obeys two rules:
+# - It fits (cuts, wraps, shortens, right-aligns) its output only to
+#   fit_width(console), which is None for an unbounded console: nothing to fit.
+# - It prints a table, or any block that Rich could stretch, through
+#   print_block, which renders it at its content width and pads no line.
 _UNBOUNDED_WIDTH = 100_000
 
 
@@ -102,6 +110,84 @@ def new_console(*, stderr: bool = False, file: IO[str] | None = None) -> Console
     if not console.is_terminal:
         console.width = _UNBOUNDED_WIDTH
     return console
+
+
+def fit_width(console: Console) -> int | None:
+    """The width a renderer may fit its output to: the terminal's width, or
+    None for an unbounded console (not a terminal, see ``new_console``),
+    where a line is never cut, wrapped or padded to fit."""
+    return None if console.width >= _UNBOUNDED_WIDTH else console.width
+
+
+def print_block(console: Console, renderable: RenderableType, *, indent: int = 0) -> None:
+    """Print ``renderable`` (a table, for example) ``indent`` columns in, at
+    its content width: Rich pads a block's lines to the widest cell or to
+    the console width, so each line loses its trailing whitespace here. The
+    styles stay. The one way to print a block (see ``_UNBOUNDED_WIDTH``)."""
+    lines = console.render_lines(
+        Padding(renderable, (0, 0, 0, indent), expand=False),
+        pad=False,
+        new_lines=False,
+    )
+    for line in lines:
+        text = Text()
+        for segment in line:
+            if not segment.control:
+                text.append(segment.text, style=segment.style)
+        text.rstrip()
+        console.print(text, soft_wrap=True)
+
+
+class _LineEndTrimmer(io.TextIOBase):
+    """A text stream that writes each complete line to ``stream`` without
+    its trailing whitespace. A partial line (a prompt) is written as it is
+    when the stream is flushed."""
+
+    def __init__(self, stream: TextIO) -> None:
+        super().__init__()
+        self._stream = stream
+        self._pending = ""
+
+    def write(self, s: str) -> int:
+        head, newline, self._pending = (self._pending + s).rpartition("\n")
+        if newline:
+            self._stream.write("\n".join(line.rstrip() for line in head.split("\n")) + "\n")
+        return len(s)
+
+    def flush(self) -> None:
+        if self._pending:
+            self._stream.write(self._pending)
+            self._pending = ""
+        self._stream.flush()
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    @property
+    def encoding(self) -> str:  # type: ignore[override]
+        return self._stream.encoding
+
+    @property
+    def errors(self) -> str | None:  # type: ignore[override]
+        return self._stream.errors
+
+
+def trim_line_ends() -> None:
+    """Off a terminal, write every line of stdout and stderr without trailing
+    whitespace. treebox's own renderers pad nothing (see ``print_block``);
+    this also covers the Rich output treebox does not render itself (Typer's
+    ``--help`` and usage errors pad each line to the console width). Called
+    once, when the console script starts."""
+    if not sys.stdout.isatty():
+        sys.stdout = _LineEndTrimmer(sys.stdout)
+    if not sys.stderr.isatty():
+        sys.stderr = _LineEndTrimmer(sys.stderr)
 
 
 @dataclass(frozen=True)
@@ -244,7 +330,7 @@ class Reporter:
         we omit it entirely rather than pad ANSI into a pipe."""
         if not (timing and self.console.is_terminal):
             return
-        width = self.console.width or 80
+        width = fit_width(self.console) or 80
         pad = width - text.cell_len - len(timing) - _RIGHT_MARGIN
         text.append(" " * max(2, pad))
         text.append(timing, style="wt.time")
@@ -491,68 +577,55 @@ class Reporter:
                 table.add_row(*cells)
             return table
 
-        def natural_width(table: Table) -> int:
+        budget = fit_width(console)
+        max_subject_width = max(
+            len("LAST COMMIT"),
+            *(len(r["last_commit"] or "-") for r in rows),
+        )
+        if budget is None:
+            # Off a terminal a row is never cut: the whole subject.
+            table = build_table(combine_identity=False, commit_width=max_subject_width)
+        else:
             # Measure without the real terminal constraint. If the table's
             # natural width fits, Rich will not shrink any no-wrap core field.
-            options = console.options.update_width(max(console.width, 1000))
-            return Measurement.get(console, options, table).maximum
+            measure_options = console.options.update_width(max(budget, 1000))
 
-        available_width = max(console.width - indent, 1)
-        table = build_table(combine_identity=False, commit_width=None)
-        if natural_width(table) <= available_width:
-            # A terminal caps the subject at 40 columns; off a terminal a row
-            # is never cut (see new_console), so the subject stays whole.
-            max_subject_width = max(
-                len("LAST COMMIT"),
-                *(len(r["last_commit"] or "-") for r in rows),
-            )
-            if console.is_terminal:
-                max_subject_width = min(40, max_subject_width)
-            for commit_width in range(max_subject_width, len("LAST COMMIT") - 1, -1):
-                candidate = build_table(
-                    combine_identity=False,
-                    commit_width=commit_width,
-                )
-                if natural_width(candidate) <= available_width:
-                    table = candidate
-                    break
-        else:
-            # At genuinely narrow widths, keep every core field by placing the
-            # mutable branch directly under its stable name in one identity
-            # column. This is narrower than truncating either value.
-            table = build_table(combine_identity=True, commit_width=None)
+            def natural_width(table: Table) -> int:
+                return Measurement.get(console, measure_options, table).maximum
 
-        def render_table() -> None:
-            # Rich pads short header and multiline cells to the last column's
-            # width. Trim only this renderer's line endings before writing so
-            # snapshots can remain byte-sensitive to whitespace everywhere
-            # else without losing table alignment or styles.
-            lines = console.render_lines(
-                Padding(table, (0, 0, 0, indent), expand=False),
-                pad=False,
-                new_lines=False,
-            )
-            for line in lines:
-                text = Text()
-                for segment in line:
-                    if not segment.control:
-                        text.append(segment.text, style=segment.style)
-                text.rstrip()
-                console.print(text, soft_wrap=True)
+            available_width = max(budget - indent, 1)
+            table = build_table(combine_identity=False, commit_width=None)
+            if natural_width(table) <= available_width:
+                # A terminal caps the subject at 40 columns.
+                for commit_width in range(min(40, max_subject_width), len("LAST COMMIT") - 1, -1):
+                    candidate = build_table(
+                        combine_identity=False,
+                        commit_width=commit_width,
+                    )
+                    if natural_width(candidate) <= available_width:
+                        table = candidate
+                        break
+            else:
+                # At genuinely narrow widths, keep every core field by placing the
+                # mutable branch directly under its stable name in one identity
+                # column. This is narrower than truncating either value.
+                table = build_table(combine_identity=True, commit_width=None)
 
         def render_root() -> None:
             first_prefix = "  Root: "
             next_prefix = " " * len(first_prefix)
-            lines = Text(root_path, style="wt.muted").wrap(
-                console,
-                max(console.width - len(first_prefix), 1),
-                overflow="fold",
+            root = Text(root_path, style="wt.muted")
+            # Off a terminal the root is one line, whatever its length.
+            lines = (
+                [root]
+                if budget is None
+                else root.wrap(console, max(budget - len(first_prefix), 1), overflow="fold")
             )
             for index, line in enumerate(lines):
                 prefix = first_prefix if index == 0 else next_prefix
                 console.print(Text(prefix, style="wt.muted") + line, soft_wrap=True)
 
-        render_table()
+        print_block(console, table, indent=indent)
         if compact:
             console.print()
             render_root()
@@ -621,7 +694,8 @@ class Reporter:
         # A narrow terminal must cost the (rare, edge-case) missing-files detail,
         # never the identity or source columns — Rich would otherwise shrink all
         # no_wrap columns proportionally and truncate NAME. So budget the fixed
-        # columns and clip the STATUS text ourselves to whatever's left.
+        # columns and clip the STATUS text ourselves to whatever's left. Off a
+        # terminal there is no budget: the detail stays whole.
         suffix = "  (default)"
         pad, indent, slack, cols = 3, 2, 2, 4
         name_w = max(
@@ -629,8 +703,11 @@ class Reporter:
         )
         source_w = max(len("SOURCE"), *(len(r["source"]) for r in rows))
         firewall_w = len("FIREWALL")
-        status_w = console.width - indent - name_w - source_w - firewall_w - pad * cols - slack
-        status_w = max(status_w, 12)
+        budget = fit_width(console)
+        status_w: int | None = None
+        if budget is not None:
+            fixed = indent + name_w + source_w + firewall_w + pad * cols + slack
+            status_w = max(budget - fixed, 12)
 
         for r in rows:
             name_cell = Text(r["name"], style="wt.name")
@@ -649,12 +726,12 @@ class Reporter:
                 if r["invalid"]:
                     problems.append("invalid: " + ", ".join(r["invalid"]))
                 detail = "○ " + "; ".join(problems)
-                if len(detail) > status_w:
+                if status_w is not None and len(detail) > status_w:
                     detail = detail[: status_w - 1].rstrip() + "…"
                 status_cell = Text(detail, style="wt.fail")
             table.add_row(name_cell, r["source"], firewall_cell, status_cell)
 
-        console.print(Padding(table, (0, 0, 0, 2)))
+        print_block(console, table, indent=indent)
 
         if highlights:
             console.print()

@@ -1132,6 +1132,67 @@ def d4(ctx: Ctx) -> None:
     ctx.eq(strip.sub("", b.stdout), strip.sub("", a.stdout), "ls --json output")
 
 
+# Far above any real line (a --print command with a long path is a few hundred
+# columns), far below a line padded or stretched to a pipe's unbounded width.
+PIPED_MAX_LINE = 1000
+
+
+@scenario("D5", "every human command in a pipe: content-sized, nothing cut")
+def d5(ctx: Ctx) -> None:
+    root = ctx.sbx / ("a-long-directory-name-for-the-worktree-root-" * 3) / "wts"
+    tpl = "a-template-name-that-is-long-enough-to-matter-in-a-table"
+    status = "○ missing: Dockerfile, post-create.sh; invalid: container.json"
+    ctx.exit_is(ctx.tb("template", "init", tpl, "--json"), 0)
+    tdir = ctx.fx.treebox_home / "templates" / tpl
+    (tdir / "Dockerfile").unlink()
+    (tdir / "post-create.sh").unlink()
+    (tdir / "container.json").write_text("{bad")
+    env = dict(ctx.env, COLUMNS="80", NO_COLOR="1")
+    base = ctx.wt_args(root)
+    commands = [
+        ("create --print", ["create", "d5-wt", *base, "--print"]),
+        ("create --dry-run", ["create", "d5-plan", *base, "--dry-run"]),
+        ("enter --print", ["enter", "d5-wt", *base, "--print"]),
+        ("list", ["list", *base]),
+        ("template list", ["template", "list"]),
+        ("doctor", ["doctor", "--repo", str(ctx.repo)]),
+        ("teardown", ["teardown", "d5-wt", *base, "--force"]),
+        ("version", ["version"]),
+        ("--help", ["--help"]),
+        ("create --help", ["create", "--help"]),
+        ("template --help", ["template", "--help"]),
+    ]
+    runs: dict[str, RunRecord] = {}
+    for what, argv in commands:
+        run = ctx.tb(*argv, env=env)
+        ctx.exit_is(run, 0)
+        runs[what] = run
+        for stream, text in (("stdout", run.stdout), ("stderr", run.stderr)):
+            lines = text.split("\n")
+            longest = max(len(line) for line in lines)
+            ctx.check(
+                longest <= PIPED_MAX_LINE,
+                f"{what} {stream}: longest line {longest} <= {PIPED_MAX_LINE} columns",
+            )
+            trailing = [n for n, line in enumerate(lines, 1) if line != line.rstrip()]
+            ctx.eq(trailing, [], f"{what} {stream}: lines with trailing whitespace")
+    ctx.check(f"  Root: {root}" in runs["list"].stdout.splitlines(), "list: whole root, one line")
+    for what, path in (
+        ("create --print", root / "d5-wt"),
+        ("create --dry-run", root / "d5-plan"),
+        ("enter --print", root / "d5-wt"),
+    ):
+        run = runs[what]
+        both = (run.stdout + run.stderr).splitlines()
+        ctx.check(any(str(path) in line for line in both), f"{what}: whole worktree path")
+    for what in ("create --print", "enter --print"):
+        ctx.eq(len(runs[what].stdout.splitlines()), 1, f"{what}: entry command lines")
+    ctx.check(
+        any(tpl in line and status in line for line in runs["template list"].stdout.splitlines()),
+        "template list: the long template row is whole, on one line",
+    )
+
+
 # --- E. teardown -----------------------------------------------------------------------------
 
 
