@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # Baked into the image at /usr/local/bin, so the workspace can't be derived from
-# this script's location. The runner execs it with the workspace as the working
-# dir; $1 overrides that when given.
+# this script's location.
 WS="${1:-${PWD}}"
 
 # Egress lockdown gate: when the operator enabled the firewall, refuse to run

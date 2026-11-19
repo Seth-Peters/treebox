@@ -1,7 +1,7 @@
 """Typed wrappers over the ``git`` subprocess.
 
 Everything the tool needs from git lives here so the rest of the code never
-shells out to git directly. Functions raise ``GitError`` on failure.
+shells out to git directly.
 """
 
 from __future__ import annotations
@@ -124,8 +124,6 @@ def main_worktree(start: str | Path = ".") -> str:
     for line in out.splitlines():
         if line.startswith("worktree "):
             return line[len("worktree ") :].strip()
-    # No worktree line should be impossible for a valid repo, but fall back to the
-    # plain toplevel rather than crash.
     return repo_root(start)
 
 
@@ -274,7 +272,7 @@ class HttpsRemote(NamedTuple):
 def _https_remote(url: str) -> HttpsRemote | None:
     """Normalize a git remote URL to its host + HTTPS form.
 
-    Handles the three git remote URL shapes — scp-like (``git@host:owner/repo``),
+    Handles common git remote URL shapes — scp-like (``git@host:owner/repo``),
     ``ssh://``, and ``https://`` — so we can re-fetch over HTTPS with a token.
     Returns None for anything we can't confidently rewrite (e.g. local paths).
     """
@@ -642,7 +640,7 @@ class BranchPlan:
 
 
 def resolve_branch(repo: str | Path, name: str, base: str) -> BranchPlan:
-    """Decide how to create the worktree's branch (target-state §create step 2)."""
+    """Decide how to create the worktree's branch."""
     if local_branch_exists(repo, name):
         return BranchPlan("local", name, None)
     if remote_branch_exists(repo, name):

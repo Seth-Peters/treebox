@@ -10,9 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-# Branches treebox generates carry this prefix. It marks the name as
-# machine-made: the pre-push guard refuses to push them, so a placeholder can
-# never become a PR title — the agent must `git branch -m <real-name>` first.
+# Branches treebox generates carry this prefix. The pre-push guard refuses to
+# push them until the agent renames the branch.
 PLACEHOLDER_PREFIX = "treebox/"
 
 # One clean lowercase token — the grammar of a generated name and of each

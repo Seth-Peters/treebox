@@ -928,7 +928,6 @@ def test_enter_resolves_name_branch_and_substring(repo: Path, root: str, hermeti
     assert _run(["enter", "speed-up-ci", *base]).exit_code == 0
     # Unique substring of a branch.
     assert _run(["enter", "up-ci", *base]).exit_code == 0
-    # Ambiguous substring: exit 2 with the structured code.
     res = _run(["enter", "authz", *base])
     assert res.exit_code == 0  # unique: only fix-authz matches
     res = _run(["enter", "fix-", "--repo", str(repo), "--root", root, "--json"])
@@ -2498,7 +2497,6 @@ def test_enter_miss_on_existing_branch_hints_checkout(repo: Path, root: str, her
     assert err["code"] == "NOT_FOUND"
     assert "treebox create --checkout orphaned-branch" in err["hint"]
 
-    # A ref that matches nothing keeps the generic advice.
     res = _run(["enter", "utter-ghost", "--repo", str(repo), "--root", root, "--json"])
     assert res.exit_code == 3
     hint = json.loads(res.stderr)["error"]["hint"]
@@ -2512,7 +2510,6 @@ def test_branch_status_helpers(repo: Path, root: str, hermetic_config):
     """The Tier-1 git signals the chooser renders: forge-agnostic, local-only."""
     from treebox import git
 
-    # A local-path origin can't be attributed to a forge -> Tier-1 only.
     assert git.origin_host(str(repo)) is None
 
     _run(["create", "feat-x", "--repo", str(repo), "--root", root, "--print"])
@@ -2523,8 +2520,7 @@ def test_branch_status_helpers(repo: Path, root: str, hermetic_config):
     assert git.ahead_behind(wt) == (0, 0)
     assert git.is_merged_into(str(repo), "feat-x", "main") is True
 
-    # A new commit puts it ahead of, and off, origin/main. Stage just the file:
-    # the copied submodule has no linkage, so a blanket `add -A` would choke.
+    # A new commit puts it ahead of, and off, origin/main.
     (Path(wt) / "new.txt").write_text("x")
     _git(wt, "add", "new.txt")
     _git(wt, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-m", "work", "--", "new.txt")

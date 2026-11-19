@@ -171,9 +171,8 @@ def _resolve_config(
     except (TypeError, ValueError) as exc:
         # A malformed/invalid user config.toml is a usage problem, not a crash:
         # exit 2 with a styled message — or a structured error in --json mode.
-        # TypeError is the belt-and-braces guard: load_config validates types
-        # and raises ValueError, but no config typo may ever escape as a
-        # traceback again (issue #139).
+        # TypeError is a belt-and-braces guard: no config typo may escape as a
+        # traceback.
         raise _die(
             reporter,
             str(exc),
@@ -961,11 +960,8 @@ def create(
 
     run = get_runner(cfg)
 
-    # Resolve the template - and parse the JSON it would render - before any
-    # git state exists: failing at container render time would strand a freshly
-    # provisioned worktree + branch (a retried create then hits BRANCH_EXISTS).
-    # create-only on purpose - enter must keep tolerating a deleted recorded
-    # template on an existing container.
+    # Parse the template JSON before any git state exists. This is create-only:
+    # enter must keep tolerating a deleted recorded template on an existing container.
     if cfg.isolation == "docker":
         try:
             assets.load_template_json(cfg.template, assets.CONFIG_FILE)
@@ -1584,7 +1580,7 @@ def _choose_worktrees(
         return [], set()
 
     # Best-effort refresh so "merged" reflects the real origin/<base>, not a
-    # stale local ref. Never blocks or prompts; offline just uses the last fetch.
+    # stale local ref. Offline uses the last fetch.
     with contextlib.suppress(git.GitError):
         git.fetch_origin(repo_path, required=False)
     provider = forge.detect(repo_path)
@@ -2329,8 +2325,7 @@ def version() -> None:
 # Customizing the docker sandbox means owning a copy of the shipped template.
 # These commands are the sanctioned way to get and inspect one — no reaching
 # into the package with a `python -c 'import treebox...'` one-liner (which
-# doesn't even run under an isolated tool install). Everything derives from
-# assets.template_dir(), the single resolver the docker runner already uses.
+# doesn't even run under an isolated tool install).
 
 template_app = typer.Typer(
     no_args_is_help=True,

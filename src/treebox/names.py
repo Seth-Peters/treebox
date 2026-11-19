@@ -1,11 +1,4 @@
-"""Generated worktree names (petnames) for ``create`` with no NAME.
-
-The point of branchless create is that nobody has to invent a name up front,
-so the generated one only needs to be pronounceable and collision-free — the
-enriched ``list`` (branch, last commit, age) carries the recognition load.
-Two small word lists keep the tool dependency-free; ~2.5k combinations is
-plenty for a directory of short-lived worktrees.
-"""
+"""Generated worktree names (petnames) for ``create`` with no NAME."""
 
 from __future__ import annotations
 
