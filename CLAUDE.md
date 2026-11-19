@@ -380,6 +380,12 @@ shipped in the wheel. See `.factory/README.md`. The factory uses the Claude API
 (`ant auth login`); the "subscription auth only" invariant
 above is about the agents treebox launches, not this tooling.
 
+`.warp-factory/` is a second, independent factory: a Warp Factories definition
+(`factory.yaml` with the blueprint, `workers/`, `stages/`, `skills/`,
+`runners/`). Warp applies it from `main` on merge. Its blueprint has a `verify`
+stage between `implement` and `review`, where a separate worker follows the
+`verify-treebox` skill; no route delivers a PR without it.
+
 ## Conventions
 
 - Conventional Commit subjects (`feat(...)`, `fix:`, `docs:`); keep commits
