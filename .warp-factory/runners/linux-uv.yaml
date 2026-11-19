@@ -1,0 +1,11 @@
+description: >-
+  Python and uv for the treebox checks and the host-side e2e scenarios. It has
+  no docker engine, so the docker scenarios are SKIP, never PASS.
+setupCommands:
+  # A non-zero exit fails the whole sandbox, so the prefetch is optional.
+  - '(cd /workspace/treebox && uv sync --extra dev) || echo "Warning: uv sync skipped" >&2'
+platform:
+  os: linux
+  arch: x86_64
+  linux:
+    dockerImage: ghcr.io/astral-sh/uv:python3.12-bookworm

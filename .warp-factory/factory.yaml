@@ -1,0 +1,199 @@
+# yaml-language-server: $schema=https://app.warp.dev/api/v1/factory-files/schemas/v1alpha1/factory.schema.json
+#
+# The treebox Warp factory. This directory is the definition root: connect it
+# in Warp as a GitHub-backed factory. A merge to main updates the factory; a
+# run that is in progress keeps the blueprint it started with.
+#
+# It is separate from .factory/ (the Claude Managed Agents factory).
+schemaVersion: v1alpha1
+name: treebox
+description: >-
+  Turns a request into a verified, reviewed draft PR for the treebox CLI. No
+  change gets to a delivered PR without evidence from the verify-treebox
+  skill, recorded for the PR head commit by a worker that did not build the
+  change.
+alias: treebox
+repositories:
+  - owner: Seth-Peters
+    name: treebox
+workerDefaults:
+  model: auto
+  runner: linux-uv
+blueprint:
+  worker: foreman
+  start:
+    to:
+      - stage: research
+        when: The request is a bounded informational question ("can we do X?", "do we support Y?", "how does Z work?") and not a follow-up on existing worker-owned work.
+      - stage: work
+        when: The request asks for a change, names a work item or PR, or needs tracking, reproduction, or scoping. Default.
+  stages:
+    research:
+      description: Find answers to questions using relevant sources and evidence.
+      worker: researcher
+      inputs: |-
+        question: The user's exact question, separate from factual context.
+        context: Relevant links, prior findings, and requester identity.
+      outputs: |-
+        outcome: one of answered or needs_worker.
+        answer: The cited findings and open uncertainties.
+      prompt:
+        file: stages/research.md
+      to:
+        - stage: work
+          when: outcome is needs_worker; the question requires a change, a tracked issue, a reproduction, or more than a bounded read-only lookup, or the user asks for a change.
+        - stage: end
+          when: outcome is answered; deliver the cited answer to the user and close out.
+    work:
+      description: Carry out the requested work and deliver the result.
+      worker: worker
+      inputs: |-
+        request: The user's exact request or bounded automation authorization, separate from factual context.
+        ownership: Persistent conversation, scope, branch/PR and explicit issue-status ownership; any existing-work discovery result.
+        decisions: Already-resolved goal, approach and spec approval choices, with the user's words.
+        artifacts: Existing findings, issue, spec, PR, review threads, verification evidence and its commit.
+      outputs: |-
+        result: one of answered, declined, or pr_delivered.
+        artifacts: Issue/spec/PR references, CI result, the verify verdict with its commit and evidence block, every skip, and remaining human decisions.
+        ownership: Retained conversation, branch, issue coverage and decisions for follow-ups.
+      start:
+        to:
+          - stage: spec
+            when: The requester asked for a spec or plan for a request whose cause and scope are already known.
+          - stage: verify
+            when: The requester asked for a review of an existing PR, not a new implementation. The review needs evidence for the PR head first.
+          - stage: implement
+            when: Trivial work or an adopted work item skips triage with no spec needed, or a delivered PR needs a revision.
+          - stage: triage
+            when: The cause or scope is not yet known, the work needs a tracked issue, or the request may duplicate or follow up on existing work. Default.
+      stages:
+        triage:
+          description: Investigate the request, reproduce a bug, and clarify scope and next steps.
+          worker: worker
+          outputs: |-
+            goal: one of answer or change.
+            next: for goal change, one of spec or implement.
+            findings: Existing-work discovery, issue decision/reference, evidence, complexity, ambiguity and candidate approaches.
+            reproduction: For a bug, the failing drive from the verify-treebox fixture (command, exit code, output, resulting state). "not reproduced" is a finding, not a blank.
+            decisions: Every settled pre-work choice, from the request or the scoping answers, in the user's words.
+          prompt:
+            file: stages/triage.md
+          gates:
+            scoping:
+              when: The goal is unclear, or an ask on the pre-work-checks scoping checklist is open. Before the stage's work is done, only when the ask blocks research or reproduction.
+              prompt: Send every open ask as one batch, each with the findings that bear on it and your recommendation. Include every ask you can foresee, so the user answers once.
+              outputs: 'The user''s answer to each open ask, in their words: whether a change is wanted, the chosen or explicitly delegated approach, a spec, and each clarification. An instruction to proceed with asks unanswered settles them: take your recommendation for each unanswered choice.'
+          to:
+            - stage: end
+              when: goal is answer, or scoping answered that no change is wanted; the answer is the deliverable, or nothing further is owed.
+            - stage: spec
+              when: next is spec; the user agreed to a spec.
+            - stage: implement
+              when: next is implement; no ambiguity or decision needs a spec, and every applicable pre-work ask is resolved.
+        spec:
+          description: Define the requirements, the approach and the verifiable claims for approval.
+          worker: worker
+          inputs: 'contract: Request, triage findings or existing work item, agreed spec scope and resolved pre-work choices.'
+          outputs: |-
+            spec_pr: The draft PR holding the committed spec, on the branch implementation reuses, linked to the issue when present.
+            claims: The acceptance criteria as observable claims (command, then exit code, JSON field, stream, or state on disk). The approval covers these claims.
+            decisions: Interview decisions and recorded assumptions.
+          prompt:
+            file: stages/spec.md
+          gates:
+            scoping:
+              when: A new change entered this stage without triage and an ask on the pre-work-checks scoping checklist is open, before the stage's work begins.
+              prompt: Send every open ask as one batch, each with your recommendation. Include every ask you can foresee, so the user answers once.
+              outputs: 'The user''s answer to each open ask, in their words: whether a change is wanted, the chosen or explicitly delegated approach, a spec, and each clarification. An instruction to proceed with asks unanswered settles them: take your recommendation for each unanswered choice.'
+            approval:
+              when: A new or revised spec is committed to its draft PR.
+              prompt: Send the spec PR and its claims, and ask for approval of this revision, in writing or on the draft PR.
+              outputs: approved, changes requested with the feedback, or declined.
+          to:
+            - stage: end
+              when: The user declined, at scoping or as the approval answer; nothing further is owed.
+            - stage: spec
+              when: approval is changes requested; revise the spec on the same branch and PR.
+            - stage: implement
+              when: approval is approved; the user approved the current revision and all applicable scoping asks are resolved.
+        implement:
+          description: Build the requested change. Verification is a separate stage.
+          worker: worker
+          inputs: |-
+            authorization: Requested change or bounded automation, settled approach, resolved scoping asks and approved spec with its claims when one exists.
+            revision: Existing branch/PR, verify failures or review findings verbatim, CI evidence, and retained decisions.
+          outputs: |-
+            needs_triage: true only when work that was trivial now needs triage; otherwise false.
+            review_decision: one of review or skip.
+            change: Draft PR and issue reference, the pushed head commit SHA, tests added, and the feature-map updates for each new or changed route.
+            fix_rounds: How many times verify or review sent this change back.
+          prompt:
+            file: stages/implement.md
+          gates:
+            scoping:
+              when: A new change entered this stage without triage and an ask on the pre-work-checks scoping checklist is open, before the stage's work begins.
+              prompt: Send every open ask as one batch, each with your recommendation. Include every ask you can foresee, so the user answers once.
+              outputs: 'The user''s answer to each open ask, in their words: whether a change is wanted, the chosen or explicitly delegated approach, a spec, and each clarification. An instruction to proceed with asks unanswered settles them: take your recommendation for each unanswered choice.'
+          to:
+            - stage: end
+              when: The user declined further work, at scoping or later; report the artifacts and obligations that remain open.
+            - stage: triage
+              when: needs_triage is true; work that was trivial became more complex than originally thought.
+            - stage: verify
+              when: A change or revision is pushed. No route goes from implement to review or to a delivered PR without verify. Default.
+        verify:
+          description: Prove the change on the real CLI, the way a user drives it, and record the evidence.
+          worker: verifier
+          inputs: |-
+            contract: The spec claims, or the request and the triage reproduction when there is no spec. Verbatim.
+            target: Repository, branch, PR and head commit SHA.
+            Do not pass the implementer's plan, reasoning, or summary of the change.
+          outputs: |-
+            verdict: one of verified, failed, or blocked.
+            commit: The SHA that was driven. The evidence is valid for this SHA only.
+            evidence: The verify-treebox PR block (validate.sh result, sweep counts, features driven, each claim with its command, exit code and resulting state). For a bug, the triage reproduction drive, now passing.
+            skips: Each missing prerequisite and what went unexercised. A skip is never a pass.
+            failures: Per failure, the scenario id or claim, the command, expected, actual, and one class (product bug, doc drift, harness gap, environment).
+          prompt:
+            file: stages/verify.md
+          to:
+            - stage: implement
+              when: verdict is failed with a product bug, doc drift, or harness gap, and fix_rounds is less than 2. Pass the failures verbatim.
+            - stage: end
+              when: verdict is blocked, or verdict is failed and fix_rounds is 2 or more. Deliver the PR as needing a human, with the failures verbatim.
+            - stage: end
+              when: verdict is verified and review_decision is skip; the change's full effect is obvious on sight, or the user explicitly asked to skip review.
+            - stage: review
+              when: verdict is verified; when in doubt, review. Default.
+        review:
+          description: Check the change for correctness and quality, and check that the evidence proves the claims.
+          worker: reviewer
+          inputs: |-
+            contract: The spec or request, verbatim.
+            target: Repository, PR and head commit SHA.
+            evidence: The verify outputs, complete, with their commit.
+            previous: On a re-review, the earlier findings and the commits that address them.
+            Do not pass the implementer's plan, reasoning, or summary of the change.
+          outputs: |-
+            verdict: one of accepted, revision_needed, or human_decision_needed.
+            findings: Location, severity, problem, impact, correction and unambiguous/ambiguous classification for each finding.
+            delivery: Reviewed PR and head commit, checks, remaining human decisions; whether a human-facing review was posted.
+          prompt:
+            file: stages/review.md
+          to:
+            - stage: end
+              when: verdict is accepted or human_decision_needed; the PR goes to the user, with any findings that need a human already posted.
+            - stage: end
+              when: verdict is revision_needed and fix_rounds is 2 or more; deliver the PR as needing a human, with the open findings verbatim.
+            - stage: implement
+              when: verdict is revision_needed; only unambiguous findings, applied as the review wrote them. The revision goes through verify again.
+      gates:
+        handoff:
+          when: result is pr_delivered, or a delivered PR is still open when the worker reports another result.
+          prompt: 'Present every delivered PR that awaits a human: its link, CI''s current result stated accurately, the verify verdict with its commit SHA and evidence block, every skip and what went unexercised, the review outcome, and any findings left for human judgment. Say so plainly when the evidence commit is not the PR head. Ask the requester for a merge decision. A human decides whether and when to merge.'
+          outputs: 'The outcome for each delivered PR: merged, closed without merge, or more work needed. More work needed is anything arriving for the PR that the worker must act on, from a person or an automation, with its exact content. Answer as soon as any PR needs more work; otherwise only when every PR has merged or closed. An approval with nothing to act on, a question, or an administrative follow-up is not an answer.'
+      to:
+        - stage: work
+          when: handoff is more work needed for any delivered PR; pass what arrived, verbatim, to the same worker conversation.
+        - stage: end
+          when: result is answered or declined with no delivered PR still open, or handoff is merged or closed without merge for every delivered PR.

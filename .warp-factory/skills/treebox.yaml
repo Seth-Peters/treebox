@@ -1,0 +1,5 @@
+# Skills that live in the treebox repository itself. Paths are relative to the
+# repository root. The canonical copies stay there; nothing is duplicated here.
+source: github.com:Seth-Peters/treebox
+include:
+  - .claude/skills/verify-treebox
