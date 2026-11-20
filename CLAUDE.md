@@ -318,7 +318,9 @@ What a sandboxed backend must **guarantee** (the security invariants):
   operator-owned locations, never a path.
 - Destructive cleanup trusts only runner-owned metadata outside the mount;
   sandbox-writable worktree state never records Docker volume ownership.
-- The shared `.git/hooks` is presented read-only (host git executes it).
+- The shared `.git/hooks` is presented read-only (host git executes it),
+  and the runner checks that the engine enforces it before any setup runs
+  (`DockerRunner._require_readonly_hooks`; otherwise `SANDBOX_FAILED`).
 - Egress lockdown, when enabled, exists before any workspace-derived code
   runs and at every entry. For runner changes, read the `prepare_entry`
   contract in `runners/base.py`. For Docker host access, read the

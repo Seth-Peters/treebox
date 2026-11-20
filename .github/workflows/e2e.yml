@@ -8,14 +8,13 @@ name: E2E evidence
 # group is reported as skipped. The bundle is uploaded as an artifact and the
 # pass / fail / skip table is the job summary.
 
+# It starts on every pull request, so its `e2e` job always reports and can be a
+# required check. The sweep itself runs only when the pull request touches the
+# product, its dependencies, the e2e suite or this skill (the `scope` job):
+# any product module can break docker behavior, not only the runners.
+
 on:
-  pull_request:
-    paths:
-      - "src/treebox/runners/**"
-      - "src/treebox/assets/**"
-      - "tests/e2e/**"
-      - ".claude/skills/verify-treebox/**"
-      - ".github/workflows/e2e.yml"
+  pull_request: {}
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch: {}
@@ -28,8 +27,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: e2e scope
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the merge base of the pull request
+          persist-credentials: false
+
+      - name: Decide whether the sweep runs
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ]; then
+            # A diff that cannot be computed runs the sweep: never skip on doubt.
+            if changed="$(git diff --name-only "$BASE...$HEAD")"; then
+              pattern='^(src/treebox/|tests/e2e/|\.claude/skills/verify-treebox/|pyproject\.toml$|uv\.lock$|\.github/workflows/e2e\.yml$)'
+              printf '%s\n' "$changed" | grep -Eq "$pattern" || run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "e2e sweep runs: $run" >> "$GITHUB_STEP_SUMMARY"
+
   evidence:
     name: e2e evidence · ${{ matrix.os }}
+    needs: scope
+    if: needs.scope.outputs.run == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -80,3 +110,20 @@ jobs:
           path: ${{ runner.temp }}/e2e-evidence
           if-no-files-found: warn
           retention-days: 30
+
+  # The one check to require on main: it reports on every pull request, green
+  # when the sweep passed or was out of scope, red when any part failed.
+  e2e:
+    name: e2e
+    needs: [scope, evidence]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Result
+        env:
+          SCOPE: ${{ needs.scope.result }}
+          EVIDENCE: ${{ needs.evidence.result }}
+        run: |
+          echo "scope: $SCOPE, evidence: $EVIDENCE"
+          [ "$SCOPE" = success ] || exit 1
+          case "$EVIDENCE" in success | skipped) ;; *) exit 1 ;; esac
