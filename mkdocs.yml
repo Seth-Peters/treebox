@@ -20,6 +20,18 @@ nav:
   - Agents & sandboxing: agents.md
   - Configuration: configuration.md
   - Remote workers: remote-workers.md
+  - Decisions:
+      - adr/index.md
+      - adr/0001-host-owned-state-and-the-sandbox-trust-boundary.md
+      - adr/0002-cli-contract-exit-codes-json-and-unattended-use.md
+      - adr/0003-locking-and-concurrent-operations.md
+      - adr/0004-create-freshness-branch-naming-and-resume.md
+      - adr/0005-teardown-safety-ref-resolution-and-worktree-status.md
+      - adr/0006-runner-mechanics-setup-entry-and-agent-sessions.md
+      - adr/0007-terminal-output-and-interactive-rendering.md
+      - adr/0008-ports-resource-limits-and-worktree-identity.md
+      - adr/0009-templates-registries-and-config-vocabulary.md
+      - adr/0010-factory-cli.md
 
 theme:
   name: material
