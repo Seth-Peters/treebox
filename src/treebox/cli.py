@@ -85,17 +85,13 @@ from .runners import (
 )
 from .runners.docker import has_resource_manifest
 
-# Stable, documented exit codes (see the epilog on `--help`). Agents branch on these.
 EXIT_OK = 0
-EXIT_ERROR = 1  # generic / unexpected failure
-EXIT_USAGE = 2  # bad invocation (invalid name/branch, ambiguous ref, bad option)
-EXIT_NOTFOUND = 3  # the worktree/branch the command needs does not exist
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_NOTFOUND = 3
 EXIT_PERMISSION = 4
-EXIT_CONFLICT = 5  # already exists / uncommitted changes / lock held
+EXIT_CONFLICT = 5
 
-# Current JSON schema version. Payloads only ever *gain* fields within a
-# version (git-porcelain discipline); a breaking reshape or rename bumps it.
-# Agents branch on these payloads, so treat the shape as a contract.
 SCHEMA_VERSION = 1
 
 _EPILOG = (
@@ -114,9 +110,6 @@ app = typer.Typer(
     epilog=_EPILOG,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-
-
-# --- shared helpers ----------------------------------------------------------
 
 
 def _emit_json(payload: Mapping[str, Any], *, stream: IO[str] | None = None) -> None:
@@ -169,11 +162,6 @@ def _resolve_config(
     try:
         cfg = load_config()
     except (TypeError, ValueError) as exc:
-        # A malformed/invalid user config.toml is a usage problem, not a crash:
-        # exit 2 with a styled message — or a structured error in --json mode.
-        # TypeError is the belt-and-braces guard: load_config validates types
-        # and raises ValueError, but no config typo may ever escape as a
-        # traceback again (issue #139).
         raise _die(
             reporter,
             str(exc),
@@ -191,8 +179,6 @@ def _resolve_config(
         template=template,
     )
     try:
-        # Re-check after flag overrides: load_config only vets the file, and a
-        # bogus --isolation/--harness must be a usage error, not a traceback.
         validate_config(cfg)
     except ValueError as exc:
         raise _die(
@@ -269,8 +255,6 @@ def _record_hint(exc: record.RecordError) -> str:
         "then treebox create (add --checkout <branch> to keep its branch)."
     )
 
-
-# --- resource limits ---------------------------------------------------------
 
 _CPUS_HELP = (
     "CPU limit for this worktree's sandbox, in CPUs (a decimal, at least 0.01, "
@@ -439,9 +423,7 @@ def _check_entry_resources(
     try:
         template = run.template_resources()
     except _PROVISION_ERRORS:
-        template = ResourceLimits()  # enter tolerates a deleted or broken template
-    # Only a value the config or template sets counts: an unset default asks
-    # for nothing, so it never contradicts a limit chosen at create.
+        template = ResourceLimits()
     wanted = config_limits.over(template).only(run.supported_resources)
     pinned = rec.explicit_resources | set(explicit.names())
     drift = wanted.only(
@@ -459,13 +441,8 @@ def _check_entry_resources(
 
 def _repo_root(reporter: Reporter, repo: str, *, json_out: bool = False) -> str:
     try:
-        # Anchor to the *main* worktree so every command sees the same worktree
-        # set and root whether invoked from the repo, from .treebox/, or from
-        # inside a linked worktree (where --show-toplevel would mislead us).
         return git.main_worktree(expand_user(repo))
     except git.GitMissingError as exc:
-        # Not a repo problem: git itself can't run. Distinct stable code so
-        # agents don't chase the misleading "run inside a git repo" hint.
         raise _die(
             reporter,
             str(exc),
@@ -553,7 +530,6 @@ def _name_taken(repo_path: str, root: str, name: str) -> bool:
     return git.local_branch_exists(repo_path, ph) or git.remote_branch_exists(repo_path, ph)
 
 
-# Exceptions provisioning can raise, mapped to exit codes by _handle().
 _PROVISION_ERRORS = (
     provision.ProvisionError,
     locking.LockError,
@@ -582,8 +558,6 @@ def _classify(exc: Exception) -> _ErrorInfo:
     if isinstance(exc, provision.SubmoduleCopyFailedError):
         return _ErrorInfo(EXIT_ERROR, "SUBMODULE_COPY_FAILED", exc.hint)
     if isinstance(exc, git.GitMissingError):
-        # Before FetchError/GitError branches: the binary itself is absent, so
-        # auth/repo hints would mislead.
         return _ErrorInfo(EXIT_ERROR, "GIT_MISSING", _GIT_MISSING_HINT)
     if isinstance(exc, locking.LockError):
         return _ErrorInfo(
@@ -635,8 +609,6 @@ def _classify(exc: Exception) -> _ErrorInfo:
     if isinstance(exc, provision.NotFoundError):
         return _ErrorInfo(EXIT_NOTFOUND, "NOT_FOUND", exc.hint)
     if isinstance(exc, assets.TemplateNotFoundError):
-        # Same classification the template sub-app gives this condition: a
-        # missing template is not-found everywhere, never the generic catch-all.
         return _ErrorInfo(
             EXIT_NOTFOUND,
             "TEMPLATE_NOT_FOUND",
@@ -644,16 +616,12 @@ def _classify(exc: Exception) -> _ErrorInfo:
             f"this one: treebox template init {exc.name}",
         )
     if isinstance(exc, assets.TemplateInvalidError):
-        # The template exists but its contents can't serve this run - a runtime
-        # error (exit 1) with a stable code, like PreflightError below; agents
-        # branch on error.code.
         return _ErrorInfo(
             EXIT_ERROR,
             "TEMPLATE_INVALID",
             f"Inspect the template dir: treebox template path {exc.name}",
         )
     if isinstance(exc, PreflightError):
-        # Preflight failures keep exit 1. Callers use the runner's error code.
         return _ErrorInfo(EXIT_ERROR, exc.error_code, exc.hint)
     if isinstance(exc, FirewallError):
         return _ErrorInfo(EXIT_ERROR, "FIREWALL_FAILED", exc.hint)
@@ -661,9 +629,6 @@ def _classify(exc: Exception) -> _ErrorInfo:
         return _ErrorInfo(EXIT_ERROR, "SANDBOX_FAILED", exc.hint)
     if isinstance(exc, CredentialStageError):
         return _ErrorInfo(EXIT_ERROR, "CREDENTIAL_STAGE_FAILED", exc.hint)
-    # The one catch-all: a failure no classified cause covers, for example a
-    # git command that failed in a way treebox does not anticipate. The
-    # message is the cause (git's own words).
     return _ErrorInfo(EXIT_ERROR, "ERROR", None)
 
 
@@ -793,9 +758,6 @@ def _dry_run(
     reporter.blank()
 
 
-# --- create ------------------------------------------------------------------
-
-
 @app.command()
 def create(
     name: str | None = typer.Argument(
@@ -913,9 +875,6 @@ def create(
         harness=harness,
         base=base,
         root=root,
-        # Tri-state: an explicit --firewall/--no-firewall overrides the config
-        # in either direction; unset (None) falls through to the config default,
-        # like every other config-backed option.
         firewall=firewall,
         template=template,
         json_out=json_out,
@@ -924,12 +883,6 @@ def create(
         reporter, cpus=cpus, memory=memory, pids_limit=pids_limit, json_out=json_out
     )
     if checkout is None and name is not None and name.startswith("-"):
-        # Without --checkout, NAME is the branch, and a dash-led branch is
-        # never valid (INVALID_BRANCH, as always). It usually means
-        # `create -- ARGS`: the first agent arg took the name slot. Say how
-        # to pass agent args. With --checkout, NAME is only the worktree
-        # name, and a dash-led one is valid (`create --checkout B -- -auth`,
-        # the firewall recovery command for a `treebox/-auth` worktree).
         raise _die(
             reporter,
             f"Invalid branch name '{name}'.",
@@ -950,8 +903,6 @@ def create(
         wt_name = derive_name(name or checkout)
         target_branch = checkout
     elif name is not None:
-        # An explicit name IS the branch: slashes stay in the branch, the
-        # directory flattens them (feature/auth -> feature--auth).
         wt_name = derive_name(name)
         target_branch = name
         _validate_branch(reporter, target_branch, json_out=json_out)
@@ -961,11 +912,6 @@ def create(
 
     run = get_runner(cfg)
 
-    # Resolve the template - and parse the JSON it would render - before any
-    # git state exists: failing at container render time would strand a freshly
-    # provisioned worktree + branch (a retried create then hits BRANCH_EXISTS).
-    # create-only on purpose - enter must keep tolerating a deleted recorded
-    # template on an existing container.
     if cfg.isolation == "docker":
         try:
             assets.load_template_json(cfg.template, assets.CONFIG_FILE)
@@ -974,8 +920,6 @@ def create(
         except (assets.TemplateNotFoundError, assets.TemplateInvalidError) as exc:
             raise _handle(reporter, exc, json_out=json_out) from exc
 
-    # Limits are final before anything is provisioned, and they are what the
-    # host-owned record will hold.
     limits, ignored_limits = _creation_limits(
         reporter, cfg, run, explicit_limits, json_out=json_out
     )
@@ -1017,8 +961,6 @@ def create(
     _note_ignored_limits(reporter, run, ignored_limits)
     reporter.blank()
 
-    # The boundary str was validated by _resolve_config; internal seams take
-    # the resolved object.
     agent = get_harness(cfg.harness)
 
     def _provision() -> provision.Outcome:
@@ -1032,9 +974,6 @@ def create(
             harness=agent,
             cold=cold,
             fetch=not no_fetch,
-            # Prompt for git credentials only when treebox may ask (a
-            # terminal, no --non-interactive) - like `git pull`. git and ssh
-            # ask on the terminal itself, out of the way of --json's stdout.
             interactive=_interactive(),
             reporter=reporter,
             existing_branch=checkout is not None,
@@ -1053,9 +992,6 @@ def create(
         limits=limits,
         check_limits=True,
     )
-
-
-# --- enter -------------------------------------------------------------------
 
 
 @app.command()
@@ -1140,9 +1076,6 @@ def enter(
     try:
         cand = resolve.resolve_ref(repo_path, cfg.root, ref)
     except provision.NotFoundError as exc:
-        # The branch may exist without a worktree (torn down, or never had
-        # one): point at the command that materializes it instead of the
-        # generic miss advice.
         if git.local_branch_exists(repo_path, ref) or git.remote_branch_exists(repo_path, ref):
             exc.hint = (
                 f"Branch '{ref}' exists but has no worktree — "
@@ -1151,9 +1084,6 @@ def enter(
         raise _handle(reporter, exc, json_out=json_out) from exc
     except _PROVISION_ERRORS as exc:
         raise _handle(reporter, exc, json_out=json_out) from exc
-    # The creation policy comes only from the host-owned record. A missing or
-    # invalid one is a classified error with a recovery path, never a fallback
-    # to the config default (or to the worktree's sandbox-writable state).
     try:
         rec = record.load(Path(cand.path))
     except record.RecordError as exc:
@@ -1167,7 +1097,6 @@ def enter(
         template=template,
         json_out=json_out,
     )
-    # Names are final after reconciliation: resolve the objects once.
     run = get_runner(cfg)
     agent = get_harness(cfg.harness)
 
@@ -1261,11 +1190,6 @@ def _run_session(
             _require_agent(run, harness, login=not _interactive())
         with locking.worktree_lock(path):
             outcome = provision_call()
-            # Every entry - launch and emit alike - makes the sandbox
-            # entry-ready first: a stopped container is started, and the
-            # firewall is re-applied even on a running one (`docker restart`
-            # outside treebox drops the rules). A failure here is classified
-            # and nothing launches or is emitted.
             run.prepare_entry(outcome.worktree)
     except ResourceLimitError as exc:
         raise _die(
@@ -1290,7 +1214,6 @@ def _run_session(
         )
         return
     reporter.blank()
-    # Style-A closing line: green "Ready", dim "in <total> — launching <harness>".
     reporter.ready(format_elapsed(time.monotonic() - started), harness.name)
     reporter.blank()
     reporter.restore_terminal()
@@ -1309,7 +1232,6 @@ def _run_session(
         raise _handle(reporter, exc, json_out=False) from exc
     if code == 0:
         raise typer.Exit(0)
-    # A negative code: the agent was killed by that signal (shell convention).
     status = code if code > 0 else 128 - code
     killed = f" (killed by {system.signal_name(-code)})" if code < 0 else ""
     sys.stderr.write(f"{AGENT_EXIT_PREFIX}{status}{killed}\n")
@@ -1317,10 +1239,6 @@ def _run_session(
     raise typer.Exit(status)
 
 
-# The fixed prefix of the one line treebox prints last, on stderr, when the
-# launched agent exits non-zero: "treebox: agent exited with status <N>". A
-# documented contract (docs/usage.md): a caller tells an agent exit from a
-# treebox failure by it. Never printed for a treebox failure.
 AGENT_EXIT_PREFIX = "treebox: agent exited with status "
 
 
@@ -1377,9 +1295,6 @@ def _require_agent(run: Runner, harness: Harness, *, login: bool) -> None:
             )
 
 
-# --- list --------------------------------------------------------------------
-
-
 def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
     """The worktree rows shown by ``list`` and the teardown chooser: one row per
     live worktree under the root, most-recently-committed first."""
@@ -1391,19 +1306,10 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         wt_path = Path(rec.path)
         if not path_is_under(wt_path, base_dir):
             continue
-        # A root containing the repo (e.g. root = "..") makes the main checkout
-        # pass the filter above; it is not a treebox worktree and must never be
-        # listed (or offered by the teardown chooser).
         if same_path(wt_path, repo_path):
             continue
-        # A registration whose dir is gone, or whose .git pointer no longer
-        # leads to it, must never be shelled into: git would crash on the
-        # missing path or act on the main checkout. `missing` keeps its old
-        # meaning for those two health values so teardown can prune them.
         health = provision.worktree_health(repo_path, wt_path)
         missing = health in ("directory_missing", "invalid_linkage")
-        # The policy columns come from the host-owned record; a missing or
-        # invalid record shows as honestly unknown (""), never as a guess.
         try:
             policy: record.WorktreeRecord | None = record.load(wt_path)
         except record.RecordError:
@@ -1422,9 +1328,6 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
         rows.append(
             WorktreeRow(
                 name=wt_path.name,
-                # Spelled like enter spells it (git may canonicalize a root alias
-                # such as /var -> /private/var), so list shows the id the
-                # worktree's setup and agent get.
                 id=worktree_id(
                     Path(resolve.Candidate.registered(repo_path, cfg.root, rec.path, None).path)
                 ),
@@ -1447,8 +1350,6 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
             )
         )
 
-    # Most recently touched first: the worktree you're looking for is almost
-    # always the one you (or an agent) just committed in.
     rows.sort(key=lambda r: r["commit_epoch"], reverse=True)
     return rows
 
@@ -1483,10 +1384,6 @@ def list_cmd(
     reporter.render_list(rows, str(worktree_root(repo_path, cfg.root)))
 
 
-# --- teardown ----------------------------------------------------------------
-
-# Rich theme style -> prompt_toolkit style, so the interactive picker's badges
-# carry the same green/yellow/red semantics as the rest of the CLI.
 _PT_STYLE = {
     "wt.fail": "fg:ansired",
     "wt.ok": "fg:ansigreen",
@@ -1500,7 +1397,6 @@ def _stdin_isatty() -> bool:
     return sys.stdin.isatty()
 
 
-# Set by the global --non-interactive option (or $TREEBOX_NON_INTERACTIVE).
 _NON_INTERACTIVE = False
 
 
@@ -1530,8 +1426,6 @@ def _worktree_status(
     """Tier-1 git facts for one worktree, enriched with Tier-2 PR/MR state when a
     forge provider is available. Safe to call concurrently (only reads)."""
     if row["missing"]:
-        # The dir is gone — don't shell into it. It's a stale registration;
-        # tearing it down just prunes git's record, so it's safe to remove.
         return status.WorktreeStatus(
             label="⚠ missing · registration only", style="wt.warn", safe=True
         )
@@ -1583,8 +1477,6 @@ def _choose_worktrees(
         reporter.info("No worktrees to remove.")
         return [], set()
 
-    # Best-effort refresh so "merged" reflects the real origin/<base>, not a
-    # stale local ref. Never blocks or prompts; offline just uses the last fetch.
     with contextlib.suppress(git.GitError):
         git.fetch_origin(repo_path, required=False)
     provider = forge.detect(repo_path)
@@ -1609,13 +1501,8 @@ def _choose_worktrees(
     chosen = _prompt_selection(reporter, entries)
     if not chosen:
         return [], set()
-    # The picker is the whole teardown decision, so the branch question lives here
-    # too. It's a second multi-select, not one yes/no for the batch — deleting a
-    # branch is per-worktree (keep one, drop another) rather than all-or-none.
     branch_paths = _choose_branches_to_delete(reporter, entries, chosen, default=delete_branch)
     if branch_paths is None:
-        # Ctrl+C on the branch question backs out of the whole teardown — the
-        # user is abandoning the decision, not answering "keep the branches".
         reporter.info("Cancelled — nothing removed.")
         return [], set()
     return chosen, branch_paths
@@ -1638,8 +1525,6 @@ def _choose_branches_to_delete(
     try:
         import questionary
     except ImportError:
-        # The picker's optional dep is absent; keep every branch (the safe
-        # default) and let --delete-branch cover the scripted path.
         return {c.path for c in chosen} if default else set()
 
     choices: list[questionary.Choice] = [questionary.Separator(" ")]
@@ -1650,8 +1535,6 @@ def _choose_branches_to_delete(
         "Also delete the local branch for … (space to pick, enter to skip)",
         choices=choices,
     ).ask()
-    # .ask() maps Ctrl+C to None; an enter with nothing checked is []. The two
-    # must not be conflated: None cancels the run, [] means "delete no branches".
     if answer is None:
         return None
     return set(answer)
@@ -1668,15 +1551,12 @@ def _prompt_selection(
     except ImportError:
         return _prompt_numbered(reporter, entries)
 
-    # A blank separator sits between the question line and the first choice so the
-    # list doesn't crowd the prompt (Separators are non-selectable and unreturned).
     choices: list[questionary.Choice] = [questionary.Separator(" ")]
     for cand, prefix, st in entries:
         title: str | list[tuple[str, str]] = (
             [("", prefix + "   "), (_PT_STYLE.get(st.style, ""), st.label)] if st.label else prefix
         )
         choices.append(questionary.Choice(title=title, value=cand))
-    # Breathing room so the picker doesn't render flush against the shell prompt.
     reporter.console.print()
     answer = questionary.checkbox("Select worktrees to tear down", choices=choices).ask()
     chosen: list[resolve.Candidate] = answer or []
@@ -1687,7 +1567,7 @@ def _prompt_numbered(
     reporter: Reporter,
     entries: list[_PickerEntry],
 ) -> list[resolve.Candidate]:
-    console = reporter.console  # stderr — the picker is diagnostic UI, not data
+    console = reporter.console
     console.print()
     console.print(Text("  Select worktrees to tear down:", style="wt.label"))
     for i, (_cand, prefix, st) in enumerate(entries, 1):
@@ -1721,8 +1601,6 @@ def _parse_selection(raw: str, n: int) -> list[int]:
                 lo, hi = int(lo_s), int(hi_s)
             except ValueError:
                 continue
-            # Clamp BEFORE building the range: a typo like 1-99999999999 must
-            # cost at most n iterations, not hang the CLI spinning through it.
             lo, hi = max(lo, 1), min(hi, n)
             picked.update(k - 1 for k in range(lo, hi + 1))
         else:
@@ -1800,12 +1678,7 @@ def teardown(
     _check_root(reporter, repo_path, cfg.root, json_out=json_out)
 
     targets: list[resolve.Candidate] = []
-    # Which targets also lose their local branch, by path. The chooser fills this
-    # per-worktree; explicit refs take the batch-wide --delete-branch flag.
     branch_delete: set[str] = set()
-    # No refs: open the interactive chooser. Selecting there *is* the
-    # confirmation, so we skip the extra prompt below (but never the dirty gate).
-    # --json / non-TTY must not block on a picker — same contract as the prompt.
     from_chooser = False
     if not refs:
         if json_out or not _interactive():
@@ -1821,11 +1694,9 @@ def teardown(
             reporter, cfg, repo_path, delete_branch=delete_branch
         )
         if not targets:
-            return  # nothing to remove, or the user cancelled
+            return
         from_chooser = True
     else:
-        # Resolve every ref before touching anything: a typo among three targets
-        # must not leave the first two half-removed.
         seen: set[str] = set()
         for ref in refs:
             try:
@@ -1833,8 +1704,6 @@ def teardown(
             except resolve.AmbiguousRefError as exc:
                 raise _handle(reporter, exc, json_out=json_out) from exc
             except provision.NotFoundError as exc:
-                # The worktree may be gone while its branch lingers (manual rm):
-                # an exact local-branch match still gets pruned/cleaned up.
                 if git.local_branch_exists(repo_path, ref):
                     gone = worktree_path(repo_path, cfg.root, derive_name(ref))
                     cand = resolve.Candidate(name=derive_name(ref), branch=ref, path=str(gone))
@@ -1846,11 +1715,6 @@ def teardown(
         if delete_branch:
             branch_delete = {c.path for c in targets}
 
-    # Defense in depth: no resolved target may be the main working tree.
-    # Enumeration already excludes it, but the branch-lingering fallback above
-    # can still construct the repo's own path when the root contains the repo
-    # and a local branch is named like its directory leaf. Removing the main
-    # checkout is unrecoverable data loss, so refuse before touching anything.
     for cand in targets:
         if same_path(cand.path, repo_path):
             raise _die(
@@ -1863,13 +1727,6 @@ def teardown(
                 json_out=json_out,
             )
 
-    # The removal gate (uncommitted changes without --force, a git lock) runs
-    # here, so a refusal comes before the prompt, and again under the lock
-    # right before anything is removed (_gate), so work written while the
-    # prompt was open is never deleted. In the chooser a mixed selection is
-    # the norm, so blocked ones are skipped and the clean ones the user picked
-    # still go (and we say so). For explicit refs it stays all-or-nothing:
-    # naming a dirty tree stops the whole run - a scripting contract.
     def _gate(cands: list[resolve.Candidate]) -> list[resolve.Candidate]:
         blocked = [(c, why) for c in cands if (why := _teardown_block(repo_path, c, force))]
         if blocked and not from_chooser:
@@ -1903,8 +1760,6 @@ def teardown(
 
     confirmed = force or yes or from_chooser
     if not confirmed and any(Path(c.path).is_dir() for c in targets):
-        # --json and unattended mode are a scripting contract: never block on
-        # a prompt (and never let one leak into stdout) - require --yes.
         if _interactive() and not json_out:
             listed = ", ".join(c.name for c in targets)
             plural = "s" if len(targets) != 1 else ""
@@ -1924,17 +1779,9 @@ def teardown(
     if targets:
         try:
             with contextlib.ExitStack() as stack:
-                # The same worktree lock create/enter hold: a teardown must not
-                # delete the tree or its container out from under a concurrent
-                # provision of the same target. Every lock is taken before any
-                # removal starts, so a held lock aborts the whole batch cleanly
-                # (LOCK_HELD, exit 5) instead of stopping it halfway through.
                 for cand in targets:
                     stack.enter_context(locking.worktree_lock(Path(cand.path)))
-                # Recheck under the lock, immediately before removal.
                 targets = _gate(targets)
-                # --skip-container touches no containers, so it skips runner
-                # resolution entirely.
                 runners: list[Runner | None] = (
                     [None] * len(targets)
                     if skip_container
@@ -1970,8 +1817,6 @@ def teardown(
             {"schemaVersion": SCHEMA_VERSION, "worktrees": records, "warnings": reporter.warnings}
         )
 
-    # An incomplete cleanup is a failed teardown: name what remains. Nothing
-    # that names it was deleted, so the same command retries.
     incomplete = [r for r in records if not r["complete"]]
     if incomplete:
         raise _die(
@@ -1987,14 +1832,10 @@ def teardown(
             json_out=json_out,
         )
 
-    # Honest exit: the clean ones are gone, but we refused the blocked ones. Do
-    # it last so the removals and the recap have already been reported.
     if skipped:
         raise typer.Exit(EXIT_CONFLICT)
 
 
-# Why the removal gate keeps a worktree: uncommitted changes (without
-# --force), or a git lock (never overridden).
 TeardownBlock = Literal["dirty", "locked"]
 
 
@@ -2033,7 +1874,6 @@ def _report_skipped(
     reporter.info(f"Removed {removed} worktree{plural} · kept {len(skipped)} {reasons}.")
 
 
-# What happened to a teardown target's container/runner resources.
 ContainerOutcome = Literal["cleaned", "skipped", "failed"]
 
 
@@ -2044,12 +1884,12 @@ class TeardownRecord(TypedDict):
     name: str
     branch: str | None
     worktree_path: str
-    removed: bool  # False: it was already gone (still exit 0), or it was kept
+    removed: bool
     branch_deleted: bool
     container: ContainerOutcome
     volumes_removed: bool
-    complete: bool  # False: a step failed; the worktree and its record are kept
-    remaining: list[str]  # what is still present, "<resource> (<reason>)"
+    complete: bool
+    remaining: list[str]
 
 
 def _teardown_runner(cfg: Config, cand: resolve.Candidate, *, remove_volumes: bool) -> Runner:
@@ -2148,9 +1988,6 @@ def _teardown_one(
     )
 
 
-# --- doctor ------------------------------------------------------------------
-
-
 @app.command()
 def doctor(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
@@ -2192,7 +2029,6 @@ def doctor(
     run = get_runner(cfg)
     selected = get_harness(cfg.harness)
 
-    # Instant checks: no I/O worth spinning on, so they print immediately.
     checks: list[DoctorCheck] = []
 
     git_ok = git.have_git()
@@ -2213,20 +2049,12 @@ def doctor(
     for h in HARNESSES:
         checks.append(_agent_login_check(h, required=h is selected))
 
-    # Same resolver copy_env uses, so doctor reports the exact secrets source
-    # provisioning will copy.
     env_file = (
         provision.resolve_env_file(repo_path, cfg.env_file) if repo_path else Path(cfg.env_file)
     )
     checks.append(DoctorCheck(".env", env_file.is_file(), str(env_file), required=False))
 
-    # Slow checks hit the network / Docker daemon — the source of doctor's "dead
-    # pause". Deferred as thunks returning a row plus an optional advisory, so the
-    # human path can wrap each in a spinner while --json runs them inline.
     def _check_git_auth() -> DoctorCheck:
-        # `create` REQUIRES a fresh fetch, so validate up front that git can
-        # authenticate to origin — exercising the same silent paths create uses
-        # (ssh-agent, then the HTTPS host-CLI/helper/token fallback).
         reachable = git.origin_reachable(repo_path) if repo_path else None
         if reachable is None:
             return DoctorCheck("git auth", True, "no remote (local-only; freshness N/A)")
@@ -2249,8 +2077,6 @@ def doctor(
         try:
             run.preflight(reporter)
         except PreflightError as exc:
-            # Surface the remediation hint as a doctor advisory so the human
-            # checklist says how to fix it, not just what is broken.
             return DoctorCheck(name, False, str(exc), exc.hint)
         except RuntimeError as exc:
             return DoctorCheck(name, False, str(exc))
@@ -2271,15 +2097,10 @@ def doctor(
             "advisories": _doctor_advisories(checks),
         }
         _emit_json(payload)
-        # Same exit-code contract as the human path: hard checks (git, repo,
-        # the selected agent and its login, runner) failing mean exit 1, so
-        # `doctor --json && create` in CI can branch on $? instead of `ok`.
         if problems:
             raise typer.Exit(1)
         return
 
-    # The label column is padded to the widest name; every name is known up front
-    # (the slow checks' names are fixed), so we can align without buffering rows.
     names_ = [c.name for c in checks] + ["git auth", f"isolation: {run.name}"]
     width = max(len(name) for name in names_)
 
@@ -2306,9 +2127,6 @@ def _doctor_advisories(checks: list[DoctorCheck]) -> list[str]:
     return [c.advisory for c in checks if c.advisory and not c.ok and c.required]
 
 
-# --- version -----------------------------------------------------------------
-
-
 def _resolve_version() -> str:
     """The installed distribution version, falling back to the package constant."""
     try:
@@ -2324,13 +2142,6 @@ def version() -> None:
     """Print the version."""
     sys.stdout.write(f"{_resolve_version()}\n")
 
-
-# --- template management -----------------------------------------------------
-# Customizing the docker sandbox means owning a copy of the shipped template.
-# These commands are the sanctioned way to get and inspect one — no reaching
-# into the package with a `python -c 'import treebox...'` one-liner (which
-# doesn't even run under an isolated tool install). Everything derives from
-# assets.template_dir(), the single resolver the docker runner already uses.
 
 template_app = typer.Typer(
     no_args_is_help=True,
@@ -2371,8 +2182,6 @@ def template_init(
     `treebox create <name> --isolation docker --template <name>`.
     """
     reporter = Reporter(silent=json_out)
-    # One identifier rule (models.is_valid_template_name) for init, path, and
-    # resolution, so `init` can never write outside the templates root.
     if not is_valid_template_name(name):
         raise _die(
             reporter,
@@ -2436,9 +2245,6 @@ def template_init(
         elif target.is_symlink() or target.exists():
             target.unlink()
 
-    # Keep the old template byte-for-byte until the new copy is installed, so
-    # rollback needs only a rename. Use a unique staging dir under STAGING_DIR:
-    # another process may still own a directory left by an earlier run.
     staging_root = dest.parent / assets.STAGING_DIR
     staging: Path | None = None
     try:
@@ -2483,8 +2289,6 @@ def template_init(
             try:
                 old.rename(dest)
             except OSError:
-                # Do not delete the staging dir: it holds the only copy of the
-                # old template now.
                 kept = f" The previous template is kept at {old}."
         if not kept:
             with contextlib.suppress(OSError):
@@ -2555,7 +2359,7 @@ def template_list(
         try:
             path = assets.template_dir(name)
         except assets.TemplateNotFoundError:
-            continue  # enumerated names resolve by construction; skip if racy
+            continue
         missing = assets.missing_template_files(path)
         invalid = assets.invalid_template_json_files(path)
         rows.append(
@@ -2584,9 +2388,6 @@ def template_list(
 
     if override:
         reporter.warn(f"$TREEBOX_TEMPLATE_DIR overrides every template → {override}")
-    # Advertise the bundled default's contents only when `default` still
-    # resolves to the shipped image — a user override or $TREEBOX_TEMPLATE_DIR
-    # replaces it with a box whose contents we can't vouch for.
     show_highlights = any(
         r["name"] == assets.DEFAULT_TEMPLATE and r["source"] == "bundled" for r in rows
     )
@@ -2596,7 +2397,6 @@ def template_list(
     )
 
 
-# Muscle-memory alias, matching the top-level `ls` (hidden; same behavior).
 template_app.command(name="ls", hidden=True)(template_list)
 
 
@@ -2652,21 +2452,14 @@ def main(
 ) -> None:
     global _NON_INTERACTIVE
     _NON_INTERACTIVE = non_interactive
-    # Restore default SIGPIPE handling on POSIX so piping output into `head` /
-    # `grep -m1` ends the process quietly (SIGPIPE, exit 141) instead of
-    # surfacing "BrokenPipeError ignored" noise or a traceback at shutdown.
-    # Python starts with SIGPIPE ignored, which is wrong for a piped CLI.
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-    # Pretty, secret-safe tracebacks for genuinely unexpected crashes (handled
-    # errors already exit cleanly via _die). Framework frames are suppressed.
     from rich.traceback import install
 
     install(show_locals=False, suppress=[typer], width=100)
 
 
-# Muscle-memory aliases (hidden from --help; same options and behavior).
 app.command(name="ls", hidden=True)(list_cmd)
 app.command(name="rm", hidden=True)(teardown)
 

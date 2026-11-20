@@ -17,7 +17,6 @@ from pathlib import Path
 from . import git
 from .models import expand_user
 
-# Root under which shared host caches are bind-mounted inside the sandbox container.
 CONTAINER_CACHE_ROOT = "/caches"
 
 
@@ -31,25 +30,14 @@ class Ecosystem:
     """
 
     name: str
-    # Presence of any lockfile means this ecosystem is active. Lockfiles (plus
-    # extra_manifests) are the files hashed to detect dependency changes.
     lockfiles: tuple[str, ...]
     extra_manifests: tuple[str, ...] = ()
-    # Setup command, as argv, run in the worktree dir.
     command: tuple[str, ...] = ()
-    # Cache key into Config.caches and the env var the tool reads it from.
     cache_key: str | None = None
     cache_env_var: str | None = None
-    # Some tools take the store via a flag rather than env (e.g. pnpm).
     cache_flag: str | None = None
-    # Ambient env var honored as the operator's override when computing the
-    # default shared host cache dir; falls back to cache_env_var when None.
     host_cache_override: str | None = None
-    # Conventional host cache location, given (home, xdg_cache).
     default_cache_dir: Callable[[Path, Path], str] | None = None
-    # Env var pointing *in-container* tools at the mounted cache; falls back
-    # to cache_env_var. pnpm takes its store via --store-dir on the host but
-    # reads the npm-style env form, so containers get npm_config_store_dir.
     container_cache_env: str | None = None
 
     def manifest_files(self) -> tuple[str, ...]:
@@ -150,8 +138,6 @@ class SetupStep:
     name: str
     argv: list[str]
     env: dict[str, str] = field(default_factory=dict)
-    # The cache this step reads and writes (None: no cache). Planning never
-    # touches disk; a real run creates it via ``ensure_cache_dirs``.
     cache_dir: str | None = None
 
 

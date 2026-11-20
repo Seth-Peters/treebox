@@ -19,9 +19,9 @@ from .forge import PRStatus
 
 @dataclass(frozen=True)
 class WorktreeStatus:
-    label: str  # rendered badge, e.g. "✎ uncommitted · ✓ merged (PR #42)"
-    style: str  # rich theme style for the badge
-    safe: bool  # merged (or empty) and clean — deleting loses nothing
+    label: str
+    style: str
+    safe: bool
 
 
 def compute(
@@ -43,10 +43,6 @@ def compute(
         pr is not None and pr.merged and pr.head_oid is not None and pr.head_oid == current_oid
     )
 
-    # A never-pushed placeholder with no commits of its own trivially passes the
-    # ancestor check — its tip *is* ``origin/<base>`` — so ``merged_ancestor`` is
-    # true without anything ever having been merged. That is *empty*, not merged:
-    # deleting still loses nothing, but the badge must not imply a landed PR.
     empty = merged_ancestor and not pr_merged and (placeholder or not has_upstream) and ahead == 0
     merged = pr_merged or (merged_ancestor and not empty)
 
@@ -82,8 +78,6 @@ def compute(
     elif merged:
         style = "wt.ok"
     elif empty:
-        # Nothing at stake — grey it out rather than raise the "never pushed"
-        # caution, which is for a branch that has real, unpushed commits.
         style = "wt.muted"
     elif caution:
         style = "wt.warn"

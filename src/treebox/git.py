@@ -17,14 +17,6 @@ from typing import Any, Literal, NamedTuple
 
 from .models import same_path
 
-# Config keys git would use to run code *on the host* when we invoke it. The
-# docker runner mounts the repo's git common dir writable so in-container git
-# can commit/fetch (see runners/docker.py), so a boxed agent can write the
-# shared ``.git/config``. Pinning these per-invocation with ``-c`` means a
-# hostile ``core.hooksPath`` / ``core.fsmonitor`` (or a paging command) planted
-# there is ignored whenever *treebox* shells out to git — without touching the
-# agent's own in-container git, which resolves its config independently and
-# stays free to use hooks/fsmonitor normally.
 _SAFE_CONFIG = (
     "-c",
     "core.hooksPath=/dev/null",
@@ -91,7 +83,7 @@ def have_git() -> bool:
 
 
 def version() -> tuple[int, int, int]:
-    out = _run(["--version"]).strip()  # "git version 2.43.0"
+    out = _run(["--version"]).strip()
     parts = out.split()[-1].split(".")
     nums = []
     for p in parts[:3]:
@@ -124,8 +116,6 @@ def main_worktree(start: str | Path = ".") -> str:
     for line in out.splitlines():
         if line.startswith("worktree "):
             return line[len("worktree ") :].strip()
-    # No worktree line should be impossible for a valid repo, but fall back to the
-    # plain toplevel rather than crash.
     return repo_root(start)
 
 
@@ -176,13 +166,7 @@ def last_commit(worktree: str | Path) -> LastCommit:
         return LastCommit("", 0)
 
 
-# git takes the lock on a config file without waiting: a second writer fails at
-# once with this message instead of queueing (refs have a lock timeout; config
-# has none). Matched under LC_ALL=C so a translated git cannot hide it.
 _CONFIG_LOCK_MARK = "could not lock config file"
-# A config write holds its lock for microseconds, so a short retry outlasts any
-# live writer (an agent's `git push -u` or `git branch -m` in another worktree);
-# only a lock file a crashed git left behind survives all the attempts.
 _CONFIG_LOCK_ATTEMPTS = 6
 _CONFIG_LOCK_BACKOFF = 0.1
 
@@ -284,7 +268,7 @@ def _https_remote(url: str) -> HttpsRemote | None:
         authority, _, path = rest.partition("/")
         host = authority.rsplit("@", 1)[-1].split(":", 1)[0]
     elif "@" in url and ":" in url and "://" not in url:
-        authority, _, path = url.partition(":")  # scp-like git@host:owner/repo.git
+        authority, _, path = url.partition(":")
         host = authority.rsplit("@", 1)[-1]
     else:
         return None
@@ -323,8 +307,6 @@ class HostCli(NamedTuple):
     helper: str
 
 
-# Probed against the real host (not the hostname's shape) so self-hosted
-# GitHub Enterprise / GitLab resolve to the right tool.
 _HOST_CLIS: tuple[HostCli, ...] = (
     HostCli("gh", ["gh", "auth", "token", "--hostname", "{host}"], "!gh auth git-credential"),
     HostCli(
@@ -638,7 +620,7 @@ class BranchPlan:
 
     kind: BranchPlanKind
     name: str
-    start_point: str | None  # ref to branch from (for track-remote / new)
+    start_point: str | None
 
 
 def resolve_branch(repo: str | Path, name: str, base: str) -> BranchPlan:
@@ -647,7 +629,6 @@ def resolve_branch(repo: str | Path, name: str, base: str) -> BranchPlan:
         return BranchPlan("local", name, None)
     if remote_branch_exists(repo, name):
         return BranchPlan("track-remote", name, f"origin/{name}")
-    # New branch: prefer freshly-fetched origin/<base> over a possibly-stale local.
     start = f"origin/{base}" if remote_branch_exists(repo, base) else base
     return BranchPlan("new", name, start)
 
@@ -685,7 +666,6 @@ def worktree_add(repo: str | Path, worktree: str | Path, plan: BranchPlan) -> No
     takes back the branch it created, and a busy config lock is retried.
     """
     args = ["-C", str(repo), "worktree", "add"]
-    # "--" so a flag-shaped path/ref is always parsed as an operand.
     if plan.kind == "local":
         args += ["--", str(worktree), plan.name]
         created_at = None
@@ -693,8 +673,6 @@ def worktree_add(repo: str | Path, worktree: str | Path, plan: BranchPlan) -> No
         args += ["-b", plan.name, "--", str(worktree), plan.start_point or ""]
         created_at = _commit_oid(repo, plan.start_point or "")
     for attempt in range(1, _CONFIG_LOCK_ATTEMPTS + 1):
-        # Only a branch that was absent right before this attempt can be one
-        # the attempt created; anything already there is someone else's.
         ours = created_at is not None and not local_branch_exists(repo, plan.name)
         try:
             _run(args, env=_c_locale())
@@ -710,7 +688,6 @@ def worktree_add(repo: str | Path, worktree: str | Path, plan: BranchPlan) -> No
 
 
 def _commit_oid(repo: str | Path, ref: str) -> str | None:
-    # --end-of-options: ``ref`` comes from the caller and may be flag-shaped.
     args = ["-C", str(repo), "rev-parse", "--verify", "--quiet", "--end-of-options"]
     try:
         return _run([*args, f"{ref}^{{commit}}"]).strip() or None
@@ -786,8 +763,6 @@ def registered_gitdir(repo: str | Path, path: str | Path) -> Path | None:
 
 
 def is_dirty(worktree: str | Path) -> bool:
-    # Submodule trees are plain copies with no .git at all (copy_submodules
-    # strips it), so ignore submodule state: their dirtiness isn't ours.
     out = _run(["-C", str(worktree), "status", "--porcelain", "--ignore-submodules=all"])
     return bool(out.strip())
 
@@ -796,8 +771,8 @@ def is_dirty(worktree: str | Path) -> bool:
 class WorktreeRecord:
     path: str
     branch: str | None
-    prunable: bool = False  # git's own signal that the working dir is gone
-    locked: bool = False  # `git worktree lock`: git refuses to remove or prune it
+    prunable: bool = False
+    locked: bool = False
 
 
 def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
@@ -817,8 +792,6 @@ def worktree_list(repo: str | Path) -> list[WorktreeRecord]:
             ref = line[len("branch ") :]
             branch = ref.removeprefix("refs/heads/")
         elif line == "prunable" or line.startswith("prunable "):
-            # A registration whose working dir was removed out from under git
-            # (e.g. a manual rm, or a stale nested tree from an old create bug).
             prunable = True
         elif line == "locked" or line.startswith("locked "):
             locked = True

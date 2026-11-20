@@ -28,14 +28,6 @@ from .harnesses import VALID_HARNESSES
 from .models import expand_user, is_valid_template_name
 from .resources import ResourceLimitError, ResourceLimits, from_mapping
 
-# The closed vocabularies treebox understands, validated against the
-# registry-derived VALID_* tuples (harnesses.HARNESSES, runners.RUNNERS —
-# the latter imported inside validate_config: the runners package reaches
-# back to this module at runtime via assets, so a module-level import here
-# would be a cycle). Boundary values (TOML, CLI flags, state files) remain
-# plain ``str``; deeper seams resolve them once to Harness/Runner objects.
-# The Literal aliases are hard-coded for static typing, and a drift test
-# asserts each alias still matches its registry.
 Isolation = Literal["host", "docker"]
 Harness = Literal["claude", "codex"]
 
@@ -46,16 +38,9 @@ DEFAULT_HARNESS = "claude"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_TEMPLATE = "default"
 
-# The port-block allocator's range and block size (see ports.py). Defaults:
-# 20000-26999 lies above the well-known ports (0-1023) and below both
-# ephemeral ranges (Linux 32768-60999, macOS and IANA 49152-65535), so the
-# kernel never hands one of these numbers to an outgoing connection, and it
-# stays clear of common dev-service ports (3000, 5432, 6379, 8080, 9000,
-# 27017). 10 ports per worktree; 700 blocks.
 DEFAULT_PORT_START = 20000
 DEFAULT_PORT_END = 26999
 DEFAULT_PORT_BLOCK_SIZE = 10
-# Below this, binding needs privileges on Linux; above it, no port exists.
 _PORT_MIN = 1024
 _PORT_MAX = 65535
 
@@ -87,23 +72,11 @@ class Config:
     root: str = DEFAULT_ROOT_REL
     env_file: str = DEFAULT_ENV_FILE
     firewall: bool = False
-    # Operator-owned container template to render the sandbox from. Resolved
-    # by assets.template_dir() — never read from the target repo.
     template: str = DEFAULT_TEMPLATE
-    # Setup hook override. When None, setup is auto-detected from manifests.
-    # A list of shell command strings, each run in the worktree dir.
     setup_hook: list[str] | None = None
-    # Host cache directories to share across worktrees and (for the docker
-    # runner) bind-mount into the container. Keyed by ecosystem.
     caches: dict[str, str] = field(default_factory=dict)
-    # Sandbox CPU/memory/process limits ([resources]). Unset fields mean no
-    # treebox cap. For an existing worktree the CLI replaces this with the
-    # limits in its host-owned record (what the sandbox actually has).
     resources: ResourceLimits = field(default_factory=ResourceLimits)
-    # Which of ``resources`` an explicit ``create`` flag chose (never read
-    # from TOML): the record keeps it so only config or template values drift.
     explicit_resources: frozenset[str] = frozenset()
-    # The machine-wide port-block allocator's range (`[ports]`, user config only).
     ports: PortRange = field(default_factory=PortRange)
 
     def with_overrides(
@@ -140,9 +113,6 @@ class Config:
         return replace(self, **applied)
 
 
-# The top-level keys a user config may set: each one is the Config field of
-# the same name. Every other Config field is internal (set by the CLI, never
-# read from TOML), so a config that names it is an unknown key.
 USER_KEYS: frozenset[str] = frozenset(
     {
         "isolation",
@@ -224,11 +194,6 @@ def load_config(path: Path | None = None) -> Config:
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"Could not read config {path}: {exc}") from exc
 
-    # Reject unknown top-level keys loudly: a typo'd `isolatoin`/`firewal` is
-    # security posture silently not applied, the exact failure the module
-    # docstring's INVALID_CONFIG contract exists to prevent. The vocabulary
-    # is USER_KEYS, never every Config field: an internal field is not a key
-    # a user config can set or be pointed at.
     known = sorted(USER_KEYS)
     for key in data:
         if key not in known:
@@ -342,8 +307,6 @@ def validate_config(cfg: Config) -> None:
     if cfg.harness not in VALID_HARNESSES:
         raise ValueError(f"Invalid harness '{cfg.harness}'. Use one of {VALID_HARNESSES}.")
     if not is_valid_template_name(cfg.template):
-        # A path or '..' here would let a name escape the operator-owned
-        # template locations (assets.template_dir).
         raise ValueError(
             f"Invalid template name '{cfg.template}'. A template name is one "
             "identifier (letters, digits, '.', '_', '-'), never a path."

@@ -30,14 +30,13 @@ class DelegateRequest:
     issue_number: int | None
     dry_run: bool
     allow_unpushed: bool
-    base_ref: str | None = None  # default: the manifest's base branch
+    base_ref: str | None = None
 
 
 def behavior_pathspecs(repo: Path, manifest: Manifest) -> tuple[str, ...]:
     """Files the worker's behavior depends on. They must match origin before dispatch."""
     factory = manifest.root.resolve().relative_to(repo.resolve()).as_posix()
     res = manifest.resources
-    # The lockfile is deliberately absent: dispatch reads it locally; the worker never does.
     owned = (
         "factory.yaml",
         res.engineer_agent,

@@ -39,10 +39,10 @@ class SessionInfo:
 
 @dataclass(frozen=True)
 class SessionPlan:
-    create: dict[str, Any]  # body for sessions.create, minus the GitHub token
+    create: dict[str, Any]
     issue: Issue
     branch: str
-    base_ref: str  # what the worker checks out, branches from, and targets with its PR
+    base_ref: str
 
 
 class SessionsApi(Protocol):
@@ -71,7 +71,7 @@ def _meta(value: str) -> str:
 
 def branch_name(manifest: Manifest, issue: Issue) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", issue.title.lower()).strip("-")
-    if len(slug) > BRANCH_SLUG_MAX:  # cut at a word boundary, not mid-word
+    if len(slug) > BRANCH_SLUG_MAX:
         slug = slug[: BRANCH_SLUG_MAX + 1].rsplit("-", 1)[0]
     slug = slug or "task"
     return f"{manifest.task.branch_prefix}{issue.number}-{slug}"
@@ -179,6 +179,6 @@ def steer(
     active = sessions_for_issue(api, manifest, engineer, issue, active_only=True)
     if not active:
         raise FactoryError(f"no active factory session for issue #{issue}")
-    session_id = active[0].id  # newest first
+    session_id = active[0].id
     api.send_message(session_id, message)
     return session_id

@@ -47,7 +47,7 @@ def definition_problems(manifest: Manifest) -> list[str]:
     for label, rel in (("engineer", res.engineer_agent), ("reviewer", res.reviewer_agent)):
         try:
             agents[label] = load_agent(manifest.path(rel))
-        except FactoryError as exc:  # report every problem, not just the first
+        except FactoryError as exc:
             problems.append(str(exc))
     if "engineer" in agents:
         problems += _engineer_problems(manifest, agents["engineer"])

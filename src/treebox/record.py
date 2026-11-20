@@ -61,7 +61,6 @@ from .runners import VALID_ISOLATION
 
 SCHEMA_VERSION = 1
 
-# Sibling of the worktrees under one parent, like `.locks/` and `.containers/`.
 RECORD_DIR = ".records"
 
 _KEYS = frozenset(
@@ -217,7 +216,6 @@ def _parse(worktree: Path, path: Path, data: Any) -> WorktreeRecord:
         or len(set(explicit)) != len(explicit)
     ):
         raise _invalid(worktree, path, "explicitResources must be a list of distinct limit names")
-    # A flag always sets a value, so an explicit limit is a recorded one.
     stray = sorted(set(explicit) - set(limits.names()))
     if stray:
         raise _invalid(worktree, path, f"explicitResources names unset limit(s) {', '.join(stray)}")

@@ -76,11 +76,6 @@ class TemplateInvalidError(RuntimeError):
         self.name = name
 
 
-# The main "blocks" the bundled default image ships, curated from its
-# Dockerfile — surfaced under `template list` so an operator can see what the
-# stock sandbox gives them without reading the build recipe. This describes the
-# *bundled* default only: a user template is whatever its owner made it, so the
-# highlight is shown only when `default` still resolves to the bundled image.
 DEFAULT_TEMPLATE_HIGHLIGHTS = (
     "Python 3.14 + uv",
     "Node.js 22 + npm",
@@ -92,8 +87,6 @@ DEFAULT_TEMPLATE_HIGHLIGHTS = (
     "Egress firewall (iptables/ipset)",
 )
 
-# The container definition the docker runner renders and runs. Its schema is
-# treebox-owned: build.{dockerfile,args}, user, mounts, env, runArgs, postCreate.
 CONFIG_FILE = "container.json"
 
 TEMPLATE_FILES = (
@@ -103,18 +96,9 @@ TEMPLATE_FILES = (
     "init-firewall.sh",
     "allowed-domains.sh",
 )
-# Build helpers the bundled Dockerfile COPYs. The docker runner renders them
-# into the build context when the template has them. They are not required: a
-# template whose Dockerfile does not use them (one scaffolded before they
-# existed, or written from scratch) stays valid.
 TEMPLATE_HELPER_FILES = ("treebox-fetch", "treebox-online")
 FIREWALL_FILE = "firewall.json"
 
-# ``resources.as_file`` may materialize the bundled template to a temporary
-# location (zipped installs, unusual loaders) that is cleaned up when its
-# context exits — so the context must outlive every caller of the returned
-# path. One process-lifetime stack owns the materialization; the cache makes
-# repeated resolutions reuse it instead of re-extracting.
 _RESOURCE_LIFETIME = ExitStack()
 atexit.register(_RESOURCE_LIFETIME.close)
 
@@ -127,10 +111,6 @@ def _bundled_template_dir() -> Path:
     return Path(p)
 
 
-# A reserved directory under ``user_templates_root()`` where ``template init``
-# builds a new template and parks the old one during a ``--force`` swap. It is
-# not a template: ``available_templates`` skips it and ``template init`` refuses
-# the name, so a leftover from an interrupted run never shows up as one.
 STAGING_DIR = ".treebox-tmp"
 
 
@@ -245,8 +225,6 @@ def available_templates() -> list[str]:
     names = {DEFAULT_TEMPLATE}
     root = user_templates_root()
     if root.is_dir():
-        # Only identifiers are selectable, so only they are listed. The
-        # reserved staging directory is not a template.
         names.update(
             p.name
             for p in root.iterdir()

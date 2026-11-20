@@ -24,9 +24,6 @@ from .base import PreflightError, RunnerFacts, RunnerTeardownResult
 if TYPE_CHECKING:
     from ..config import Config
 
-# The agent runs directly on the host, with the host login (~/.claude /
-# ~/.codex, or the macOS Keychain) and the harness binary on PATH; `doctor`
-# checks both. There is nothing container-specific to check.
 _FACTS = RunnerFacts(preflight_detail="no container dependencies", sandboxed=False)
 _DRY_RUN_COLD_ROOT = "<temporary-dir>/treebox-cold-XXXXXXXX"
 
@@ -38,14 +35,12 @@ def _render_cache_env(command: str, env: dict[str, str]) -> str:
 
 class HostRunner:
     name = "host"
-    # No sandbox, so no cgroup to cap: the agent runs as the operator.
     supported_resources: frozenset[str] = frozenset()
 
     def __init__(self, config: Config) -> None:
         self.config = config
 
     def preflight(self, reporter: Reporter) -> None:
-        # Nothing to verify: see _FACTS.
         return
 
     def facts(self) -> RunnerFacts:
@@ -55,15 +50,12 @@ class HostRunner:
         return ResourceLimits()
 
     def check_resources(self, limits: ResourceLimits) -> None:
-        # The CLI refuses explicit limits for this runner first; this keeps a
-        # direct caller from silently running uncapped.
         if limits.names():
             raise ResourceLimitError(
                 limits.names()[0], "The host runner cannot apply resource limits."
             )
 
     def initialize(self, wt: Worktree) -> None:
-        # The host runner owns no per-worktree resources outside the worktree.
         return
 
     def setup(self, wt: Worktree, *, cold: bool, reporter: Reporter) -> None:
@@ -78,11 +70,9 @@ class HostRunner:
                 shutil.rmtree(cold_root, ignore_errors=True)
 
     def setup_reason(self, wt: Worktree) -> str | None:
-        return None  # no sandbox that can disappear
+        return None
 
     def refresh(self, wt: Worktree, *, reporter: Reporter) -> None:
-        # Nothing staged per-worktree: the agent runs with the live host
-        # ~/.claude / ~/.codex, so host logins/logouts apply immediately.
         return
 
     def _run_auto(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
@@ -100,8 +90,6 @@ class HostRunner:
             env.update(step.env)
             env.update(wt.treebox_env())
             detail = "from-source (cold)" if cold_root else "cache-backed"
-            # A failing step raises StepError: a failed setup is a failed
-            # create/enter (the setup model in lifecycle.py records it).
             reporter.step(f"setup · {step.name}", detail, step.argv, cwd=str(wt.path), env=env)
 
     def _run_override(self, wt: Worktree, cold_root: str | None, reporter: Reporter) -> None:
@@ -128,9 +116,6 @@ class HostRunner:
                 return commands
             env = ecosystems.cache_env(self.config.caches, cold_cache_root=_DRY_RUN_COLD_ROOT)
             return [_render_cache_env(command, env) for command in commands]
-        # A new worktree may come from a different --base/--checkout revision
-        # than the current repo checkout. A resumed worktree already has the
-        # exact tree that real setup will inspect.
         if source_ref is not None:
             ecos = ecosystems.detect_revision(wt.repo, source_ref)
         else:
@@ -148,17 +133,9 @@ class HostRunner:
         return [_render_cache_env(shlex.join(step.argv), step.env) for step in steps]
 
     def prepare_entry(self, wt: Worktree) -> None:
-        # Nothing to make ready: the agent runs directly on the host, so an
-        # emitted entry_command works whenever the worktree exists.
         return
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
-        # Self-contained, like the docker runner's `docker exec -w`: the command
-        # --print/--json emit must carry the worktree directory, or pasting it
-        # launches a full-autonomy agent in whatever dir the user happens to be
-        # in — typically the main checkout treebox exists to keep agents out of.
-        # The TREEBOX_* variables ride in the command too, so a replayed
-        # command gives the agent the same values as a direct launch.
         argv = harness.launch_argv(args)
         exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in wt.treebox_env().items())
         return [
@@ -175,8 +152,6 @@ class HostRunner:
                 error_code="HARNESS_MISSING",
                 hint=harness.login_hint(),
             )
-        # A cancel signal to treebox is passed on to the agent (the child
-        # process), which is killed if it has not exited after the grace time.
         code, cancelled = run_agent(cmd, cwd=str(wt.path), env={**os.environ, **wt.treebox_env()})
         if cancelled is not None:
             name = signal_name(cancelled)
@@ -186,8 +161,5 @@ class HostRunner:
         return code
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
-        # Nothing host-side to tear down beyond the worktree itself: no
-        # container cleanup ran, so the result (and the note) is "skipped",
-        # never a claim that something was cleaned.
         reporter.note("container", "skipped · host isolation")
         return RunnerTeardownResult.skipped()

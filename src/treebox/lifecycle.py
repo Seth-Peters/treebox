@@ -32,8 +32,6 @@ from typing import Any
 
 from .models import DepsFreshness, SetupStatus
 
-# --- setup model -------------------------------------------------------------
-
 SETUP_STATUSES: tuple[SetupStatus, ...] = ("pending", "failed", "done")
 
 

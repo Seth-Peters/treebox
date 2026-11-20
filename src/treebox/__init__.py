@@ -4,5 +4,5 @@ from importlib.metadata import PackageNotFoundError, version
 
 try:
     __version__ = version("treebox")
-except PackageNotFoundError:  # not installed (e.g. running from a bare source tree)
+except PackageNotFoundError:
     __version__ = "0+unknown"

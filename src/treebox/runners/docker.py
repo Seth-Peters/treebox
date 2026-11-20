@@ -114,33 +114,14 @@ from .base import (
 if TYPE_CHECKING:
     from ..config import Config
 
-# Host-side directory that holds each worktree's operator-owned
-# container config + build context. The config/build files themselves are NEVER
-# mounted into the container (only the worktree, its git common dir, and the
-# scoped credential copies below), so a boxed agent can't reach them.
 _CONFIG_ROOT = ".containers"
 
-# Subdir of the per-worktree config dir holding the staged credential copies
-# (one subdir per harness). Survives config regeneration so an existing
-# container's bind mounts stay valid.
 _CREDS_SUBDIR = "credentials"
 
-# Authoritative record of the Docker image and volumes for one worktree. It
-# lives beside the generated container config, outside every sandbox mount.
-# Worktree state under .git is intentionally excluded: the git common dir is
-# sandbox-writable, so it cannot authorize destructive host cleanup.
 _RESOURCE_MANIFEST = "treebox-resources.json"
 _RESOURCE_SCHEMA_VERSION = 1
 
-# In-container user the agent runs as when the template doesn't set one.
 _DEFAULT_USER = "agent"
-
-# The container.json schema (also the firewall overlay's). ``_KNOWN_KEYS``
-# is the runtime half of the contract: any key outside it is a loud error,
-# not silently ignored — this is a security-sensitive config, and a typoed
-# key that is silently dropped would strip behavior the operator relies on.
-# ``ContainerConfig`` is the static half; ``_require_known_keys`` is where a
-# freshly-parsed dict is validated and narrowed into it.
 
 
 class BuildSection(TypedDict, total=False):
@@ -167,7 +148,6 @@ class ResourceManifest(TypedDict):
 
 _KNOWN_KEYS = frozenset({"build", "user", "mounts", "env", "runArgs", "postCreate", "resources"})
 
-# The docker run flag (and its spellings in raw runArgs) for each generic limit.
 _LIMIT_FLAGS: dict[str, str] = {"cpus": "--cpus", "memory": "--memory", "pids": "--pids-limit"}
 _LIMIT_SPELLINGS: dict[str, tuple[str, ...]] = {
     "cpus": ("--cpus",),
@@ -176,23 +156,14 @@ _LIMIT_SPELLINGS: dict[str, tuple[str, ...]] = {
 }
 _LIMIT_PARSERS = {"cpus": parse_cpus, "memory": parse_memory, "pids": parse_pids}
 
-# Keeps the detached sandbox container alive between execs. `docker run --init`
-# puts a real PID 1 above it so orphaned grandchildren get reaped.
 _KEEPALIVE = ("sleep", "infinity")
 
-# Re-establishes egress lockdown, guarded on the env baked in at `docker run`:
-# a no-op for containers created without the firewall, idempotent (the script
-# skips itself when the rules are already live) for containers created with it.
 _FIREWALL_GUARDED = (
     "sh",
     "-c",
     'if [ "$TREEBOX_FIREWALL" = "1" ]; then /usr/local/bin/init-firewall.sh; fi',
 )
 
-# In-container helpers for a cancellable agent session (``launch``). The
-# wrapper writes its pid to the file in $0, then execs the agent in that same
-# process. The other two read the pid back: signal the agent's process group
-# (falling back to the agent alone), and test whether the agent still runs.
 _AGENT_WRAPPER = 'echo "$$" > "$0" && exec "$@"'
 _AGENT_SIGNAL = (
     'p=$(cat "$0" 2>/dev/null) && [ -n "$p" ] && '
@@ -267,18 +238,13 @@ def _mount(
     return spec
 
 
-# Exit status of the hooks probe when the write went through.
 _HOOKS_WRITABLE = 73
-# $1 is the shared hooks dir. Try to create a file in it; a read-only mount
-# refuses that for every user. A missing dir is a failed check, not a pass.
 _HOOKS_PROBE = (
     '[ -d "$1" ] || { echo "hooks dir is not mounted: $1" >&2; exit 1; }; '
     'probe="$1/.treebox-readonly-probe.$$"; '
     f'if ( : > "$probe" ) 2>/dev/null; then rm -f "$probe"; exit {_HOOKS_WRITABLE}; fi'
 )
 
-# The agent runs in the sandbox: its binary comes from the image and its login
-# is a staged copy of the harness login file (what `doctor` checks).
 _FACTS = RunnerFacts(preflight_detail="docker daemon ok", sandboxed=True)
 
 
@@ -300,8 +266,6 @@ class DockerRunner:
         self.config = config
         self._remove_volumes = remove_volumes
         self._docker_cli = docker
-
-    # --- the engine seam -------------------------------------------------------
 
     def _engine(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         """Every docker invocation this runner makes goes through here: the
@@ -346,8 +310,6 @@ class DockerRunner:
             return self._docker_cli(["info"]).returncode == 0
         return _docker_available()
 
-    # --- container queries (all through the engine seam) ----------------------
-
     def _container_ids(self, wt: Worktree) -> list[str]:
         out = self._engine(["ps", "-aq", "--filter", f"label={self._id_label(wt)}"]).stdout
         return [line for line in out.split() if line]
@@ -384,13 +346,7 @@ class DockerRunner:
         ).stdout
         return [v for v in out.splitlines() if v.startswith("treebox-")]
 
-    # --- preflight -----------------------------------------------------------
-
     def preflight(self, reporter: Reporter) -> None:
-        # Checked first: no docker setup fixes it. The sandbox user takes the
-        # invoking uid (see _inject), so as uid 0 it would be root inside the
-        # box and free to delete its own firewall rules (and the template's
-        # `useradd -u 0` fails mid-build). Refuse before any provisioning.
         if system.identity().uid == 0:
             raise PreflightError(
                 "docker isolation cannot run as root (uid 0): the sandbox user "
@@ -413,8 +369,6 @@ class DockerRunner:
 
     def facts(self) -> RunnerFacts:
         return _FACTS
-
-    # --- resource limits ---------------------------------------------------------
 
     def template_resources(self) -> ResourceLimits:
         """The template tier: the operator template's ``resources`` object
@@ -470,8 +424,6 @@ class DockerRunner:
                 f"Invalid --cpus {format_value('cpus', limits.cpus)}: the Docker engine "
                 f"has only {available} CPUs.",
             )
-
-    # --- locations & identity --------------------------------------------------
 
     def _config_dir(self, wt: Worktree) -> Path:
         """Keep container config and build files outside the worktree mount.
@@ -575,12 +527,7 @@ class DockerRunner:
             "volumes": sorted(set(volumes)),
         }
 
-    # --- config rendering ------------------------------------------------------
-
     def _template_config(self) -> ContainerConfig:
-        # load_template_json raises a typed TemplateInvalidError on unreadable
-        # or malformed contents, so every caller (setup, prepare_entry, the
-        # _user fallback) surfaces a classified error instead of a traceback.
         config = assets.load_template_json(self.config.template, assets.CONFIG_FILE)
         return _require_known_keys(config, assets.CONFIG_FILE, self.config.template)
 
@@ -603,8 +550,6 @@ class DockerRunner:
         if self.config.firewall:
             fw = assets.load_template_json(self.config.template, assets.FIREWALL_FILE)
             _require_known_keys(fw, assets.FIREWALL_FILE, self.config.template)
-            # The merge is shape-agnostic (recursive JSON); both sides were
-            # validated above, so the result is still a ContainerConfig.
             _deep_merge(cast("dict[str, Any]", config), fw)
         return config
 
@@ -620,10 +565,8 @@ class DockerRunner:
         ident = system.identity()
         build = config.setdefault("build", {})
         args = build.setdefault("args", {})
-        # Pin ownership to the invoking user so worktree/bind files aren't root.
         args["USER_UID"] = str(ident.uid)
         args["USER_GID"] = str(ident.gid)
-        # Host timezone wins over the template default when set.
         if os.environ.get("TZ"):
             args["TZ"] = os.environ["TZ"]
 
@@ -631,36 +574,18 @@ class DockerRunner:
         mounts[:] = [m.replace("${workspaceName}", _sanitize(wt.name)) for m in mounts]
 
         user = config.get("user", _DEFAULT_USER)
-        # Scoped credential copies, not the live host login dirs (see
-        # _refresh_credentials). Mounted in cold mode too: auth is not a cache.
         for harness in HARNESSES:
             staged, mount_target = harness.sandbox_mount(self._creds_dir(wt) / harness.name, user)
             mounts.append(_mount(staged, mount_target))
 
-        # The worktree and its git common dir are mounted at their host paths,
-        # mirrored 1:1, so every gitdir pointer inside the worktree resolves
-        # identically in-container — plain `git status` just works, with no
-        # relative-worktree or git-version requirement.
         mounts.append(_mount(wt.path, wt.path))
         common = git.common_dir(wt.repo)
         mounts.append(_mount(common, common))
-        # The shared .git/hooks are executed by *host* git under its default
-        # core.hooksPath (the operator's next `treebox create`/`enter`, or a
-        # manual git in the repo). The common dir above is writable so
-        # in-container git can commit/fetch, which would otherwise let a boxed
-        # agent drop a host-run hook there. Mount hooks/ read-only so it can't:
-        # commit/fetch/push/branch/checkout never write hooks, so the agent's
-        # own git is unaffected. (Config-based redirects — core.hooksPath /
-        # core.fsmonitor set in the shared config — are neutralized separately
-        # by the safety flags on treebox's host-side git; see git.py.)
         mounts.append(_mount(common / "hooks", common / "hooks", readonly=True))
 
         if cold:
-            return  # cold => no shared cache mounts; build from source in-image
+            return
 
-        # Bind-mount every configured shared host cache and point the
-        # in-container tools at it. Driven by ECOSYSTEMS (the single source of
-        # cache wiring) so a new ecosystem can't silently miss container warmth.
         env = config.setdefault("env", {})
         for eco in ECOSYSTEMS:
             target = eco.container_cache_target()
@@ -701,11 +626,6 @@ class DockerRunner:
         each run."""
         tpl = assets.template_dir(self.config.template)
         dc = self._config_dir(wt)
-        # Regenerate cleanly: the operator template is the single source of
-        # truth; never trust leftovers from a previous run. Credentials are
-        # spared because an existing container's bind mounts point at them.
-        # The host-owned resource manifest is also preserved: config/template
-        # drift must never rewrite the ownership record used by teardown.
         if dc.exists():
             for child in dc.iterdir():
                 if child.name in {_CREDS_SUBDIR, _RESOURCE_MANIFEST}:
@@ -730,8 +650,6 @@ class DockerRunner:
             p = dc / script
             if p.exists():
                 p.chmod(0o755)
-        # The config dir doubles as the build context; keep the staged
-        # credential copies out of what gets sent to the docker daemon.
         (dc / ".dockerignore").write_text(f"{_CREDS_SUBDIR}/\n", encoding="utf-8")
 
         config = self._merged_config(wt, cold=cold)
@@ -766,10 +684,6 @@ class DockerRunner:
             return None
         return "the sandbox container is gone - re-creating it"
 
-    # --- docker argv builders --------------------------------------------------
-    # Builders return the full argv (leading "docker" included) so they can be
-    # shown verbatim by --dry-run and reporter steps; _run_engine executes one.
-
     def _build_command(self, wt: Worktree, config: ContainerConfig) -> list[str]:
         dc = self._config_dir(wt)
         build = config.get("build", {})
@@ -797,9 +711,6 @@ class DockerRunner:
             "--label",
             self._id_label(wt),
         ]
-        # Treebox owns every limit it sets: the raw runArgs spelling of that
-        # limit is dropped (it was folded into the record at create), so the
-        # recorded value is the one the container gets.
         limits = self.config.resources
         run_args, _ = _split_limit_args(
             [str(a) for a in config.get("runArgs", [])], drop=limits.names()
@@ -838,8 +749,6 @@ class DockerRunner:
                 cmd += ["-e", f"{key}={value}"]
         cmd += ["-u", user or self._user(wt), "-w", str(wt.path), self._slug(wt), *argv]
         return cmd
-
-    # --- setup -------------------------------------------------------------------
 
     def _existing_container(self, wt: Worktree) -> tuple[str, ContainerState] | None:
         ids = self._container_ids(wt)
@@ -882,18 +791,12 @@ class DockerRunner:
                 self._ensure_cache_dirs()
             self._ensure_hook_dir(wt)
             env = dict(os.environ)
-            # Line-buffered build output, so a failure dump reads cleanly.
             env.setdefault("BUILDKIT_PROGRESS", "plain")
             reporter.step("image", "built", self._build_command(wt, config), env=env)
             with reporter.task("container", "started"):
                 self._run_engine(self._run_command(wt, config))
-        # Before any workspace-derived code runs in the container (firewall
-        # init is operator-owned; post-create is not).
         self._require_readonly_hooks(wt)
 
-        # Egress lockdown BEFORE post-create: setup runs code derived from the
-        # untrusted workspace (uv sync executes the repo's build backend), and
-        # post-create.sh fails closed if this ordering is ever lost.
         if firewall:
             try:
                 reporter.step("firewall", "egress locked down", self._firewall_command(wt))
@@ -1001,8 +904,6 @@ class DockerRunner:
                 hint=f"Remove it and re-create: treebox teardown {path_ref(wt.path)}",
             )
 
-    # --- launch / teardown ---------------------------------------------------
-
     def dry_run_setup(
         self,
         wt: Worktree,
@@ -1017,9 +918,6 @@ class DockerRunner:
             f"# stage scoped login-file copies into {self._creds_dir(wt)} "
             "(the live ~/.claude / ~/.codex are never mounted)",
         ]
-        # Real setup reuses a container that already exists for this worktree
-        # (an interrupted create left one behind), warm or cold; the plan
-        # says so whenever the engine can be asked. A read-only query.
         existing = self._existing_container(wt) if self._available() else None
 
         firewall = self.config.firewall
@@ -1051,9 +949,6 @@ class DockerRunner:
         return cmds
 
     def entry_command(self, wt: Worktree, *, harness: Harness, args: list[str]) -> list[str]:
-        # "-i" always, so stdin piped into the printed command reaches the
-        # agent; "-t" only when a terminal is attached, so the command emitted
-        # by --print/--json also works when a script replays it off-TTY.
         return self._exec_command(
             wt,
             harness.launch_argv(args),
@@ -1082,8 +977,6 @@ class DockerRunner:
                 f"sandbox: treebox teardown {path_ref(wt.path)} && treebox create {wt.name} "
                 f"--isolation {self.name}",
             )
-        # The wrapper records the agent's pid (it execs into the agent), so a
-        # cancel can reach the agent itself, not only the local docker CLI.
         pidfile = f"/tmp/treebox-agent-{secrets.token_hex(8)}.pid"
         entry = self.entry_command(wt, harness=harness, args=args)
         at = entry.index(slug) + 1
@@ -1099,11 +992,6 @@ class DockerRunner:
         code, cancelled = run_agent(argv, stop=stop)
         if cancelled is None:
             if code != 0 and self._run_started(slug) != started:
-                # `docker exec` ends when its container stops or restarts (an
-                # engine restart, `docker restart`, a worker shutdown) with a
-                # status the agent never returned. Passing it on as the
-                # agent's exit would make a lost sandbox look like a finished
-                # task, so it is a treebox failure.
                 raise SandboxError(
                     f"The sandbox of '{wt.name}' stopped or restarted while the agent "
                     f"ran (docker exec exited {code}): the agent's result is unknown.",
@@ -1111,8 +999,6 @@ class DockerRunner:
                 )
             self._engine(["exec", "-u", user, slug, "rm", "-f", pidfile])
             return code
-        # The local docker CLI can end before the agent in the container does
-        # (it got the signal too): wait for the agent itself, then kill it.
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         while self._agent_alive(user, slug, pidfile) and time.monotonic() < deadline:
             time.sleep(0.2)
@@ -1199,7 +1085,7 @@ class DockerRunner:
             if fields.get("type") != "volume":
                 continue
             if "${workspaceName}" not in source:
-                continue  # shared/static volume: not this worktree's to remove
+                continue
             volumes.append(source.replace("${workspaceName}", _sanitize(wt.name)))
         return volumes
 
@@ -1227,19 +1113,11 @@ class DockerRunner:
                     "destructive Docker cleanup limited: authoritative host-owned "
                     f"resource manifest unavailable: {exc}"
                 )
-        # Read mounts only for the non-destructive "kept" note. Deletion
-        # authority comes exclusively from the host-owned manifest.
         container_volumes = self._container_volumes(ids) if ids else []
         volumes: list[str] = []
         if self._remove_volumes and manifest is not None:
-            # Manifest names are authoritative but may already be gone.
-            # Intersect with the live engine list to keep retries quiet.
             existing = set(self._engine(["volume", "ls", "-q"]).stdout.split())
             volumes = sorted(set(manifest["volumes"]) & existing)
-        # Only the exact image the host-owned manifest records is ours to
-        # remove, with or without a container: a manual `docker rm` must not
-        # leak it. An image a container uses but the manifest does not name is
-        # never removed.
         image = manifest["image"] if manifest is not None else None
         used = self._container_image(ids) if ids else None
         if used and used != image:
@@ -1248,15 +1126,9 @@ class DockerRunner:
                 "the host-owned resource manifest"
             )
         if image and used != image and not self._image_exists(image):
-            image = None  # already gone: nothing to remove or report
+            image = None
         container_failed = container_kept = False
         if ids:
-            # `-v` also removes the container's anonymous volumes (a base image
-            # `VOLUME`): nameless, nothing can use them again once the container
-            # is gone, so without it each teardown leaks one. It never removes
-            # a named volume; those stay under the manifest rule below. One
-            # still used by another container (`--volumes-from`) the engine
-            # keeps, and `docker rm` still exits 0.
             if self._engine_attempt(["rm", "-f", "-v", *ids], reporter=reporter):
                 reporter.ok("container", f"removed {' '.join(ids)}")
             else:
@@ -1265,7 +1137,6 @@ class DockerRunner:
         else:
             reporter.note("container", "none found")
         if image and container_kept and used == image:
-            # A container that is still there still uses its image.
             remaining.append(f"image {image} (in use by the container)")
         elif image:
             if self._engine_attempt(["image", "rm", image], reporter=reporter):
@@ -1282,17 +1153,12 @@ class DockerRunner:
                 else:
                     remaining.append(f"volumes {' '.join(volumes)} (docker volume rm failed)")
             elif volumes:
-                # A container that is still there still uses its volumes.
                 remaining.append(f"volumes {' '.join(volumes)} (in use by the container)")
             else:
-                # Never silent: the operator asked for volume removal, so say
-                # when no removable volume could be found from any source.
                 reporter.note("volumes", "none found")
         elif container_volumes:
             reporter.note("volumes", f"kept {' '.join(container_volumes)}")
 
-        # Remove the host-side config/build-context dir too - but only when
-        # nothing remains: it holds the resource manifest a retry needs.
         cfg_dir = self._config_dir(wt)
         if remaining:
             reporter.note("sandbox files", "kept · the retry needs the resource manifest")
@@ -1304,9 +1170,6 @@ class DockerRunner:
             volumes_removed=volumes_removed,
             remaining=tuple(remaining),
         )
-
-
-# --- docker helpers ----------------------------------------------------------
 
 
 def _docker(args: list[str]) -> subprocess.CompletedProcess[str]:

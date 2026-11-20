@@ -59,7 +59,7 @@ class TranscriptSummary:
     list_cost_usd: str
     active_seconds: float | None
     main: StreamStats = field(default_factory=StreamStats)
-    subagents: dict[str, StreamStats] = field(default_factory=dict)  # thread id -> stats
+    subagents: dict[str, StreamStats] = field(default_factory=dict)
 
     @property
     def tool_calls(self) -> int:
@@ -114,7 +114,7 @@ def export(api: SessionsApi, session_id: str, out_dir: Path) -> TranscriptSummar
     _write_jsonl(target / "events.jsonl", api.events(session_id), summary.main)
     for thread in api.threads(session_id):
         if thread.get("parent_thread_id") is None:
-            continue  # the primary thread: already written as events.jsonl
+            continue
         thread_id = str(thread["id"])
         summary.subagents[thread_id] = StreamStats()
         _write_jsonl(

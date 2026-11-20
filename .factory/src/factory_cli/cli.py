@@ -93,7 +93,6 @@ def _read_text(inline: str | None, path: str | None, what: str) -> str | None:
     return None
 
 
-# Seams for tests: swap these to fakes.
 def make_github() -> GitHubApi:
     return GhCli()
 

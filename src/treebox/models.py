@@ -10,14 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-# Branches treebox generates carry this prefix. It marks the name as
-# machine-made: the pre-push guard refuses to push them, so a placeholder can
-# never become a PR title — the agent must `git branch -m <real-name>` first.
 PLACEHOLDER_PREFIX = "treebox/"
 
-# One clean lowercase token — the grammar of a generated name and of each
-# slash-separated segment of an explicit `create NAME`. Anything fancier
-# (spaces, unicode, dots) is a usage error, not something we slugify.
 SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 
 
@@ -33,9 +27,6 @@ def is_valid_name(name: str) -> bool:
     return all(is_slug(part) for part in name.split("/"))
 
 
-# A sandbox template name is an identifier, never a path: one segment of a
-# conservative, filesystem-safe charset, so it can only select a directory
-# under the operator-owned templates root (see ``assets.template_dir``).
 TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -86,17 +77,11 @@ def worktree_path(repo: str, root: str, name: str) -> Path:
     return worktree_root(repo, root) / name
 
 
-# The variables treebox exports to setup and to the agent entry (see
-# ``Worktree.treebox_env``). Repo-owned scripts read them to run services in
-# parallel worktrees; treebox starts no service itself.
 ENV_NAME = "TREEBOX_NAME"
 ENV_ID = "TREEBOX_ID"
 ENV_PORT_BASE = "TREEBOX_PORT_BASE"
 ENV_PORT_COUNT = "TREEBOX_PORT_COUNT"
 
-# The ``worktree_id`` format is documented contract: exactly this many
-# lowercase hex characters. Repo scripts put it in database and Compose project
-# names, and the docker runner's sandbox names embed it, so it never changes.
 WORKTREE_ID_LENGTH = 10
 
 
@@ -148,16 +133,8 @@ class PortBlock:
 
 DepsFreshness = Literal["fresh", "stale", "unknown"]
 
-# The setup model's states (see ``lifecycle.py``).
 SetupStatus = Literal["pending", "failed", "done"]
 
-# The one classification of a worktree's health (``provision.worktree_health``):
-#   healthy            registered, linked to its own registration, record readable
-#   directory_missing  the directory is gone (a registration may remain)
-#   unregistered       a directory git has no registration for
-#   invalid_linkage    registered, but its .git pointer is missing or leads
-#                      elsewhere: git inside it would act on the main checkout
-#   unreadable_state   git is fine, but the host-owned record is missing or invalid
 Health = Literal[
     "healthy", "directory_missing", "unregistered", "invalid_linkage", "unreadable_state"
 ]
@@ -172,11 +149,9 @@ class WorktreeRow(TypedDict):
     """
 
     name: str
-    id: str  # TREEBOX_ID: models.worktree_id of the registered path
+    id: str
     branch: str
-    unnamed: bool  # branch is a treebox/<name> placeholder
-    # Kept for older consumers: true when ``health`` is directory_missing or
-    # invalid_linkage (only the git registration is reliable).
+    unnamed: bool
     missing: bool
     last_commit: str
     commit_epoch: int
@@ -184,15 +159,11 @@ class WorktreeRow(TypedDict):
     base: str
     isolation: str
     harness: str
-    # The recorded limits ({cpus, memory, pids}, null = no treebox cap);
-    # null when the worktree has no valid host-owned record.
     resources: dict[str, Any] | None
     deps: DepsFreshness
     env: Literal["present", "absent"]
     health: Health
-    setup: SetupStatus | Literal[""]  # "" when the record is missing or invalid
-    # The reserved port block (TREEBOX_PORT_BASE / TREEBOX_PORT_COUNT); null when
-    # the record holds none (missing or invalid record, or not reserved yet).
+    setup: SetupStatus | Literal[""]
     port_base: int | None
     port_count: int | None
 
@@ -207,12 +178,12 @@ class TemplateRow(TypedDict):
 
     name: str
     path: str
-    source: str  # where it resolves from: env | user | bundled
-    default: bool  # matches the configured default template
-    valid: bool  # no required files missing, JSON contents parse
+    source: str
+    default: bool
+    valid: bool
     missing: list[str]
-    invalid: list[str]  # present JSON files that fail to parse
-    firewall: bool  # has valid firewall.json, so it can serve --firewall
+    invalid: list[str]
+    firewall: bool
 
 
 @dataclass(frozen=True)
@@ -236,8 +207,6 @@ class Worktree:
     branch: str
     base: str
     path: Path
-    # The reserved port block, once ``provision`` has it from the record;
-    # None for a worktree that has none yet (a dry run, a teardown).
     ports: PortBlock | None = None
 
     @classmethod

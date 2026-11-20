@@ -22,8 +22,6 @@ from typing import Literal
 
 from . import git
 
-# How long any single forge CLI call may take before we give up and fall back to
-# Tier-1 for that worktree. Keeps a slow/hung network from stalling the picker.
 _CLI_TIMEOUT = 6.0
 
 
@@ -136,8 +134,6 @@ class GlabForge(Forge):
         return _run(["glab", "auth", "status", "--hostname", self.host]) is not None
 
     def pr_status(self, repo_path: str, branch: str) -> PRStatus | None:
-        # glab's default state filter is opened-only; --all is what lets a
-        # merged MR surface at all.
         proc = _run(
             [
                 "glab",
@@ -162,9 +158,6 @@ class GlabForge(Forge):
         statuses = [st for st in (self._parse_mr(mr) for mr in items) if st is not None]
         if not statuses:
             return None
-        # Branch names are reusable. An old merged request must not mask a
-        # newer request for new work. Project-local IIDs increase on creation;
-        # do not rely on API ordering (an old MR can be updated more recently).
         return max(statuses, key=lambda st: st.number or 0)
 
     @staticmethod
@@ -191,9 +184,6 @@ class GlabForge(Forge):
         )
 
 
-# Probed in order: the first CLI authenticated for the origin host wins. Ordering
-# by auth (not by hostname string) is what lets self-hosted GitHub Enterprise /
-# GitLab resolve correctly without hardcoding host patterns.
 _PROVIDERS: tuple[type[Forge], ...] = (GhForge, GlabForge)
 
 

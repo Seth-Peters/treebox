@@ -172,8 +172,6 @@ def preview(worktree: Path, ports: PortRange, *, preferred: PortBlock | None = N
 
 
 def _own(entries: list[_Entry], worktree: Path) -> _Entry | None:
-    # Matched by the resolved path: a root spelled through an alias (/var vs
-    # /private/var) is still the same worktree and keeps its block.
     return next((e for e in entries if same_path(e.worktree, worktree)), None)
 
 
@@ -204,7 +202,7 @@ def _stale(entry: _Entry) -> bool:
     if os.path.lexists(path) or locking.worktree_lock_held(path):
         return False
     if not Path(entry.repo).is_dir():
-        return True  # the repo is gone, and with it every registration
+        return True
     try:
         return not git.worktree_registered(entry.repo, entry.worktree)
     except git.GitError:

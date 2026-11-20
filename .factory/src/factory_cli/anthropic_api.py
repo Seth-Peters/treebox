@@ -30,9 +30,9 @@ def _call(action: str, fn: Callable[[], T]) -> T:
         return fn()
     except anthropic.APIError as exc:
         raise FactoryError(f"{action} failed: {exc}") from exc
-    except anthropic.AnthropicError as exc:  # e.g. no credentials found
+    except anthropic.AnthropicError as exc:
         raise FactoryError(f"{action} failed: {exc} (run `ant auth login`)") from exc
-    except TypeError as exc:  # the SDK raises this when it finds no credentials at all
+    except TypeError as exc:
         if "authentication method" not in str(exc):
             raise
         raise FactoryError(
@@ -140,7 +140,6 @@ class AnthropicApi:
         def retire(credential_id: str) -> None:
             credentials.archive(credential_id, vault_id=vault_id)
 
-        # Rotation, not accumulation: retire any earlier token for this server.
         for credential_id in _call("listing vault credentials", stale):
             _call("archiving the old credential", partial(retire, credential_id))
         credential = _call(

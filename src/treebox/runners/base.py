@@ -129,10 +129,6 @@ class RunnerFacts:
 @runtime_checkable
 class Runner(Protocol):
     name: str
-    # The generic limits (``resources.RESOURCE_NAMES``) this runner can apply
-    # to its sandbox; it maps each one to its own engine. An explicit flag for
-    # a limit outside this set is refused; a config or template default for
-    # one is not applied. The host runner applies none.
     supported_resources: frozenset[str]
 
     def preflight(self, reporter: Reporter) -> None:

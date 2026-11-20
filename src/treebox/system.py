@@ -28,7 +28,7 @@ def identity() -> Identity:
     """Invoking user's UID/GID (for correct bind-mount ownership)."""
     try:
         return Identity(uid=os.getuid(), gid=os.getgid())
-    except AttributeError:  # non-POSIX; mounts won't be used there anyway
+    except AttributeError:
         return Identity(uid=1000, gid=1000)
 
 
@@ -36,10 +36,7 @@ def have(cmd: str) -> bool:
     return which(cmd) is not None
 
 
-# The signals that cancel a running agent session, in both runners.
 CANCEL_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-# How long the agent gets to exit after a forwarded cancel signal before it is
-# killed (SIGKILL).
 STOP_GRACE_SECONDS = 10.0
 
 
@@ -107,7 +104,7 @@ def run_agent(
             signal.signal(signum, handler)
         if timer is not None:
             timer.cancel()
-        if proc.poll() is None:  # an unexpected error while waiting: never orphan it
+        if proc.poll() is None:
             proc.kill()
             proc.wait()
     return code, received[0] if received else None

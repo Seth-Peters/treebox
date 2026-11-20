@@ -34,18 +34,13 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-# The generic limit names, in display order. They are the ``[resources]``
-# keys, the template ``resources`` keys, and the record keys.
 RESOURCE_NAMES: tuple[str, ...] = ("cpus", "memory", "pids")
 
-# The treebox CLI flag for each generic limit.
 FLAGS: dict[str, str] = {"cpus": "--cpus", "memory": "--memory", "pids": "--pids-limit"}
 
 MIN_CPUS = Decimal("0.01")
 MIN_MEMORY_BYTES = 6 * 1024 * 1024
 
-# Docker's memory size grammar (go-units RAMInBytes): number, optional space,
-# optional unit, optional "i", optional "b".
 _MEMORY_RE = re.compile(r"^(\d+(?:\.\d+)?) ?([kmgtp])?(i?b)?$", re.IGNORECASE)
 _UNITS = "bkmgtp"
 
@@ -220,7 +215,6 @@ def from_mapping(data: Any, *, source: str) -> ResourceLimits:
         raw = data.get(name)
         if raw is None:
             return None
-        # Typed like every other config value: a quoted "512" is a mistake.
         if isinstance(raw, bool) or not isinstance(raw, _TABLE_TYPES[name]):
             raise ResourceLimitError(
                 name, f"{source} {name} must be {_TABLE_NOUNS[name]}, got {raw!r}."

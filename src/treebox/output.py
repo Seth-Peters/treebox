@@ -34,32 +34,25 @@ from rich.theme import Theme
 
 from .models import TemplateRow, WorktreeRow
 
-# Style A — uv/Astral-minimal: mostly dim + default, one colored glyph per line,
-# right-aligned dim timings. The only saturated color is the status glyph
-# (green ✓ / red ✗) and the freshness dots in `list`.
 THEME = Theme(
     {
         "wt.ok": "green",
         "wt.fail": "bold red",
         "wt.warn": "yellow",
         "wt.muted": "dim",
-        "wt.name": "default",  # status-row labels: calm, unbold
-        "wt.label": "bold",  # reserved for headers
+        "wt.name": "default",
+        "wt.label": "bold",
         "wt.accent": "cyan",
-        "wt.detail": "dim",  # step detail text
-        "wt.time": "dim",  # right-aligned per-step timing
+        "wt.detail": "dim",
+        "wt.time": "dim",
         "wt.fresh": "green",
         "wt.stale": "yellow",
         "wt.unknown": "dim",
     }
 )
 
-# Status rows are indented two columns so the glyph sits at column 2; the spinner
-# is padded to the same column so a live ``⠸`` and a resolved ``✓`` line up exactly.
 _INDENT = 2
-# Width the status-row label column is padded to, for a clean left edge.
 _LABEL_W = 14
-# Right margin kept clear of the terminal edge for the timing column.
 _RIGHT_MARGIN = 2
 _OK = "✓"
 _FAIL = "✗"
@@ -89,16 +82,6 @@ def format_age(seconds: float) -> str:
     return f"{seconds / (7 * 86400):.0f}w"
 
 
-# A console that is not a terminal (a pipe, a file) has no width: a script
-# reads it line by line, so a table row or a path is never wrapped or cut
-# there; only a terminal's width shapes the output. Rich needs a number, so
-# such a console gets _UNBOUNDED_WIDTH, which only turns Rich's wrapping and
-# cropping off. It is never a width to fill or to budget against, so every
-# renderer obeys two rules:
-# - It fits (cuts, wraps, shortens, right-aligns) its output only to
-#   fit_width(console), which is None for an unbounded console: nothing to fit.
-# - It prints a table, or any block that Rich could stretch, through
-#   print_block, which renders it at its content width and pads no line.
 _UNBOUNDED_WIDTH = 100_000
 
 
@@ -251,19 +234,12 @@ class Reporter:
         silent: bool = False,
         stream: IO[str] | None = None,
     ) -> None:
-        # silent: emit nothing at all (used in --json mode, where the CLI writes
-        # the structured result/error to stdout/stderr itself). Implies quiet,
-        # and additionally suppresses errors/warnings that quiet keeps.
         self.silent = silent
         self.quiet = quiet or silent
         self.verbose = verbose
         self.console = new_console(stderr=True, file=stream)
         self.data_console = new_console()
-        # Every warning, also in silent (--json) mode: success payloads carry
-        # them as `warnings`, so a caller can branch on what was skipped.
         self.warnings: list[str] = []
-
-    # --- headers & summaries -------------------------------------------------
 
     def heading(self, title: str, subtitle: str = "") -> None:
         """A spaced, intentional command header: ``● create   feature/auth``."""
@@ -302,8 +278,6 @@ class Reporter:
         text.append(f" in {total} — launching {harness}", style="wt.muted")
         self._print(text)
 
-    # --- status rows ---------------------------------------------------------
-
     def _row(
         self,
         symbol: str,
@@ -316,8 +290,6 @@ class Reporter:
     ) -> Text:
         text = Text("  ")
         text.append(f"{symbol} ", style=symbol_style)
-        # Pad to the column, then always keep two spaces before the detail so an
-        # exactly-column-width label never collides with its detail.
         text.append(f"{label:<{_LABEL_W}}", style=label_style)
         if detail:
             text.append("  ")
@@ -336,8 +308,6 @@ class Reporter:
         text.append(timing, style="wt.time")
 
     def _print(self, text: Text) -> None:
-        # soft_wrap: never hard-wrap a status row mid-line (which would drop the
-        # indent on the continuation); let the terminal handle overflow.
         self.console.print(text, soft_wrap=True)
 
     def ok(self, label: str, detail: str = "", timing: str | None = None) -> None:
@@ -351,8 +321,6 @@ class Reporter:
     def fail(self, label: str, detail: str = "failed") -> None:
         if not self.silent:
             self._print(self._row(_FAIL, "wt.fail", label, "wt.fail", detail, "wt.fail"))
-
-    # --- plain messages ------------------------------------------------------
 
     def info(self, msg: str) -> None:
         if not self.quiet:
@@ -396,11 +364,7 @@ class Reporter:
         self._print(text)
 
     def restore_terminal(self) -> None:
-        # Rich restores the cursor itself when a status/live context exits; kept
-        # for API compatibility with callers in the error path.
         self.console.show_cursor(True)
-
-    # --- spinner-backed work -------------------------------------------------
 
     def _spinner(self, label: str, *, style: str, indent: int) -> Padding:
         """An indented spinner whose glyph lands at column ``indent``, so a live
@@ -450,8 +414,6 @@ class Reporter:
         command that would ask a question gets end-of-file instead of waiting."""
         start = time.monotonic()
         if self.verbose:
-            # Stream raw output straight through, to stderr: it is
-            # diagnostics, and stdout stays data only (the --json payload).
             self.note(label, "running")
             returncode = subprocess.run(
                 argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=_stderr_fd()
@@ -484,15 +446,10 @@ class Reporter:
     def _dump_log(self, log: str) -> None:
         log = log.strip()
         if not log or self.silent:
-            return  # --json: the error object names where the output is
+            return
         self.console.print(Text("      output", style="wt.muted"))
         for line in log.splitlines():
             self.console.print(Text("      " + line, style="wt.muted"))
-
-    # --- data views (list / doctor) --------------------------------------------
-    # These render a command's *data* (not progress), so they write to the
-    # stdout data console and don't gate on ``quiet`` — --json callers emit
-    # their own payload and never call them.
 
     def render_list(self, rows: list[WorktreeRow], root_path: str) -> None:
         """Render the worktree list as a clean, aligned, color-coded view.
@@ -583,11 +540,8 @@ class Reporter:
             *(len(r["last_commit"] or "-") for r in rows),
         )
         if budget is None:
-            # Off a terminal a row is never cut: the whole subject.
             table = build_table(combine_identity=False, commit_width=max_subject_width)
         else:
-            # Measure without the real terminal constraint. If the table's
-            # natural width fits, Rich will not shrink any no-wrap core field.
             measure_options = console.options.update_width(max(budget, 1000))
 
             def natural_width(table: Table) -> int:
@@ -596,7 +550,6 @@ class Reporter:
             available_width = max(budget - indent, 1)
             table = build_table(combine_identity=False, commit_width=None)
             if natural_width(table) <= available_width:
-                # A terminal caps the subject at 40 columns.
                 for commit_width in range(min(40, max_subject_width), len("LAST COMMIT") - 1, -1):
                     candidate = build_table(
                         combine_identity=False,
@@ -606,16 +559,12 @@ class Reporter:
                         table = candidate
                         break
             else:
-                # At genuinely narrow widths, keep every core field by placing the
-                # mutable branch directly under its stable name in one identity
-                # column. This is narrower than truncating either value.
                 table = build_table(combine_identity=True, commit_width=None)
 
         def render_root() -> None:
             first_prefix = "  Root: "
             next_prefix = " " * len(first_prefix)
             root = Text(root_path, style="wt.muted")
-            # Off a terminal the root is one line, whatever its length.
             lines = (
                 [root]
                 if budget is None
@@ -691,11 +640,6 @@ class Reporter:
         table.add_column("FIREWALL", no_wrap=True)
         table.add_column("STATUS", no_wrap=True)
 
-        # A narrow terminal must cost the (rare, edge-case) missing-files detail,
-        # never the identity or source columns — Rich would otherwise shrink all
-        # no_wrap columns proportionally and truncate NAME. So budget the fixed
-        # columns and clip the STATUS text ourselves to whatever's left. Off a
-        # terminal there is no budget: the detail stays whole.
         suffix = "  (default)"
         pad, indent, slack, cols = 3, 2, 2, 4
         name_w = max(
@@ -761,9 +705,6 @@ class Reporter:
         row.append(f"{check.name:<{width}}", style=label_style)
         row.append("   ")
         row.append(detail, style=detail_style)
-        # Doctor rows can contain absolute paths. Keep redirected output
-        # byte-stable instead of letting Rich insert width-dependent newlines
-        # with unindented continuation text.
         self.data_console.print(row, soft_wrap=True)
 
     def render_doctor(
@@ -829,7 +770,6 @@ class Reporter:
                 + Text(", ".join(problems), style="wt.detail")
             )
         elif advisories:
-            # The advisory lines above are the takeaway; don't claim all-clear.
             console.print(
                 Text("  ! ", style="wt.warn")
                 + Text("usable, but see the advisory above", style="wt.warn")

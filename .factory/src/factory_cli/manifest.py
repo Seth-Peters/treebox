@@ -37,7 +37,7 @@ class FactoryCode:
 
 @dataclass(frozen=True)
 class Manifest:
-    root: Path  # the directory holding factory.yaml
+    root: Path
     name: str
     version: str
     repository_url: str

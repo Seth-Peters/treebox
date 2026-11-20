@@ -66,8 +66,6 @@ class Candidate:
             except ValueError:
                 continue
             return cls(name=registered.name, branch=branch, path=str(base / relative))
-        # The registration uses another alias for the root. Keep it verbatim
-        # rather than resolving a possibly replaced target into another tree.
         return cls(name=registered.name, branch=branch, path=path)
 
 
@@ -78,9 +76,6 @@ def candidates(repo: str, root: str) -> list[Candidate]:
         path = Path(rec.path)
         if not path_is_under(path, base):
             continue
-        # A root containing the repo (e.g. root = "..") makes the main checkout
-        # pass the filter above; it is never a treebox worktree, so resolving it
-        # here would let enter/teardown act on the repo itself.
         if same_path(path, repo):
             continue
         found.append(Candidate.registered(repo, root, rec.path, rec.branch))
@@ -108,7 +103,7 @@ def resolve_ref(repo: str, root: str, ref: str) -> Candidate:
     for exact in ([c for c in cands if c.name == ref], [c for c in cands if c.branch == ref]):
         if len(exact) == 1:
             return exact[0]
-        if exact:  # two worktrees can't share a branch, but never guess
+        if exact:
             raise AmbiguousRefError(ref, exact)
     partial = [c for c in cands if ref in c.name or (c.branch and ref in c.branch)]
     if len(partial) == 1:

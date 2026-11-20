@@ -35,7 +35,6 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-# Seconds a Keychain read may wait for a person to answer a macOS dialog.
 KEYCHAIN_TIMEOUT = 30
 
 
@@ -62,20 +61,10 @@ class Harness:
     """
 
     name: str
-    # The full fully-autonomous launch argv.
     _argv: tuple[str, ...]
-    # Host dir the subscription login lives in. Kept un-expanded so human
-    # output (doctor advice, launch errors) shows the familiar ~/ form.
     _credential_dir: str
-    # The only login files staged into sandboxes: what the agent needs to
-    # authenticate plus its user-level settings. Everything else in the live
-    # dir (state, history, host-executed hooks) stays on the host.
     _credential_files: tuple[str, ...]
-    # The one staged file that holds the subscription login itself (a JSON
-    # object); the other staged files are settings.
     _login_file: str
-    # The macOS Keychain service where the CLI keeps its login on that
-    # platform instead of ``_login_file`` (None: the file is the only store).
     _keychain_service: str | None = None
 
     def __post_init__(self) -> None:
@@ -162,10 +151,6 @@ class Harness:
         The caller must keep ``dest.parent`` under host control and outside
         all sandbox mounts. Only ``dest`` may be mounted into the sandbox.
         """
-        # Prepare complete files in the host-owned parent, then atomically
-        # replace destination entries. Never open or chmod a sandbox-controlled
-        # file for writing.
-        # Pin the mounted directory so a replacement cannot redirect writes.
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             with ExitStack() as stack:
@@ -236,9 +221,6 @@ CODEX = Harness(
     _login_file="auth.json",
 )
 
-# The registry. Order is user-facing: doctor's login rows and help text list
-# harnesses in this order, and the first entry is the default whose CLI the
-# no-login advice names.
 HARNESSES: tuple[Harness, ...] = (CLAUDE, CODEX)
 
 VALID_HARNESSES: tuple[str, ...] = tuple(h.name for h in HARNESSES)

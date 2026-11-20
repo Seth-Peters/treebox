@@ -47,20 +47,10 @@ from pathlib import Path
 
 from . import git
 
-# The lock file's name inside the git common dir. Keying by the common dir (not
-# by the worktree root) is what makes the lock cover every root and every
-# linked worktree of one repository.
 _REPO_LOCK_FILE = "treebox-repo.lock"
-# How long a caller queues for the repository before giving up. Sized for a
-# slow ``git fetch`` ahead of it in the queue, not for the common case (the
-# section is normally well under a second).
 REPO_LOCK_TIMEOUT = 300.0
-# How long a caller queues for the ports ledger before giving up. The section
-# is a small JSON read-modify-write (normally milliseconds); the limit only
-# turns a stuck holder into a classified failure instead of a hang.
 PORTS_LOCK_TIMEOUT = 30.0
 _POLL_INTERVAL = 0.05
-# Say something once a wait has been noticeable; never for an uncontended lock.
 _ANNOUNCE_AFTER = 1.0
 _BUSY = (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK)
 
@@ -88,14 +78,12 @@ def worktree_lock(path: Path) -> Iterator[None]:
     name = path.name
     try:
         import fcntl
-    except ImportError:  # non-POSIX: locking unsupported, proceed unguarded
+    except ImportError:
         yield
         return
 
     lock_path = _worktree_lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Deliberately not a `with`: the descriptor must stay open (holding the
-    # flock) for the whole yielded block; the finally below closes it.
     fd = open(lock_path, "w")  # noqa: SIM115
     try:
         try:
@@ -134,7 +122,7 @@ def worktree_lock_held(path: Path) -> bool:
             return True
         raise
     finally:
-        os.close(fd)  # also releases the probe's own lock
+        os.close(fd)
     return False
 
 
@@ -151,12 +139,10 @@ def _waiting_lock(
     ``limit`` seconds the error ``stuck()`` is raised."""
     try:
         import fcntl
-    except ImportError:  # non-POSIX: locking unsupported, proceed unguarded
+    except ImportError:
         yield
         return
 
-    # Not a `with`: the descriptor must stay open (holding the flock) for the
-    # whole yielded block; the finally below closes it.
     fd = open(lock_path, "w")  # noqa: SIM115
     try:
         started = time.monotonic()

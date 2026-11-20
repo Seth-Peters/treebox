@@ -53,9 +53,6 @@ def manifest() -> Manifest:
     return load_manifest(FACTORY_DIR)
 
 
-# --- fakes -------------------------------------------------------------------
-
-
 class FakeGitHub:
     def __init__(self, existing: list[Issue] | None = None) -> None:
         self.issues = {i.number: i for i in existing or []}
@@ -117,7 +114,6 @@ class FakeApi:
         }
 
     def threads(self, session_id: str) -> list[dict[str, Any]]:
-        # The real API lists the primary thread too; it repeats the session's events.
         return [
             {"id": "sthr_main", "parent_thread_id": None},
             {"id": "sthr_rev", "parent_thread_id": "sthr_main"},
@@ -135,18 +131,12 @@ def _session(
     )
 
 
-# --- the real factory definition ---------------------------------------------
-
-
 def test_real_factory_definition_is_coherent(manifest: Manifest) -> None:
     assert definition_problems(manifest) == []
 
 
 def test_repo_slug(manifest: Manifest) -> None:
     assert manifest.repo_slug == "Seth-Peters/treebox"
-
-
-# --- lockfile ----------------------------------------------------------------
 
 
 def test_lockfile_resolves_paths_with_or_without_dot_slash() -> None:
@@ -162,9 +152,6 @@ def test_lockfile_errors_on_missing_or_wrong_kind() -> None:
         lock.get("agents/e.md", "agent")
     with pytest.raises(FactoryError, match="expected agent"):
         lock.get("v.yaml", "agent")
-
-
-# --- boundary ----------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -195,9 +182,6 @@ def test_real_boundary(manifest: Manifest) -> None:
     assert boundary_problems(manifest, [".factory/agents/reviewer.md"]) == []
     assert boundary_problems(manifest, [".factory/claude-lock.json"]) != []
     assert boundary_problems(manifest, ["tests/test_units.py"]) != []
-
-
-# --- session plan and messages -----------------------------------------------
 
 
 def test_branch_name_is_issue_numbered_and_safe(manifest: Manifest) -> None:
@@ -247,9 +231,6 @@ def test_start_creates_then_sends_with_session_id(manifest: Manifest) -> None:
     assert "ghp_secret" not in api.sent[0][1]
 
 
-# --- finding and steering runs -----------------------------------------------
-
-
 def test_sessions_for_issue_filters_by_factory_and_issue(manifest: Manifest) -> None:
     api = FakeApi(
         [
@@ -277,9 +258,6 @@ def test_steer_errors_without_active_session(manifest: Manifest) -> None:
         steer(FakeApi([_session("s", "terminated")]), manifest, LOCKED.engineer, 61, "a", "x")
 
 
-# --- transcript --------------------------------------------------------------
-
-
 def test_export_writes_main_once_and_subagent_threads_separately(tmp_path: Path) -> None:
     summary = export(FakeApi(), "sesn_1", tmp_path)
     root = tmp_path / "sesn_1"
@@ -291,9 +269,6 @@ def test_export_writes_main_once_and_subagent_threads_separately(tmp_path: Path)
     data = json.loads((root / "summary.json").read_text())
     assert data["main"]["tools"]["github:create_pull_request"] == 1
     assert data["subagents"]["sthr_rev"]["tools"] == {"read": 1}
-
-
-# --- CLI end to end (throwaway origin, fake GitHub + API) ---------------------
 
 
 def _sh(cwd: Path, *args: str) -> None:
