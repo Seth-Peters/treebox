@@ -9,6 +9,9 @@ echo "== ruff =="
 uv run --extra dev ruff check src tests
 uv run --extra dev ruff format --check src tests
 
+echo "== comment ratchet =="
+python3 scripts/comment_ratchet.py
+
 echo "== mypy =="
 uv run --extra dev mypy
 

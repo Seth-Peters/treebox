@@ -41,6 +41,7 @@ strict mode (configured in `pyproject.toml`):
 uv run --extra dev python -m pytest
 uv run --extra dev ruff check src tests
 uv run --extra dev ruff format --check src tests
+scripts/comment_ratchet.py
 uv run --extra dev mypy
 ```
 
