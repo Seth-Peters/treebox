@@ -189,13 +189,16 @@ run_case() {
   local name="$1" home="$2"
   shift 2
   local rc=0
+  # stdin is /dev/null: a terminal on stdin changes the output (the
+  # credential-prompt fetch line, `docker exec -t`), so the snapshots are the
+  # unattended form wherever the script runs.
   set +e
   env -u TZ -u XDG_CACHE_HOME -u PNPM_HOME -u UV_CACHE_DIR -u npm_config_cache \
       -u npm_config_store_dir -u GOMODCACHE -u CARGO_HOME -u TREEBOX_TEMPLATE_DIR \
       -u NO_COLOR -u FORCE_COLOR -u CLICOLOR_FORCE \
       HOME="$home" TREEBOX_CONFIG="$CFG" TREEBOX_HOME="$ROOT/tbhome" \
       PATH="$SHIM:$PATH" COLUMNS=80 \
-      "${TREEBOX[@]}" "$@" >"$WORK/$name.stdout" 2>"$WORK/$name.stderr"
+      "${TREEBOX[@]}" "$@" </dev/null >"$WORK/$name.stdout" 2>"$WORK/$name.stderr"
   rc=$?
   set -e
   {

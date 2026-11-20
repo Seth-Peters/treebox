@@ -267,6 +267,16 @@ def _mount(
     return spec
 
 
+# Exit status of the hooks probe when the write went through.
+_HOOKS_WRITABLE = 73
+# $1 is the shared hooks dir. Try to create a file in it; a read-only mount
+# refuses that for every user. A missing dir is a failed check, not a pass.
+_HOOKS_PROBE = (
+    '[ -d "$1" ] || { echo "hooks dir is not mounted: $1" >&2; exit 1; }; '
+    'probe="$1/.treebox-readonly-probe.$$"; '
+    f'if ( : > "$probe" ) 2>/dev/null; then rm -f "$probe"; exit {_HOOKS_WRITABLE}; fi'
+)
+
 # The agent runs in the sandbox: its binary comes from the image and its login
 # is a staged copy of the harness login file (what `doctor` checks).
 _FACTS = RunnerFacts(preflight_detail="docker daemon ok", sandboxed=True)
@@ -877,6 +887,9 @@ class DockerRunner:
             reporter.step("image", "built", self._build_command(wt, config), env=env)
             with reporter.task("container", "started"):
                 self._run_engine(self._run_command(wt, config))
+        # Before any workspace-derived code runs in the container (firewall
+        # init is operator-owned; post-create is not).
+        self._require_readonly_hooks(wt)
 
         # Egress lockdown BEFORE post-create: setup runs code derived from the
         # untrusted workspace (uv sync executes the repo's build backend), and
@@ -893,6 +906,36 @@ class DockerRunner:
                 "post-create complete",
                 self._exec_command(wt, ["sh", "-c", str(post_create)], treebox_env=True),
             )
+
+    def _require_readonly_hooks(self, wt: Worktree) -> None:
+        """Fail closed unless the engine really enforces the read-only
+        ``hooks/`` mount. The mount spec is only a request: an engine that
+        accepts ``readonly`` without enforcing it (seen with improvised
+        engines in unprivileged sandboxes) would hand the boxed agent a
+        host-executed hook dir. Asked as in-container root, which a read-only
+        mount stops too, so file ownership cannot make a writable dir look
+        closed. On a conforming engine the write is refused and nothing is
+        created; otherwise the probe removes its own file."""
+        hooks = git.common_dir(wt.repo) / "hooks"
+        proc = self._engine(
+            self._exec_command(wt, ["sh", "-c", _HOOKS_PROBE, "sh", str(hooks)], user="root")[1:]
+        )
+        if proc.returncode == 0:
+            return
+        if proc.returncode == _HOOKS_WRITABLE:
+            raise SandboxError(
+                f"The docker engine did not enforce the read-only mount of {hooks}: "
+                "the sandbox could plant a git hook that runs on the host.",
+                hint="The agent was not launched. Use an engine that enforces read-only "
+                f"bind mounts (Docker Engine or Docker Desktop), then remove this sandbox "
+                f"and create it again: treebox teardown {path_ref(wt.path)}",
+            )
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise SandboxError(
+            f"Could not confirm that {hooks} is read-only in the sandbox"
+            + (f": {detail}" if detail else "."),
+            hint="Check the Docker engine (docker info), then run the same command again.",
+        )
 
     def _firewall_command(self, wt: Worktree) -> list[str]:
         return self._exec_command(wt, list(_FIREWALL_GUARDED), user="root")
