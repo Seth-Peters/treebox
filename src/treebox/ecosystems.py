@@ -1,9 +1,7 @@
 """Ecosystem detection: which package managers a worktree uses, how to run
 their cache-backed setup, and which files feed the lockfile hash.
 
-Open question #3 (caches to manage per ecosystem) is answered here for uv, npm,
-pnpm, go, and cargo. uv/npm/pnpm are the primary, fully-wired set; go/cargo are
-detected and cache-redirected too.
+The supported ecosystems are uv, npm, pnpm, go, and cargo.
 """
 
 from __future__ import annotations
@@ -26,8 +24,7 @@ class Ecosystem:
     """One package manager's full cache wiring — the single source of truth.
 
     Everything derived from an ecosystem (default host cache dir, setup env,
-    container bind mounts) is computed from these fields, so adding an
-    ecosystem is one entry here and nothing to mirror elsewhere.
+    container bind mounts) is computed from these fields.
     """
 
     name: str
@@ -198,7 +195,7 @@ def setup_steps(
 
     When ``cold_cache_root`` is set, every ecosystem's cache is redirected into
     a throwaway directory under it, giving a clean from-source resolution that
-    never touches the shared store (target-state ``--cold``).
+    never touches the shared store.
     """
     steps: list[SetupStep] = []
     for eco in ecosystems:

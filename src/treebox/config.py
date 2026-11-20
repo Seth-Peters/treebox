@@ -1,6 +1,6 @@
 """Typed configuration with user-level TOML discovery.
 
-Config is user-level only by design (open question #2): a repo-level config could
+Config is user-level only by design: a repo-level config could
 run arbitrary commands on the host, so we never read settings from the target repo.
 Resolution order, highest priority first:
 
@@ -187,7 +187,7 @@ def _expand_user_path(value: str | None) -> str | None:
 
 
 def default_caches() -> dict[str, str]:
-    """Default shared cache locations per ecosystem (open question #3).
+    """Default shared cache locations per ecosystem.
 
     Derived from ``ECOSYSTEMS`` — the single source of cache wiring — honoring
     each tool's standard env override so the host and container agree.
@@ -225,8 +225,7 @@ def load_config(path: Path | None = None) -> Config:
         raise ValueError(f"Could not read config {path}: {exc}") from exc
 
     # Reject unknown top-level keys loudly: a typo'd `isolatoin`/`firewal` is
-    # security posture silently not applied, the exact failure the module
-    # docstring's INVALID_CONFIG contract exists to prevent. The vocabulary
+    # security posture silently not applied. The vocabulary
     # is USER_KEYS, never every Config field: an internal field is not a key
     # a user config can set or be pointed at.
     known = sorted(USER_KEYS)
@@ -320,8 +319,7 @@ def _port_range(table: Any, path: Path) -> PortRange:
 
 def _typed(data: dict[str, Any], key: str, want: type, path: Path) -> Any:
     """``data[key]`` (None when absent) after checking its TOML type, so a
-    wrong-typed value is a clean ValueError — the INVALID_CONFIG contract —
-    instead of a TypeError crash or a silently-misbehaving setting downstream.
+    wrong-typed value raises ValueError instead of failing downstream.
     Exact-type check, not isinstance: ``bool`` is an ``int`` subclass, and
     ``firewall = 1`` should be rejected like any other type mismatch."""
     value = data.get(key)

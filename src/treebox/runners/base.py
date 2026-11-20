@@ -86,8 +86,8 @@ RunnerTeardownStatus = Literal["cleaned", "skipped", "failed"]
 class RunnerTeardownResult:
     """Observable result of a runner-specific teardown attempt.
 
-    ``failed`` means a container/image removal was attempted and failed after
-    every remaining cleanup step was still tried. ``remaining`` names each
+    ``failed`` means a container/image removal was attempted and failed.
+    ``remaining`` names each
     runner resource that is still present because a step failed or could not
     run (``"<resource> (<reason>)"``, the cleanup result in ``cleanup.py``):
     while it is non-empty the caller keeps the worktree and its ownership

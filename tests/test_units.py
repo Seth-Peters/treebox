@@ -393,7 +393,6 @@ def test_resolve_ref_name_branch_substring(monkeypatch: pytest.MonkeyPatch):
     # Unique substring of name or branch.
     assert resolve.resolve_ref("/r", ".wt", "up-ci").name == "fix-authz"
     assert resolve.resolve_ref("/r", ".wt", "detach").name == "detached"
-    # Ambiguous substring names the matches; nothing is guessed.
     with pytest.raises(resolve.AmbiguousRefError, match="fix-auth"):
         resolve.resolve_ref("/r", ".wt", "fix-")
     # No match at all.
@@ -2573,8 +2572,8 @@ def test_host_git_pins_exec_shaped_config(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(git.subprocess, "run", fake_run)
 
-    git.is_dirty("/wt")  # routed through the shared _run seam
-    git.has_origin("/r")  # a direct subprocess.run site
+    git.is_dirty("/wt")
+    git.has_origin("/r")
 
     assert captured  # both calls landed
     n = len(git._SAFE_CONFIG)
@@ -3261,9 +3260,6 @@ def test_forge_pr_status_degrades_on_failure(monkeypatch: pytest.MonkeyPatch):
     assert forge.GhForge("github.com").pr_status("/r", "b") is None
 
 
-# --- issue #131 §2: non-CLI gaps -------------------------------------------------
-
-
 def test_get_runner_rejects_unknown_isolation():
     """Defense-in-depth behind validate_config: an isolation mode no runner
     claims is a loud error, never a silent default."""
@@ -3361,9 +3357,8 @@ def test_git_subprocesses_ignore_the_users_global_config(
     "bad", ["setup_hook = 42", "setup_hook = true", "setup_hook = 3.14", "setup_hook = [1, 2]"]
 )
 def test_config_wrong_typed_setup_hook_is_value_error(tmp_path: Path, bad: str):
-    # Valid TOML with a wrong-typed setup_hook used to escape as a TypeError
-    # (issue #139) — it must be the same clean ValueError every other invalid
-    # config value raises, so the CLI maps it to INVALID_CONFIG / exit 2.
+    # Valid TOML with a wrong-typed setup_hook must raise ValueError so the CLI
+    # maps it to INVALID_CONFIG / exit 2.
     cfg_file = tmp_path / "config.toml"
     cfg_file.write_text(bad + "\n")
     with pytest.raises(ValueError, match="setup_hook must be a string or a list of strings"):

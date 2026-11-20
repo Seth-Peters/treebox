@@ -578,16 +578,12 @@ class DockerRunner:
     # --- config rendering ------------------------------------------------------
 
     def _template_config(self) -> ContainerConfig:
-        # load_template_json raises a typed TemplateInvalidError on unreadable
-        # or malformed contents, so every caller (setup, prepare_entry, the
-        # _user fallback) surfaces a classified error instead of a traceback.
+        # load_template_json validates unreadable or malformed contents.
         config = assets.load_template_json(self.config.template, assets.CONFIG_FILE)
         return _require_known_keys(config, assets.CONFIG_FILE, self.config.template)
 
     def _user(self, wt: Worktree) -> str:
-        """The in-container user agent execs run as: from the rendered
-        per-worktree config (which matches the container that was actually
-        created), falling back to the template when none was rendered yet."""
+        """The in-container user agent execs run as."""
         config: Mapping[str, Any]
         try:
             config = json.loads(self._config_file(wt).read_text(encoding="utf-8"))
@@ -1204,13 +1200,7 @@ class DockerRunner:
         return volumes
 
     def teardown(self, wt: Worktree, *, reporter: Reporter) -> RunnerTeardownResult:
-        """Remove the worktree's container with its anonymous volumes, its
-        image (and, when this runner was constructed with ``remove_volumes``,
-        its per-workspace named volumes). Every
-        step runs even when an earlier one failed, and each resource a step
-        could not remove is reported in ``remaining``; the host-owned resource
-        manifest (in the sandbox files dir) is then kept, so a retry still
-        knows what this worktree owns."""
+        """Remove runner-owned resources for ``wt`` and report what remains."""
         if not self._available():
             reporter.fail("container", "not checked · Docker unavailable")
             return RunnerTeardownResult(

@@ -236,9 +236,8 @@ CODEX = Harness(
     _login_file="auth.json",
 )
 
-# The registry. Order is user-facing: doctor's login rows and help text list
-# harnesses in this order, and the first entry is the default whose CLI the
-# no-login advice names.
+# The registry order is user-facing: doctor's login rows and help text list
+# harnesses in this order.
 HARNESSES: tuple[Harness, ...] = (CLAUDE, CODEX)
 
 VALID_HARNESSES: tuple[str, ...] = tuple(h.name for h in HARNESSES)
