@@ -1,9 +1,10 @@
 description: >-
-  Python and uv for the treebox checks and the host-side e2e scenarios. It has
-  no docker engine, so the docker scenarios are SKIP, never PASS.
+  Python and uv for the treebox checks and the host-side e2e scenarios. Docker
+  scenarios run only when a guarded setup probe validates an engine.
 setupCommands:
   # A non-zero exit fails the whole sandbox, so the prefetch is optional.
   - '(cd /workspace/treebox && uv sync --extra dev) || echo "Warning: uv sync skipped" >&2'
+  - 'bash /workspace/treebox/.warp-factory/runners/start-docker.sh || echo "Warning: no docker engine; docker scenarios are SKIP" >&2'
 platform:
   os: linux
   arch: x86_64
