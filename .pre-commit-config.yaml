@@ -27,5 +27,5 @@ repos:
         name: comment ratchet
         entry: python3 scripts/comment_ratchet.py
         language: system
-        types_or: [python, yaml]
+        types_or: [python, yaml, shell, dockerfile]
         pass_filenames: false

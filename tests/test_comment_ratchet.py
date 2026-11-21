@@ -104,6 +104,62 @@ def test_yaml_counts_comments_but_not_pins_or_embedded_scripts(ratchet: ModuleTy
     assert "#anchor" in stripped
 
 
+SHELL = """#!/usr/bin/env bash
+# a header
+# shellcheck disable=SC2317
+set -e  # trailing
+echo "$# args ${#list[@]} ${name#prefix}" 'a # b'
+cat <<'EOF'
+# heredoc text
+EOF
+perl -e '
+  # perl, not shell
+'
+done <<< "$input"
+# after
+"""
+
+DOCKERFILE = """# syntax=docker/dockerfile:1
+# why this base
+FROM python:3.14
+RUN echo "#not" \\
+    # between continued lines
+    && true
+"""
+
+
+def test_shell_counts_comments_outside_quotes_and_heredocs(ratchet: ModuleType) -> None:
+    found = ratchet.comments("run.sh", SHELL)
+    assert [(c.line, c.text, c.own_line) for c in found] == [
+        (2, "# a header", True),
+        (4, "# trailing", False),
+        (13, "# after", True),
+    ]
+    stripped = ratchet.strip("run.sh", SHELL)
+    assert ratchet.comments("run.sh", stripped) == []
+    assert "set -e\n" in stripped
+    assert "# shellcheck disable=SC2317" in stripped
+    assert "# heredoc text" in stripped
+    assert "# perl, not shell" in stripped
+
+
+def test_a_shebang_makes_an_extensionless_file_shell(ratchet: ModuleType) -> None:
+    assert ratchet.language("hooks/pre-push", "#!/bin/sh\n# why\n") == "shell"
+    assert ratchet.language("LICENSE", "# not code\n") is None
+    assert ratchet.comments("LICENSE", "# not code\n") == []
+
+
+def test_dockerfile_counts_comment_lines_but_not_directives(ratchet: ModuleType) -> None:
+    found = ratchet.comments("box/Dockerfile", DOCKERFILE)
+    assert [(c.line, c.text) for c in found] == [
+        (2, "# why this base"),
+        (5, "# between continued lines"),
+    ]
+    stripped = ratchet.strip("box/Dockerfile", DOCKERFILE)
+    assert stripped.startswith("# syntax=docker/dockerfile:1\nFROM python:3.14\n")
+    assert 'echo "#not"' in stripped
+
+
 def test_strip_deletes_comments_and_keeps_directives(ratchet: ModuleType) -> None:
     stripped = ratchet.strip("m.py", SOURCE)
     assert ratchet.python_comments(stripped) == []

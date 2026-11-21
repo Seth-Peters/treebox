@@ -24,7 +24,7 @@ uv run --extra dev python -m pytest tests/test_units.py::test_name   # single te
 uv run --extra dev ruff check src tests # lint
 uv run --extra dev ruff format --check src tests   # format check (drop --check to apply)
 uv run --extra dev mypy                 # strict type check (config in pyproject.toml)
-scripts/comment_ratchet.py              # no Python or YAML file may gain comment or docstring lines (--update after deleting some)
+scripts/comment_ratchet.py              # no Python, YAML, shell or Dockerfile may gain comment or docstring lines (--update after deleting some)
 uv run --extra dev pre-commit install   # install lint/format/strict type-check hooks (see CONTRIBUTING.md)
 scripts/golden-diff.sh                  # diff CLI output against tests/golden snapshots
 ./scripts/validate.sh                   # full gate: lint + typecheck + shell assets + tests + snapshots + smoke
@@ -398,7 +398,7 @@ stage between `implement` and `review`, where a separate worker follows the
   `importlib.resources` — edit them in place rather than rewriting in Python.
 - Do not commit secrets or generated `.env` files.
 - No comments: no `#` comment and no docstring in Python, no `#` comment in
-  YAML. Put the reason in a name, a type, or a test; record a non-obvious
+  YAML, shell or a Dockerfile. Put the reason in a name, a type, or a test; record a non-obvious
   decision in `docs/adr/` (append to the record of its theme). A Typer
   command's help goes in `help=`. `scripts/comment_ratchet.py` fails a file
   that gains a comment line; `scripts/comment-baseline.json` lists the lines

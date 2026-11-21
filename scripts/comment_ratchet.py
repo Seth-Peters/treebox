@@ -14,21 +14,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "comment-baseline.json"
-PATTERNS = ("*.py", "*.yml", "*.yaml")
 DESCRIPTION = (
-    "The comment ratchet: no tracked Python or YAML file may gain comment lines. "
-    "A Python '#' comment counts as one line, a docstring as the lines it spans, "
-    "a YAML '#' comment as one line. scripts/comment-baseline.json holds the lines "
-    "each file still has; a file not listed there allows none. The check fails when "
-    "a file has more lines than its baseline, and when it has fewer until --update "
-    "lowers the baseline. Not counted: noqa / type: ignore / pragma / fmt / ruff / "
-    "mypy / pyright directives, a shebang, an encoding cookie, the version pin after "
-    "a YAML 'uses:', and '#' inside a YAML block scalar (that is the embedded script)."
+    "The comment ratchet: no tracked Python, YAML, shell or Dockerfile may gain "
+    "comment lines. A '#' comment counts as one line, a Python docstring as the "
+    "lines it spans. scripts/comment-baseline.json holds the lines each file still "
+    "has; a file not listed there allows none. The check fails when a file has more "
+    "lines than its baseline, and when it has fewer until --update lowers the "
+    "baseline. Not counted: a shebang; in Python, noqa / type: ignore / pragma / "
+    "fmt / ruff / mypy / pyright directives and an encoding cookie; in YAML, the "
+    "version pin after 'uses:' and '#' inside a block scalar (the embedded script); "
+    "in shell, shellcheck directives and '#' inside quotes or a heredoc; in a "
+    "Dockerfile, the syntax / escape / check / hadolint directives."
 )
 PYTHON_DIRECTIVE = re.compile(r"#\s*(noqa|type:\s*ignore|pragma:|fmt:|ruff:|mypy:|pyright:)")
 ENCODING = re.compile(r"#.*coding[:=]")
 YAML_VERSION_PIN = re.compile(r"\buses:\s*\S+\s+#\s*v?\d[\w.-]*\s*$")
 YAML_BLOCK_SCALAR = re.compile(r"(^|[\s:-])[|>][+-]?\d?[+-]?\s*$")
+SHELL_DIRECTIVE = re.compile(r"#\s*shellcheck\b")
+SHELL_SHEBANG = re.compile(r"#!.*\b(sh|bash|dash|zsh)\b")
+SHELL_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+SHELL_WORD_BREAK = " \t;|&("
+DOCKER_DIRECTIVE = re.compile(r"#\s*(syntax|escape|check)\s*=|#\s*hadolint\b")
 ADVICE = (
     "Say it in the code instead: a name, a type, or a test. A non-obvious decision "
     "goes in docs/adr/. A Typer command's docstring is its --help text: pass help= "
@@ -120,10 +126,93 @@ def yaml_comments(source: str) -> list[Comment]:
     return found
 
 
+def _shell_scan_row(row: str, quote: str) -> tuple[int | None, str, str | None]:
+    heredoc = None
+    index = 0
+    while index < len(row):
+        char = row[index]
+        if quote != "'" and char == "\\":
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or row[index - 1] in SHELL_WORD_BREAK):
+            return index, quote, heredoc
+        elif row.startswith("<<", index) and not row.startswith("<<<", index):
+            opened = SHELL_HEREDOC.match(row, index)
+            if opened:
+                heredoc = opened.group(2)
+                index = opened.end()
+                continue
+        elif row.startswith("<<<", index):
+            index += 3
+            continue
+        index += 1
+    return None, quote, heredoc
+
+
+def shell_comments(source: str) -> list[Comment]:
+    found = []
+    quote = ""
+    heredoc: str | None = None
+    for number, row in enumerate(source.splitlines(), 1):
+        if heredoc is not None:
+            if row.strip() == heredoc:
+                heredoc = None
+            continue
+        started_quoted = bool(quote)
+        column, quote, heredoc = _shell_scan_row(row, quote)
+        if column is None:
+            continue
+        text = row[column:].rstrip()
+        if number == 1 and text.startswith("#!"):
+            continue
+        if SHELL_DIRECTIVE.match(text):
+            continue
+        own_line = not started_quoted and not row[:column].strip()
+        found.append(Comment(number, column, text, own_line))
+    return found
+
+
+def dockerfile_comments(source: str) -> list[Comment]:
+    found = []
+    for number, row in enumerate(source.splitlines(), 1):
+        text = row.strip()
+        if not text.startswith("#") or DOCKER_DIRECTIVE.match(text):
+            continue
+        found.append(Comment(number, len(row) - len(row.lstrip()), text, True))
+    return found
+
+
+def language(name: str, source: str) -> str | None:
+    leaf = name.rsplit("/", 1)[-1]
+    if leaf.endswith(".py"):
+        return "python"
+    if leaf.endswith((".yml", ".yaml")):
+        return "yaml"
+    if leaf == "Dockerfile" or leaf.startswith("Dockerfile.") or leaf.endswith(".Dockerfile"):
+        return "dockerfile"
+    if leaf.endswith((".sh", ".bash")):
+        return "shell"
+    if "." not in leaf and SHELL_SHEBANG.match(source.split("\n", 1)[0]):
+        return "shell"
+    return None
+
+
 def comments(name: str, source: str) -> list[Comment]:
-    if name.endswith(".py"):
+    kind = language(name, source)
+    if kind == "python":
         return sorted(python_comments(source) + docstrings(source), key=lambda c: c.line)
-    return yaml_comments(source)
+    if kind == "yaml":
+        return yaml_comments(source)
+    if kind == "shell":
+        return shell_comments(source)
+    if kind == "dockerfile":
+        return dockerfile_comments(source)
+    return []
 
 
 def strip(name: str, source: str) -> str:
@@ -142,7 +231,7 @@ def strip(name: str, source: str) -> str:
 
 def tracked_files(root: Path) -> list[str]:
     listed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--", *PATTERNS],
+        ["git", "-C", str(root), "ls-files", "-z"],
         check=True,
         capture_output=True,
         text=True,
@@ -153,7 +242,11 @@ def tracked_files(root: Path) -> list[str]:
 def count_all(root: Path) -> dict[str, int]:
     counts = {}
     for name in tracked_files(root):
-        found = comments(name, (root / name).read_text(encoding="utf-8"))
+        try:
+            source = (root / name).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        found = comments(name, source)
         total = sum(comment.lines for comment in found)
         if total:
             counts[name] = total

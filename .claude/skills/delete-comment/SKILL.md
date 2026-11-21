@@ -1,12 +1,12 @@
 ---
 name: delete-comment
-description: Delete comments (Python `#` comments and docstrings, YAML `#` comments) and lower the comment ratchet. Each comment is triaged first, so a decision moves to docs/adr/ and an excuse becomes a GitHub issue before the text is removed. Use for "/delete-comment [paths]", "delete the comments in X", "ratchet the comments down", or when scripts/comment_ratchet.py fails.
+description: Delete comments (Python `#` comments and docstrings; YAML, shell and Dockerfile `#` comments) and lower the comment ratchet. Each comment is triaged first, so a decision moves to docs/adr/ and an excuse becomes a GitHub issue before the text is removed. Use for "/delete-comment [paths]", "delete the comments in X", "ratchet the comments down", or when scripts/comment_ratchet.py fails.
 ---
 
 # Delete comments
 
 This repo carries no comments: no `#` comment and no docstring in Python, no
-`#` comment in YAML. `scripts/comment_ratchet.py` enforces it against
+`#` comment in YAML, shell or a Dockerfile. `scripts/comment_ratchet.py` enforces it against
 `scripts/comment-baseline.json`, the comment lines each file still has (a
 docstring counts as the lines it spans). This skill empties part of that list without losing what the
 comments knew.
@@ -100,10 +100,12 @@ uv run --extra docs mkdocs build --strict
 ```
 
 Files under `.factory/` format with `cd .factory && uv run --extra dev ruff
-format src tests`. `--strip` deletes `#` comments in Python and YAML and keeps directives
-(`noqa`, `type: ignore`, `pragma:`, `fmt:`), shebangs, the version pin after
-a YAML `uses:`, and `#` lines inside a YAML block scalar (the embedded
-script). Docstrings it leaves: delete those by hand, per the three cases in
+format src tests`. `--strip` deletes `#` comments in Python, YAML, shell and Dockerfiles. It
+keeps shebangs, directives (`noqa`, `type: ignore`, `pragma:`, `fmt:`,
+`shellcheck`, Dockerfile `syntax=`), the version pin after a YAML `uses:`,
+and any `#` inside an embedded script (a YAML block scalar, a shell heredoc
+or quoted string). After stripping shell, run `./scripts/validate.sh`: it
+syntax-checks and shellchecks the shell assets. Docstrings it leaves: delete those by hand, per the three cases in
 step 2. `--update` only lowers counts.
 
 A change under `.github/workflows/` needs a push token with the `workflow`
