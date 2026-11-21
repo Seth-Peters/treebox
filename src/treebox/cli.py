@@ -758,7 +758,42 @@ def _dry_run(
     reporter.blank()
 
 
-@app.command()
+_CREATE_HELP = """
+Provision a worktree and launch the agent harness in it.
+
+An explicit NAME becomes the branch, created fresh from origin/<base>
+(feature/auth lives in directory feature--auth). Without NAME or
+--checkout, the worktree starts on a generated treebox/<petname>
+placeholder branch: name the work when it takes shape
+(git branch -m <type>/<short-name>, e.g. feature/user-auth, fix/login-race,
+chore/bump-deps), then push. Every worktree gets a pre-push guard that
+keeps treebox/* refs un-pushable.
+
+A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
+exit status, and the file with its output). The worktree is kept and
+marked unfinished; `treebox enter NAME` or the same create retries setup.
+
+Setup and the agent get, for repo-owned service scripts: TREEBOX_NAME
+(the worktree name), TREEBOX_ID (10 lowercase hex characters, unique on
+this machine, derived from the worktree path), and TREEBOX_PORT_BASE and
+TREEBOX_PORT_COUNT (a port block no other treebox worktree on the machine
+has; the ports table of the user config sets the range). --print and
+--json commands carry them too. A full range fails before anything is made
+(exit 5, PORTS_EXHAUSTED); --dry-run reserves nothing.
+
+To start the agent on a task, put its args after NAME and --
+(create fix-auth -- -p "fix the login race"). A nameless create takes
+no agent args: give a NAME.
+
+When it launches (no --json, --print, --dry-run), create exits with the
+agent's exit code; a non-zero one is named in the last stderr line
+("treebox: agent exited with status N"). SIGINT, SIGTERM or SIGHUP to
+treebox stops the agent (inside the container for docker) and exits
+128+signal (CANCELLED).
+"""
+
+
+@app.command(help=_CREATE_HELP)
 def create(
     name: str | None = typer.Argument(
         None,
@@ -836,38 +871,6 @@ def create(
         show_default=False,
     ),
 ) -> None:
-    """Provision a worktree and launch the agent harness in it.
-
-    An explicit NAME becomes the branch, created fresh from origin/<base>
-    (feature/auth lives in directory feature--auth). Without NAME or
-    --checkout, the worktree starts on a generated treebox/<petname>
-    placeholder branch: name the work when it takes shape
-    (git branch -m <type>/<short-name>, e.g. feature/user-auth, fix/login-race,
-    chore/bump-deps), then push. Every worktree gets a pre-push guard that
-    keeps treebox/* refs un-pushable.
-
-    A failed setup step fails create (exit 1, SETUP_FAILED: the step, its
-    exit status, and the file with its output). The worktree is kept and
-    marked unfinished; `treebox enter NAME` or the same create retries setup.
-
-    Setup and the agent get, for repo-owned service scripts: TREEBOX_NAME
-    (the worktree name), TREEBOX_ID (10 lowercase hex characters, unique on
-    this machine, derived from the worktree path), and TREEBOX_PORT_BASE and
-    TREEBOX_PORT_COUNT (a port block no other treebox worktree on the machine
-    has; the ports table of the user config sets the range). --print and
-    --json commands carry them too. A full range fails before anything is made
-    (exit 5, PORTS_EXHAUSTED); --dry-run reserves nothing.
-
-    To start the agent on a task, put its args after NAME and --
-    (create fix-auth -- -p "fix the login race"). A nameless create takes
-    no agent args: give a NAME.
-
-    When it launches (no --json, --print, --dry-run), create exits with the
-    agent's exit code; a non-zero one is named in the last stderr line
-    ("treebox: agent exited with status N"). SIGINT, SIGTERM or SIGHUP to
-    treebox stops the agent (inside the container for docker) and exits
-    128+signal (CANCELLED).
-    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -994,7 +997,24 @@ def create(
     )
 
 
-@app.command()
+_ENTER_HELP = """
+Re-launch the agent in an existing worktree; refresh .env and re-sync deps if changed.
+
+An unfinished or failed setup runs again; if a setup step fails, enter
+fails too (exit 1, SETUP_FAILED) and the next enter retries it.
+
+Setup and the agent get the same TREEBOX_NAME, TREEBOX_ID,
+TREEBOX_PORT_BASE and TREEBOX_PORT_COUNT as at create; --print and --json
+commands carry them too.
+
+When it launches (no --json, --print), enter exits with the agent's exit
+code; a non-zero one is named in the last stderr line ("treebox: agent
+exited with status N"). SIGINT, SIGTERM or SIGHUP to treebox stops the
+agent (inside the container for docker) and exits 128+signal (CANCELLED).
+"""
+
+
+@app.command(help=_ENTER_HELP)
 def enter(
     ref: str = typer.Argument(
         ...,
@@ -1042,20 +1062,6 @@ def enter(
         None, help="Extra args passed to the agent (after --)."
     ),
 ) -> None:
-    """Re-launch the agent in an existing worktree; refresh .env and re-sync deps if changed.
-
-    An unfinished or failed setup runs again; if a setup step fails, enter
-    fails too (exit 1, SETUP_FAILED) and the next enter retries it.
-
-    Setup and the agent get the same TREEBOX_NAME, TREEBOX_ID,
-    TREEBOX_PORT_BASE and TREEBOX_PORT_COUNT as at create; --print and --json
-    commands carry them too.
-
-    When it launches (no --json, --print), enter exits with the agent's exit
-    code; a non-zero one is named in the last stderr line ("treebox: agent
-    exited with status N"). SIGINT, SIGTERM or SIGHUP to treebox stops the
-    agent (inside the container for docker) and exits 128+signal (CANCELLED).
-    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -1354,13 +1360,15 @@ def _collect_rows(repo_path: str, cfg: Config) -> list[WorktreeRow]:
     return rows
 
 
-@app.command(name="list")
+_LIST_HELP = """List worktrees with live branch, isolation, activity, and freshness."""
+
+
+@app.command(name="list", help=_LIST_HELP)
 def list_cmd(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     root: str | None = typer.Option(None, "--root", help="Worktree root dir."),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """List worktrees with live branch, isolation, activity, and freshness."""
     reporter = Reporter(silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -1613,7 +1621,22 @@ def _parse_selection(raw: str, n: int) -> list[int]:
     return sorted(picked)
 
 
-@app.command()
+_TEARDOWN_HELP = """
+Remove worktree directories (and optionally their branches); caches are left intact.
+
+An incomplete cleanup fails teardown (exit 1, TEARDOWN_INCOMPLETE): it
+names what remains (for example a container docker could not remove) and
+keeps the worktree, its record and its port block, so the same command
+retries. A complete teardown releases the port block. A worktree locked
+with `git worktree lock` is never removed.
+
+Unattended (--json, --non-interactive, or no terminal) there is no
+prompt: pass --yes to confirm. --yes keeps the uncommitted-changes
+check (DIRTY_WORKTREE, exit 5); --force removes those too.
+"""
+
+
+@app.command(help=_TEARDOWN_HELP)
 def teardown(
     refs: list[str] | None = typer.Argument(
         None,
@@ -1652,18 +1675,6 @@ def teardown(
         False, "--verbose", "-v", help="Stream raw command output (to stderr)."
     ),
 ) -> None:
-    """Remove worktree directories (and optionally their branches); caches are left intact.
-
-    An incomplete cleanup fails teardown (exit 1, TEARDOWN_INCOMPLETE): it
-    names what remains (for example a container docker could not remove) and
-    keeps the worktree, its record and its port block, so the same command
-    retries. A complete teardown releases the port block. A worktree locked
-    with `git worktree lock` is never removed.
-
-    Unattended (--json, --non-interactive, or no terminal) there is no
-    prompt: pass --yes to confirm. --yes keeps the uncommitted-changes
-    check (DIRTY_WORKTREE, exit 5); --force removes those too.
-    """
     reporter = Reporter(quiet=quiet, verbose=verbose, silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -1988,7 +1999,21 @@ def _teardown_one(
     )
 
 
-@app.command()
+_DOCTOR_HELP = """
+Check git, the agent, its login, UID/GID, and isolation-specific dependencies.
+
+For the selected harness (--harness, else the config default) doctor
+checks what a launch needs, where the agent runs: on the host, the
+harness binary on PATH and a real login (its login file, or on macOS
+the Keychain item the CLI keeps it in); in a docker sandbox, the login
+file the sandbox gets a copy of (the binary is part of the image and is
+checked at launch). A login dir that merely exists is no login. Those
+two rows are hard checks (exit 1), like git, repo and isolation; the
+other harnesses' logins are shown as optional.
+"""
+
+
+@app.command(help=_DOCTOR_HELP)
 def doctor(
     repo: str = typer.Option(".", "--repo", help="Git repo. Default: current repo."),
     isolation: str | None = typer.Option(
@@ -2005,17 +2030,6 @@ def doctor(
     ),
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """Check git, the agent, its login, UID/GID, and isolation-specific dependencies.
-
-    For the selected harness (--harness, else the config default) doctor
-    checks what a launch needs, where the agent runs: on the host, the
-    harness binary on PATH and a real login (its login file, or on macOS
-    the Keychain item the CLI keeps it in); in a docker sandbox, the login
-    file the sandbox gets a copy of (the binary is part of the image and is
-    checked at launch). A login dir that merely exists is no login. Those
-    two rows are hard checks (exit 1), like git, repo and isolation; the
-    other harnesses' logins are shown as optional.
-    """
     reporter = Reporter(silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -2137,9 +2151,11 @@ def _resolve_version() -> str:
         return __version__
 
 
-@app.command()
+_VERSION_HELP = """Print the version."""
+
+
+@app.command(help=_VERSION_HELP)
 def version() -> None:
-    """Print the version."""
     sys.stdout.write(f"{_resolve_version()}\n")
 
 
@@ -2162,7 +2178,16 @@ def _template_source(name: str) -> str:
     return "bundled"
 
 
-@template_app.command("init")
+_TEMPLATE_INIT_HELP = """
+Copy a template into $TREEBOX_HOME/templates/<name> so you can edit it.
+
+This is the sanctioned replacement for hand-copying the shipped directory:
+it works from any install. Then edit the Dockerfile and container.json and run
+`treebox create <name> --isolation docker --template <name>`.
+"""
+
+
+@template_app.command("init", help=_TEMPLATE_INIT_HELP)
 def template_init(
     name: str = typer.Argument(
         ..., help="Name for the new template (a directory under $TREEBOX_HOME/templates)."
@@ -2175,12 +2200,6 @@ def template_init(
     ),
     json_out: bool = typer.Option(False, "--json", help="Print a machine-readable JSON result."),
 ) -> None:
-    """Copy a template into $TREEBOX_HOME/templates/<name> so you can edit it.
-
-    This is the sanctioned replacement for hand-copying the shipped directory:
-    it works from any install. Then edit the Dockerfile and container.json and run
-    `treebox create <name> --isolation docker --template <name>`.
-    """
     reporter = Reporter(silent=json_out)
     if not is_valid_template_name(name):
         raise _die(
@@ -2338,11 +2357,13 @@ def template_init(
     )
 
 
-@template_app.command("list")
+_TEMPLATE_LIST_HELP = """List selectable templates, their required-file status, and the default."""
+
+
+@template_app.command("list", help=_TEMPLATE_LIST_HELP)
 def template_list(
     json_out: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """List selectable templates, their required-file status, and the default."""
     reporter = Reporter(silent=json_out)
     cfg = _resolve_config(
         reporter,
@@ -2397,19 +2418,22 @@ def template_list(
     )
 
 
-template_app.command(name="ls", hidden=True)(template_list)
+template_app.command(name="ls", hidden=True, help=_TEMPLATE_LIST_HELP)(template_list)
 
 
-@template_app.command("path")
+_TEMPLATE_PATH_HELP = """
+Print the resolved directory for a template.
+
+For scripting — e.g. `cd "$(treebox template path react)"`. This is the
+install-agnostic answer to "where does this template live", including the
+bundled default's location.
+"""
+
+
+@template_app.command("path", help=_TEMPLATE_PATH_HELP)
 def template_path(
     name: str = typer.Argument(assets.DEFAULT_TEMPLATE, help="Template name (default: 'default')."),
 ) -> None:
-    """Print the resolved directory for a template.
-
-    For scripting — e.g. `cd "$(treebox template path react)"`. This is the
-    install-agnostic answer to "where does this template live", including the
-    bundled default's location.
-    """
     reporter = Reporter()
     try:
         path = assets.template_dir(name)
@@ -2460,8 +2484,8 @@ def main(
     install(show_locals=False, suppress=[typer], width=100)
 
 
-app.command(name="ls", hidden=True)(list_cmd)
-app.command(name="rm", hidden=True)(teardown)
+app.command(name="ls", hidden=True, help=_LIST_HELP)(list_cmd)
+app.command(name="rm", hidden=True, help=_TEARDOWN_HELP)(teardown)
 
 
 def run() -> None:

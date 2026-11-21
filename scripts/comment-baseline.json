@@ -46,7 +46,7 @@
   "src/treebox/assets/container/treebox-online": 3,
   "src/treebox/assets/pre-push": 8,
   "src/treebox/cleanup.py": 17,
-  "src/treebox/cli.py": 259,
+  "src/treebox/cli.py": 175,
   "src/treebox/config.py": 56,
   "src/treebox/ecosystems.py": 46,
   "src/treebox/forge.py": 24,
