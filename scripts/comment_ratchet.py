@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""The comment ratchet: no tracked Python file may gain a ``#`` comment.
-
-``scripts/comment-baseline.json`` holds, per file, how many comments it still
-has. A file absent from the baseline allows none. The check fails when a file
-has more comments than its baseline (delete the comment) and when it has fewer
-(run ``--update`` so the lower count becomes the new limit). ``--update`` only
-ever lowers a count.
-
-Directive comments (``noqa``, ``type: ignore``, ``pragma:``, ``fmt:``,
-``ruff:``, ``mypy:``, ``pyright:``), a shebang and an encoding cookie are not
-counted. Docstrings are not comments.
-
-    scripts/comment_ratchet.py            check
-    scripts/comment_ratchet.py --update   lower the baseline to today's counts
-    scripts/comment_ratchet.py --list F   print the comments of file F
-    scripts/comment_ratchet.py --strip F  delete the comments of file F
-"""
-
 from __future__ import annotations
 
 import argparse
+import ast
 import io
 import json
 import re
@@ -31,12 +14,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "comment-baseline.json"
-DIRECTIVE = re.compile(r"#\s*(noqa|type:\s*ignore|pragma:|fmt:|ruff:|mypy:|pyright:)")
+PATTERNS = ("*.py", "*.yml", "*.yaml")
+DESCRIPTION = (
+    "The comment ratchet: no tracked Python or YAML file may gain comment lines. "
+    "A Python '#' comment counts as one line, a docstring as the lines it spans, "
+    "a YAML '#' comment as one line. scripts/comment-baseline.json holds the lines "
+    "each file still has; a file not listed there allows none. The check fails when "
+    "a file has more lines than its baseline, and when it has fewer until --update "
+    "lowers the baseline. Not counted: noqa / type: ignore / pragma / fmt / ruff / "
+    "mypy / pyright directives, a shebang, an encoding cookie, the version pin after "
+    "a YAML 'uses:', and '#' inside a YAML block scalar (that is the embedded script)."
+)
+PYTHON_DIRECTIVE = re.compile(r"#\s*(noqa|type:\s*ignore|pragma:|fmt:|ruff:|mypy:|pyright:)")
 ENCODING = re.compile(r"#.*coding[:=]")
+YAML_VERSION_PIN = re.compile(r"\buses:\s*\S+\s+#\s*v?\d[\w.-]*\s*$")
+YAML_BLOCK_SCALAR = re.compile(r"(^|[\s:-])[|>][+-]?\d?[+-]?\s*$")
 ADVICE = (
-    "Say it in the code instead: a name, a type, a test, or a docstring that "
-    "states a contract. A non-obvious decision goes in docs/adr/. "
-    "The delete-comment skill (.claude/skills/delete-comment) does the whole pass."
+    "Say it in the code instead: a name, a type, or a test. A non-obvious decision "
+    "goes in docs/adr/. A Typer command's docstring is its --help text: pass help= "
+    "instead. The delete-comment skill (.claude/skills/delete-comment) does the "
+    "whole pass."
 )
 
 
@@ -46,10 +43,12 @@ class Comment:
     column: int
     text: str
     own_line: bool
+    lines: int = 1
+    docstring: bool = False
 
 
-def comments(source: str) -> list[Comment]:
-    lines = source.splitlines()
+def python_comments(source: str) -> list[Comment]:
+    rows = source.splitlines()
     found = []
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
         if token.type != tokenize.COMMENT:
@@ -59,28 +58,91 @@ def comments(source: str) -> list[Comment]:
             continue
         if line <= 2 and ENCODING.match(token.string):
             continue
-        if DIRECTIVE.match(token.string):
+        if PYTHON_DIRECTIVE.match(token.string):
             continue
-        own_line = lines[line - 1].lstrip().startswith("#")
+        own_line = rows[line - 1].lstrip().startswith("#")
         found.append(Comment(line, column, token.string, own_line))
     return found
 
 
-def strip(source: str) -> str:
-    lines = source.splitlines(keepends=True)
-    for comment in reversed(comments(source)):
+def docstrings(source: str) -> list[Comment]:
+    found = []
+    owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, owners) or not node.body:
+            continue
+        first = node.body[0]
+        if not isinstance(first, ast.Expr) or not isinstance(first.value, ast.Constant):
+            continue
+        if not isinstance(first.value.value, str):
+            continue
+        span = (first.end_lineno or first.lineno) - first.lineno + 1
+        summary = first.value.value.strip().splitlines()[0] if first.value.value.strip() else ""
+        found.append(Comment(first.lineno, first.col_offset, f'"""{summary}', True, span, True))
+    return found
+
+
+def _yaml_comment_column(row: str) -> int | None:
+    quote = ""
+    index = 0
+    while index < len(row):
+        char = row[index]
+        if quote == '"' and char == "\\":
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or row[index - 1] in " \t"):
+            return index
+        index += 1
+    return None
+
+
+def yaml_comments(source: str) -> list[Comment]:
+    found = []
+    scalar_indent: int | None = None
+    for number, row in enumerate(source.splitlines(), 1):
+        indent = len(row) - len(row.lstrip(" "))
+        if scalar_indent is not None:
+            if not row.strip() or indent > scalar_indent:
+                continue
+            scalar_indent = None
+        column = _yaml_comment_column(row)
+        code = row if column is None else row[:column]
+        if YAML_BLOCK_SCALAR.search(code.rstrip()):
+            scalar_indent = indent
+        if column is None or YAML_VERSION_PIN.search(row):
+            continue
+        found.append(Comment(number, column, row[column:].rstrip(), not code.strip()))
+    return found
+
+
+def comments(name: str, source: str) -> list[Comment]:
+    if name.endswith(".py"):
+        return sorted(python_comments(source) + docstrings(source), key=lambda c: c.line)
+    return yaml_comments(source)
+
+
+def strip(name: str, source: str) -> str:
+    rows = source.splitlines(keepends=True)
+    for comment in reversed(comments(name, source)):
+        if comment.docstring:
+            continue
         index = comment.line - 1
         if comment.own_line:
-            del lines[index]
+            del rows[index]
             continue
-        ending = "\n" if lines[index].endswith("\n") else ""
-        lines[index] = lines[index][: comment.column].rstrip() + ending
-    return "".join(lines)
+        ending = "\n" if rows[index].endswith("\n") else ""
+        rows[index] = rows[index][: comment.column].rstrip() + ending
+    return "".join(rows)
 
 
-def tracked_python_files(root: Path) -> list[str]:
+def tracked_files(root: Path) -> list[str]:
     listed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--", "*.py"],
+        ["git", "-C", str(root), "ls-files", "-z", "--", *PATTERNS],
         check=True,
         capture_output=True,
         text=True,
@@ -90,10 +152,11 @@ def tracked_python_files(root: Path) -> list[str]:
 
 def count_all(root: Path) -> dict[str, int]:
     counts = {}
-    for name in tracked_python_files(root):
-        number = len(comments((root / name).read_text(encoding="utf-8")))
-        if number:
-            counts[name] = number
+    for name in tracked_files(root):
+        found = comments(name, (root / name).read_text(encoding="utf-8"))
+        total = sum(comment.lines for comment in found)
+        if total:
+            counts[name] = total
     return counts
 
 
@@ -124,13 +187,18 @@ def shrunk(counts: dict[str, int], baseline: dict[str, int]) -> dict[str, tuple[
     }
 
 
+def describe(name: str, comment: Comment) -> str:
+    kind = f"docstring, {comment.lines} lines" if comment.docstring else "comment"
+    return f"{name}:{comment.line}: {kind}: {comment.text}"
+
+
 def report_grown(root: Path, over: dict[str, tuple[int, int]]) -> None:
     for name, (allowed, number) in over.items():
-        print(f"{name}: {number} comments, the baseline allows {allowed}", file=sys.stderr)
+        print(f"{name}: {number} comment lines, the baseline allows {allowed}", file=sys.stderr)
         if allowed == 0:
-            for comment in comments((root / name).read_text(encoding="utf-8")):
-                print(f"  {name}:{comment.line}: {comment.text}", file=sys.stderr)
-    print(f"\nComments are banned in Python files. {ADVICE}", file=sys.stderr)
+            for comment in comments(name, (root / name).read_text(encoding="utf-8")):
+                print(f"  {describe(name, comment)}", file=sys.stderr)
+    print(f"\nComments and docstrings are banned. {ADVICE}", file=sys.stderr)
 
 
 def check(root: Path, baseline_path: Path) -> int:
@@ -142,7 +210,8 @@ def check(root: Path, baseline_path: Path) -> int:
     if under:
         for name, (allowed, number) in under.items():
             print(
-                f"{name}: {number} comments, the baseline still allows {allowed}", file=sys.stderr
+                f"{name}: {number} comment lines, the baseline still allows {allowed}",
+                file=sys.stderr,
             )
         print(
             "\nComments were deleted. Lock that in: scripts/comment_ratchet.py --update",
@@ -161,27 +230,32 @@ def update(root: Path, baseline_path: Path, *, init: bool) -> int:
             print("\nThe baseline only goes down; nothing was written.", file=sys.stderr)
             return 1
     save_baseline(baseline_path, counts)
-    print(f"{sum(counts.values())} comments left in {len(counts)} files")
+    print(f"{sum(counts.values())} comment lines left in {len(counts)} files")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--update", action="store_true", help="lower the baseline")
+    mode.add_argument("--update", action="store_true", help="lower the baseline to today's counts")
     mode.add_argument("--init", action="store_true", help="write a first baseline (may raise)")
-    mode.add_argument("--list", nargs="+", metavar="FILE", help="print the comments of FILE")
-    mode.add_argument("--strip", nargs="+", metavar="FILE", help="delete the comments of FILE")
+    mode.add_argument("--list", nargs="+", metavar="FILE", help="print what counts in FILE")
+    mode.add_argument(
+        "--strip",
+        nargs="+",
+        metavar="FILE",
+        help="delete the '#' comments of FILE (docstrings are removed by hand)",
+    )
     args = parser.parse_args(argv)
     if args.list:
         for name in args.list:
-            for comment in comments(Path(name).read_text(encoding="utf-8")):
-                print(f"{name}:{comment.line}: {comment.text}")
+            for comment in comments(name, Path(name).read_text(encoding="utf-8")):
+                print(describe(name, comment))
         return 0
     if args.strip:
         for name in args.strip:
             path = Path(name)
-            path.write_text(strip(path.read_text(encoding="utf-8")), encoding="utf-8")
+            path.write_text(strip(name, path.read_text(encoding="utf-8")), encoding="utf-8")
         return 0
     if args.update or args.init:
         return update(ROOT, BASELINE, init=args.init)

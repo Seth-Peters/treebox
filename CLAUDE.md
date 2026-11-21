@@ -24,7 +24,7 @@ uv run --extra dev python -m pytest tests/test_units.py::test_name   # single te
 uv run --extra dev ruff check src tests # lint
 uv run --extra dev ruff format --check src tests   # format check (drop --check to apply)
 uv run --extra dev mypy                 # strict type check (config in pyproject.toml)
-scripts/comment_ratchet.py              # no Python file may gain a # comment (--update after deleting some)
+scripts/comment_ratchet.py              # no Python or YAML file may gain comment or docstring lines (--update after deleting some)
 uv run --extra dev pre-commit install   # install lint/format/strict type-check hooks (see CONTRIBUTING.md)
 scripts/golden-diff.sh                  # diff CLI output against tests/golden snapshots
 ./scripts/validate.sh                   # full gate: lint + typecheck + shell assets + tests + snapshots + smoke
@@ -397,8 +397,9 @@ stage between `implement` and `review`, where a separate worker follows the
   `treebox-online` build helpers, `container.json`) under `src/treebox/assets/` ship as package data and are read via
   `importlib.resources` — edit them in place rather than rewriting in Python.
 - Do not commit secrets or generated `.env` files.
-- Python carries no `#` comments. Put the reason in a name, a type, a test,
-  or a docstring that states a contract; record a non-obvious decision in
-  `docs/adr/` (append to the record of its theme). `scripts/comment_ratchet.py`
-  fails a file that gains one; `scripts/comment-baseline.json` lists the
-  comments still to remove, and the `delete-comment` skill removes them.
+- No comments: no `#` comment and no docstring in Python, no `#` comment in
+  YAML. Put the reason in a name, a type, or a test; record a non-obvious
+  decision in `docs/adr/` (append to the record of its theme). A Typer
+  command's help goes in `help=`. `scripts/comment_ratchet.py` fails a file
+  that gains a comment line; `scripts/comment-baseline.json` lists the lines
+  still to remove, and the `delete-comment` skill removes them.

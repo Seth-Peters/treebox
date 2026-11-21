@@ -1,8 +1,8 @@
 # Decision records
 
-The reasons behind treebox's non-obvious choices. The Python source carries
-no comments (`scripts/comment_ratchet.py` enforces it), so a reason that a
-name, a type, a test or a docstring cannot carry lives here. Each record
+The reasons behind treebox's non-obvious choices. The source carries no
+comments and no docstrings (`scripts/comment_ratchet.py` enforces it), so a
+reason that a name, a type or a test cannot carry lives here. Each record
 groups the decisions of one theme, and each decision names the module and
 symbol it governs.
 
