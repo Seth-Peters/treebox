@@ -153,3 +153,16 @@ In verbose mode a step's raw output is streamed straight through to stderr.
 It is diagnostics, and stdout stays data only (the `--json` payload).
 
 Where: `output.py` · `Reporter.step`
+
+### No result file and no `run` verb
+
+A coordinator must tell "treebox failed" from "the agent exited N", and the
+agent's exit code passes through even where it collides with treebox's own
+codes 1 to 5. Two designs were rejected: a `--result-file` the caller reads
+afterwards, and a `treebox run` verb, which would make treebox own tasks
+(that is the coordinator's job). The message carries the difference instead:
+every treebox failure is a classified error object, and an agent exit is
+named in one final stderr line with a fixed prefix.
+
+Decided: 12 November 2026, issue #64.
+Where: `cli.py` · `AGENT_EXIT_PREFIX`

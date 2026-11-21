@@ -162,3 +162,22 @@ setting no limits. The worktree's recorded limits are authoritative, so a
 missing template must not block entry to an existing worktree.
 
 Where: `cli.py` · `_check_entry_resources`
+
+### On macOS the login file wins and the Keychain is the fallback
+
+One private seam reads a harness's login: the login file first; only when it
+is absent, on macOS, and for a harness that declares a Keychain service, this
+user's Keychain item. No caller knows about the Keychain or the platform, so
+Linux never runs the `security` tool and a Mac with the file uses the file.
+The item is selected by service and account: selecting by service alone
+returned a stale item of another account, which only a test on a real Mac
+found. The read is time-limited with no stdin, and a timeout or refusal is
+no login. A token the agent refreshes in the sandbox is written to the
+staged copy only, never back to the Keychain. Rejected: a docker-only branch
+in `cli.py`, and an attribute-only probe for the host row of `doctor` (host
+and docker would then disagree). Not tested: refresh-token rotation between
+the host's copy and the sandbox's.
+
+Decided: 13 November 2026, PR #90.
+Where: `harnesses.py` · `Harness._read`, `Harness.login`,
+`Harness.stage_credentials`

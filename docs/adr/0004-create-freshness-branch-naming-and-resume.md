@@ -210,3 +210,17 @@ apart portably. treebox checks the path itself (without following
 symlinks) and raises the destination conflict when it is a directory.
 
 Where: `provision.py` · `_copyfile_no_follow`, `_is_directory_no_follow`
+
+### Submodule content is copied from the main checkout, never fetched
+
+treebox runs no `git submodule update`. The worktree branch's own
+`.gitmodules` decides which paths exist and is never written; a path is
+copied only when the main checkout also declares it and has it on disk, and
+the rest are skipped with a note. A real submodule update was rejected: it
+needs network and credentials per submodule and would make `create` slow and
+able to fail in new ways. The cost is stated in the docs: copied submodule
+content mirrors the main checkout, so it can be at another commit than the
+branch pins.
+
+Decided: issue #62, PR #77.
+Where: `provision.py` · `plan_submodules`, `copy_submodules`

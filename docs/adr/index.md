@@ -16,6 +16,10 @@ symbol it governs.
 - [0008 · Ports, resource limits, and worktree identity](0008-ports-resource-limits-and-worktree-identity.md)
 - [0009 · Templates, registries, and config vocabulary](0009-templates-registries-and-config-vocabulary.md)
 - [0010 · Factory CLI](0010-factory-cli.md)
+- [0011 · Product principles](0011-product-principles.md)
+- [0012 · The bundled sandbox image](0012-the-bundled-sandbox-image.md)
+- [0013 · Verification and CI](0013-verification-and-ci.md)
+- [0014 · The Runner protocol contract](0014-the-runner-protocol-contract.md)
 
 To add a decision, append it to the record whose theme it belongs to. Start
 a new record, with the next number, only for a new theme.

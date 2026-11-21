@@ -32,6 +32,10 @@ nav:
       - adr/0008-ports-resource-limits-and-worktree-identity.md
       - adr/0009-templates-registries-and-config-vocabulary.md
       - adr/0010-factory-cli.md
+      - adr/0011-product-principles.md
+      - adr/0012-the-bundled-sandbox-image.md
+      - adr/0013-verification-and-ci.md
+      - adr/0014-the-runner-protocol-contract.md
 
 theme:
   name: material

@@ -152,3 +152,31 @@ mistake and raises `ResourceLimitError`; it is not coerced. A boolean is
 rejected explicitly, because Python treats `bool` as an `int`.
 
 Where: `resources.py` · `from_mapping`
+
+### No resource limits by default
+
+treebox caps nothing unless asked. Limits are options (`--cpus`, `--memory`,
+`--pids-limit`, `[resources]`, the template), and each has verbose,
+agent-readable help. Default caps were rejected: a limit nobody chose fails
+work in ways that are hard to trace back to treebox.
+
+Decided: 12 November 2026, issue #67.
+Where: `resources.py` · `ResourceLimits`; `cli.py` · `_CPUS_HELP`
+
+### One limit vocabulary, a fixed precedence, and a refused mismatch
+
+There is one generic vocabulary (`cpus`, `memory`, `pids`) for every runner;
+the per-runner flags proposed in PR #51 (`--sbx-cpus`, `--sbx-memory`) were
+rejected because they would give treebox two vocabularies. Per field the
+order is flag, then user config, then operator template. A template that
+sets one limit twice with different values is `TEMPLATE_INVALID`, so the
+result never depends on Docker's last-flag-wins. On the host runner an
+explicit flag is an error (`RESOURCE_UNSUPPORTED`), while a config or
+template value is skipped with a note, so one `[resources]` table does not
+break host worktrees. On `enter`, a limit that differs from the recorded one
+and cannot be applied to the existing container is refused
+(`RESOURCE_MISMATCH`), never applied silently and never ignored.
+
+Decided: PR #84.
+Where: `cli.py` · `_creation_limits`, `_refuse_unsupported_limits`,
+`_check_entry_resources`; `runners/docker.py` · `_split_limit_args`

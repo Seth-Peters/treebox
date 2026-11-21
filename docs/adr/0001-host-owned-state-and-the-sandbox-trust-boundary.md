@@ -253,3 +253,29 @@ executes the repo's build backend), so the lockdown has to exist first.
 `post-create.sh` itself fails closed if this ordering is ever lost.
 
 Where: `runners/docker.py` · `DockerRunner.setup`
+
+### Nothing in the worktree's git dir is state: the setup result lives in the record
+
+treebox keeps no state file in the sandbox-writable git dir. The setup
+result (`pending`, `failed`, `done` plus the lockfile hash) is a required key
+of the host-owned record, cleanup progress is never persisted, and worktree
+health is computed, never stored. Issue #57 first proposed keeping the old
+state file with fewer fields. That was rejected: a sandbox that could write
+"setup done" could make treebox skip setup forever or report stale
+dependencies as fresh.
+
+Decided: PR #83.
+Where: `record.py` · `WorktreeRecord.setup`; `lifecycle.py` · `SetupResult`
+
+### Anonymous volumes go with the container; data that must survive needs a named volume
+
+Teardown removes a container's anonymous volumes together with it. The
+first call was to fix only the e2e template that leaked them and leave the
+product alone. It was reversed on scale: each `create` and `teardown` of an
+image with a `VOLUME` left one volume behind, so hundreds of creates leave
+hundreds. The consequence is deliberate: data in an anonymous volume is gone
+at teardown, and a template that needs data to outlive the sandbox declares
+a named volume, which only `--remove-volumes` and the manifest can remove.
+
+Decided: 15 November 2026, PRs #100 and #101.
+Where: `runners/docker.py` · `DockerRunner.teardown`
